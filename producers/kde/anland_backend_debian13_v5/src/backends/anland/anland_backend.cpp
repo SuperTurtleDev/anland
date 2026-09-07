@@ -506,7 +506,7 @@ void AnlandBackend::onReconnectTimer()
     AnlandEglLayer *layer = m_outputs[0]->eglLayer();
     if (layer && !layer->importBuffers(get_buf_count(m_display))) {
         qCWarning(KWIN_ANLAND) << "failed to import consumer buffer generation";
-        reject_consumer_resources(m_display);
+        enter_fallback(m_display);
         return;
     }
 

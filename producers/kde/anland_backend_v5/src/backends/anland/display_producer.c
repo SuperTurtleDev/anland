@@ -33,14 +33,12 @@ struct display_ctx {
     struct buf_info dmabuf_infos[MAX_BUFS];
     int      buf_count;
 
-    void (*pre_release_cb)(void *);
-    void  *pre_release_userdata;
     void (*fallback_cb)(void *);
     void  *fallback_userdata;
 };
 
 /*
- * Release every consumer-side resource (dmabuf fds, the five picked-up fds and the
+ * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
  * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
  * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
  */
@@ -63,14 +61,11 @@ static void release_consumer_resources(display_ctx *ctx)
     if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
 }
 
-static void enter_fallback(display_ctx *ctx)
+void enter_fallback(display_ctx *ctx)
 {
     if (ctx->fallback)
         return;
     ctx->fallback = true;
-
-    if (ctx->pre_release_cb)
-        ctx->pre_release_cb(ctx->pre_release_userdata);
 
     release_consumer_resources(ctx);
 
@@ -81,7 +76,7 @@ static void enter_fallback(display_ctx *ctx)
 /*
  * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
  * with a short timeout so it returns promptly when no consumer is up yet. On
- * success the five fds and shm_ptr are installed on ctx; the caller releases them
+ * success the four fds and shm_ptr are installed on ctx; the caller releases them
  * via release_consumer_resources() on any later failure. Returns 0 / -1.
  */
 static int pickup_fds(display_ctx *ctx)
@@ -296,10 +291,14 @@ int trigger_refresh(display_ctx *ctx)
         c->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
     }
-    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+    const ssize_t sent = sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (ctx->pending_render_fence >= 0) {
         close(ctx->pending_render_fence);
         ctx->pending_render_fence = -1;
+    }
+    if (sent != (ssize_t)iov.iov_len) {
+        enter_fallback(ctx);
+        return -1;
     }
     return 0;
 }
@@ -328,8 +327,10 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
      * here can only mean the stream desynced, so fall back instead of leaving
      * unconsumed bytes wedged in the socket. */
     uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
-    if (recv_all(ctx->data_fd, msg_buf, sizeof(msg_buf)) < 0)
+    if (recv_all(ctx->data_fd, msg_buf, sizeof(msg_buf)) < 0){
+        enter_fallback(ctx);
         return -1;
+    }
 
     struct data_msg hdr;
     memcpy(&hdr, msg_buf, sizeof(hdr));
@@ -341,54 +342,6 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
     memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
     return 1;
 }
-int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
-                                int *fd_count, int timeout_ms)
-{
-    *fd_count = 0;
-    if (ctx->fallback)
-        return 0;
-
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
-    if (ret <= 0)
-        return 0;
-
-    if (pfd.revents & (POLLHUP | POLLERR)) {
-        enter_fallback(ctx);
-        return -1;
-    }
-
-    struct data_msg hdr;
-    int got = 0;
-    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
-    if (n < (int)sizeof(struct data_msg)) {
-        for (int i = 0; i < got; i++)
-            close(fds[i]);
-        return -1;
-    }
-    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
-        for (int i = 0; i < got; i++)
-            close(fds[i]);
-        return -1;
-    }
-    *fd_count = got;
-    return 1;
-}
-
-int push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args)
-{
-    struct OutputEvent ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = OUTPUT_TYPE_RESOURCES_REQUEST;
-    ev.resources_request.type = service_type;
-    if (args) {
-        ev.resources_request.args[0] = args[0];
-        ev.resources_request.args[1] = args[1];
-        ev.resources_request.args[2] = args[2];
-    }
-    return push_output_event(ctx, &ev);
-}
-
 int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
 {
     if (ctx->fallback)
@@ -442,13 +395,6 @@ int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, i
         return -1;
     return 1;
 }
-int set_pre_release_callback(display_ctx *ctx, void (*on_pre_release)(void *), void *userdata)
-{
-    ctx->pre_release_cb = on_pre_release;
-    ctx->pre_release_userdata = userdata;
-    return 0;
-}
-
 int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
 {
     ctx->fallback_cb = on_fallback;
@@ -538,4 +484,44 @@ int get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info)
         return -1;
     *info = ctx->dmabuf_infos[idx];
     return 0;
+}
+
+int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
+                                int *fd_count, int timeout_ms)
+{
+    *fd_count = 0;
+    if (ctx->fallback)
+        return 0;
+
+    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret <= 0)
+        return 0;
+
+    if (pfd.revents & (POLLHUP | POLLERR)) {
+        enter_fallback(ctx);
+        return -1;
+    }
+
+    struct data_msg hdr;
+    int got = 0;
+    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
+    if (n < (int)sizeof(struct data_msg)) {
+        for (int i = 0; i < got; i++)
+            close(fds[i]);
+        enter_fallback(ctx);
+        return -1;
+    }
+    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
+        for (int i = 0; i < got; i++)
+            close(fds[i]);
+        enter_fallback(ctx);//broken
+        return -1;
+    }
+    *fd_count = got;
+    return 1;
+}
+
+int get_service_fds(display_ctx *ctx, int *fds, int max_fds, int timeout_ms) {
+    return poll_input_event_extend_fds(ctx, fds, max_fds, timeout_ms);
 }

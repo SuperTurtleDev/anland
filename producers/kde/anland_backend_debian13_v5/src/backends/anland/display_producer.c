@@ -63,7 +63,7 @@ static void release_consumer_resources(display_ctx *ctx)
     if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
 }
 
-static void enter_fallback(display_ctx *ctx)
+void enter_fallback(display_ctx *ctx)
 {
     if (ctx->fallback)
         return;

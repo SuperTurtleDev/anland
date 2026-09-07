@@ -291,10 +291,14 @@ int trigger_refresh(display_ctx *ctx)
         c->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
     }
-    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+    const ssize_t sent = sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (ctx->pending_render_fence >= 0) {
         close(ctx->pending_render_fence);
         ctx->pending_render_fence = -1;
+    }
+    if (sent != (ssize_t)iov.iov_len) {
+        enter_fallback(ctx);
+        return -1;
     }
     return 0;
 }
@@ -323,8 +327,10 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
      * here can only mean the stream desynced, so fall back instead of leaving
      * unconsumed bytes wedged in the socket. */
     uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
-    if (recv_all(ctx->data_fd, msg_buf, sizeof(msg_buf)) < 0)
+    if (recv_all(ctx->data_fd, msg_buf, sizeof(msg_buf)) < 0){
+        enter_fallback(ctx);
         return -1;
+    }
 
     struct data_msg hdr;
     memcpy(&hdr, msg_buf, sizeof(hdr));
@@ -480,8 +486,10 @@ int get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info)
     return 0;
 }
 
-int poll_input_event_extend_fds(display_ctx *ctx, int* fds, int fd_count, int timeout_ms)
+int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
+                                int *fd_count, int timeout_ms)
 {
+    *fd_count = 0;
     if (ctx->fallback)
         return 0;
 
@@ -494,17 +502,24 @@ int poll_input_event_extend_fds(display_ctx *ctx, int* fds, int fd_count, int ti
         enter_fallback(ctx);
         return -1;
     }
-    struct data_msg hdr;
-    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, fd_count, &fd_count);
-    if (n < (int)sizeof(struct data_msg) || fd_count < 1)
-        return -1;
 
-    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
-        for (int i = 0; i < fd_count; i++)
+    struct data_msg hdr;
+    int got = 0;
+    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
+    if (n < (int)sizeof(struct data_msg)) {
+        for (int i = 0; i < got; i++)
             close(fds[i]);
+        enter_fallback(ctx);
         return -1;
     }
-    return fd_count;
+    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
+        for (int i = 0; i < got; i++)
+            close(fds[i]);
+        enter_fallback(ctx);//broken
+        return -1;
+    }
+    *fd_count = got;
+    return 1;
 }
 
 int get_service_fds(display_ctx *ctx, int *fds, int max_fds, int timeout_ms) {
