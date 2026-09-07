@@ -290,10 +290,14 @@ int trigger_refresh(display_ctx *ctx)
         c->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
     }
-    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+    const ssize_t sent = sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (ctx->pending_render_fence >= 0) {
         close(ctx->pending_render_fence);
         ctx->pending_render_fence = -1;
+    }
+    if (sent != (ssize_t)iov.iov_len) {
+        enter_fallback(ctx);
+        return -1;
     }
     return 0;
 }
@@ -323,7 +327,10 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
      * unconsumed bytes wedged in the socket. */
     uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
     if (recv_all(ctx->data_fd, msg_buf, sizeof(msg_buf)) < 0)
+    {
+        enter_fallback(ctx);
         return -1;
+    }
 
     struct data_msg hdr;
     memcpy(&hdr, msg_buf, sizeof(hdr));
@@ -359,11 +366,13 @@ int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
     if (n < (int)sizeof(struct data_msg)) {
         for (int i = 0; i < got; i++)
             close(fds[i]);
+        enter_fallback(ctx);
         return -1;
     }
     if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
         for (int i = 0; i < got; i++)
             close(fds[i]);
+        enter_fallback(ctx);
         return -1;
     }
     *fd_count = got;
@@ -440,8 +449,10 @@ int poll_input_event_extend_data(display_ctx *ctx, void *payload, size_t size, i
         enter_fallback(ctx);
         return -1;
     }
-    if (recv_all(ctx->data_fd, payload, size) < 0)
+    if (recv_all(ctx->data_fd, payload, size) < 0) {
+        enter_fallback(ctx);
         return -1;
+    }
     return 1;
 }
 
@@ -462,6 +473,11 @@ int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *u
 bool is_fallback(display_ctx *ctx)
 {
     return ctx->fallback;
+}
+
+void reject_consumer_resources(display_ctx *ctx)
+{
+    enter_fallback(ctx);
 }
 
 int try_exit_fallback(display_ctx *ctx)

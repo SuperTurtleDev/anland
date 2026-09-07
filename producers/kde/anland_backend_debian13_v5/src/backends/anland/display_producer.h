@@ -68,6 +68,11 @@ int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *
 
 bool is_fallback(display_ctx *ctx);
 
+/* Reject the currently acquired consumer generation after a producer-side import
+ * or validation failure. Moves the transport back to fallback, releases all
+ * consumer-owned resources and fires fallback callbacks just like a disconnect. */
+void reject_consumer_resources(display_ctx *ctx);
+
 /* Attempt to leave fallback: pick up the consumer fds and immediately receive the
  * dmabuf set (the consumer sends the dmabufs right after the fd handshake). Clears
  * fallback only when BOTH the fds and the dmabufs are in hand, so on a 0 return the
