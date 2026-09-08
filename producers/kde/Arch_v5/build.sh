@@ -103,7 +103,9 @@ prepare_kwin_stage() {
 
     # Keep the archive root aligned with the upstream source directory. The
     # PKGBUILD can therefore extract it without relying on the checkout's path.
-    cp -a "$BACKEND_SRC/src" "$KWIN_OVERLAY_ROOT/kwin-$VERSION/"
+    # -L dereferences symlinks so repo-relative links (libdisplay_producer/)
+    # become real files instead of dangling symlinks inside the tarball.
+    cp -aL "$BACKEND_SRC/src" "$KWIN_OVERLAY_ROOT/kwin-$VERSION/"
     tar -cf "$KWIN_STAGE/anland-overlay.tar" -C "$KWIN_OVERLAY_ROOT" "kwin-$VERSION/src/backends/anland"
 
     if [[ -n "$LOCAL_KWIN_TARBALL" ]]; then

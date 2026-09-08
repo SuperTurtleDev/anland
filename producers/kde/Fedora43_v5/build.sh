@@ -98,7 +98,9 @@ build_pkg_rpm() {
     if [ -d "$overlay_dir" ]; then
         log "Packing overlay '$overlay_dir' into Source2 tarball"
         local overlay_tar="anland-overlay.tar"
-        tar cf "$WORKDIR/$src/$overlay_tar" -C "$overlay_dir" .
+        # --dereference packs symlink targets as real files so repo-relative
+        # links (libdisplay_producer/) don't dangle inside the source RPM.
+        tar --dereference -cf "$WORKDIR/$src/$overlay_tar" -C "$overlay_dir" .
         cp "$WORKDIR/$src/$overlay_tar" ~/rpmbuild/SOURCES/
 
         sed -i "/^Source1:/a Source2: anland-overlay.tar" "$spec"

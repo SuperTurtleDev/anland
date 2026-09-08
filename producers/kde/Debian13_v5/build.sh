@@ -59,7 +59,10 @@ ensure_deb_src() {
     if ! $SUDO grep -rqsE '^Types:.*deb-src|^deb-src ' \
             /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
         log "Enabling deb-src repositories"
-        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then
+            $SUDO sed -i 's/^Types: deb$/Types: deb deb-src/' \
+                /etc/apt/sources.list.d/debian.sources
+        elif [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
             $SUDO sed -i 's/^Types: deb$/Types: deb deb-src/' \
                 /etc/apt/sources.list.d/ubuntu.sources
         elif [ -f /etc/apt/sources.list ]; then
@@ -90,8 +93,10 @@ build_pkg() {
     # ---- overlay: copy local overrides into the source tree if present ------
     local overlay_dir="$SCRIPT_DIR/$src"
     if [ -d "$overlay_dir" ]; then
-        log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
-        cp -a "$overlay_dir/." "$tree/"
+        log "Overlaying '$overlay_dir' -> $tree (overwrite-merge, dereference symlinks)"
+        # -L dereferences symlinks so repo-relative links (libdisplay_producer/)
+        # become real files instead of dangling symlinks in the build tree.
+        cp -aL "$overlay_dir/." "$tree/"
     fi
 
     log "Applying patch: $patch -> $tree"

@@ -1,0 +1,137 @@
+name: Build Producers (aarch64)
+
+# Rebuilds the patched compositor + Xwayland packages for every supported
+# distro target as native aarch64 builds, and publishes one artifact per
+# matrix leg (.deb/.ddeb, .rpm, or pacman packages).
+#
+# The runners are GitHub's free arm64 hosted runners, which are only
+# available to public repositories. On a private fork these jobs queue
+# forever — switch `runs-on` to an x86 label and set up QEMU binfmt
+# (docker/setup-qemu-action) instead.
+#
+# Each leg runs the unmodified producers/<distro>/build.sh inside a container
+# of the target distro, so apt/dnf/makepkg resolve exactly the package
+# versions the on-device instructions use. Backend sources symlinked into the
+# overlays are dereferenced by the build scripts, so no repo layout is needed
+# inside the container.
+
+on:
+  push:
+    branches: [ '**' ]
+    paths:
+      - 'producers/**'
+      - 'common/**'
+      - 'libdisplay_producer/**'
+      - '.github/workflows/producers.yml'
+  pull_request:
+    paths:
+      - 'producers/**'
+      - 'common/**'
+      - 'libdisplay_producer/**'
+      - '.github/workflows/producers.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: producers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04-arm
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # KDE (kwin) producers
+          - name: kwin-ubuntu-2604
+            image: ubuntu:26.04
+            family: deb
+            script: producers/kde/ubuntu2604_v5/build.sh
+          - name: kwin-debian-13
+            image: debian:13
+            family: deb
+            script: producers/kde/Debian13_v5/build.sh
+          - name: kwin-fedora-43
+            image: fedora:43
+            family: rpm
+            script: producers/kde/Fedora43_v5/build.sh
+          - name: kwin-arch-arm
+            image: lfdevs/archlinuxarm:base-devel
+            family: pacman
+            script: producers/kde/Arch_v5/build.sh
+          # GNOME (mutter) producers
+          - name: mutter-ubuntu-2604
+            image: ubuntu:26.04
+            family: deb
+            script: producers/gnome/Ubuntu2604_v5/build.sh
+          - name: mutter-debian-13
+            image: debian:13
+            family: deb
+            script: producers/gnome/Debian13_v5/build.sh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # dpkg-buildpackage and apt-get source are not in the minimal Debian and
+      # Ubuntu images. The Fedora script installs its own tooling via dnf, and
+      # the pacman leg bootstraps below.
+      - name: Bootstrap build tools (deb)
+        if: matrix.family == 'deb'
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+              build-essential devscripts fakeroot patch git
+
+      # makepkg refuses to run as root: build as an unprivileged user with
+      # passwordless sudo (makepkg -s invokes `sudo pacman` for missing
+      # makedepends). INSTALL=0 keeps the built packages out of the
+      # disposable build container.
+      - name: Bootstrap build tools (pacman)
+        if: matrix.family == 'pacman'
+        run: |
+          pacman -Syyu --noconfirm base-devel sudo git
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build packages
+        if: matrix.family != 'pacman'
+        env:
+          WORKDIR: ${{ github.workspace }}/out
+        run: bash ${{ matrix.script }}
+
+      - name: Build packages (pacman)
+        if: matrix.family == 'pacman'
+        env:
+          WORKDIR: ${{ github.workspace }}/out
+        run: |
+          su builder -s /bin/bash -c \
+            "cd '$GITHUB_WORKSPACE' && WORKDIR='$WORKDIR' INSTALL=0 bash '${{ matrix.script }}'"
+
+      # Everything the scripts emit that is worth shipping: binaries, debug
+      # symbol packages (.ddeb / *-dbgsym .deb), and distro packages. Source
+      # rpms and inter.sources build byproducts are left behind.
+      - name: Collect packages
+        run: |
+          mkdir -p dist
+          find "$GITHUB_WORKSPACE/out" -type f \( \
+              -name '*.deb' -o -name '*.ddeb' -o \
+              \( -name '*.rpm' ! -name '*.src.rpm' \) -o \
+              -name '*.pkg.tar.*' \) -print -exec cp -t dist/ {} +
+          ls -lh dist/
+          [ -n "$(ls -A dist)" ] || { echo '::error::no packages were produced'; exit 1; }
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: anland-${{ matrix.name }}-aarch64
+          path: dist/
+          if-no-files-found: error
