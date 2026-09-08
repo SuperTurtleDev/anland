@@ -121,6 +121,12 @@ export JOBS="${JOBS:-$(nproc)}"
 INSTALL="${INSTALL:-1}"
 [[ "$INSTALL" == '0' || "$INSTALL" == '1' ]] || die 'INSTALL must be 0 or 1'
 MAKEPKG_ARGS=(-C -f -s --clean)
+# With non-interactive stdin (CI, piped ssh) makepkg's internal `pacman -S`
+# for missing deps would sit at the "Proceed with installation?" prompt,
+# read EOF, and abort. makepkg forwards --noconfirm to those pacman calls.
+if [[ ! -t 0 ]]; then
+    MAKEPKG_ARGS+=(--noconfirm)
+fi
 if [[ "$INSTALL" == '1' ]]; then
     log "Building and installing tracked xorg-xwayland and kwin packages (-j$JOBS)"
 else
