@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../common/protocol.h"
+#include "protocol.h"
 
 typedef struct display_ctx display_ctx;
 

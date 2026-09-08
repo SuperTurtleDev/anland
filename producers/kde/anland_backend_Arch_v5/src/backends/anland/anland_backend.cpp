@@ -553,22 +553,16 @@ void AnlandBackend::onReconnectTimer()
         return; // still down, keep retrying
     }
 
+    AnlandEglLayer *layer = m_outputs.isEmpty() ? nullptr : m_outputs[0]->eglLayer();
+    if (layer && !importBuffers(layer)) {
+        enter_fallback(m_display);
+        return;
+    }
+
     qCInfo(KWIN_ANLAND) << "consumer reconnected";
     m_inFallback = false;
     m_consumerReady = false;
     m_reconnectTimer->stop();
-
-    // try_exit_fallback() already received a fresh dmabuf set. Import it into the
-    // layer (which arms an infinite/full-output repaint on every rotation buffer),
-    // resume the RenderLoop (uninhibit, balancing the inhibit from stopRendering),
-    // and mark the layer dirty. addRepaint() keeps the layer's needsRepaint()
-    // true so the next composite() paints into the new dmabufs even on an idle
-    // desktop. resumeRendering() runs unconditionally to keep inhibit/uninhibit
-    // balanced regardless of whether the GL layer is attached yet.
-    AnlandEglLayer *layer = m_outputs.isEmpty() ? nullptr : m_outputs[0]->eglLayer();
-    if (layer && !importBuffers(layer)) {
-        return;
-    }
     setupNotifiers();
     // Attach the fresh audio socket (a new socketpair was installed by pickup_fds).
     anland_audio_set_fd(get_audio_fd(m_display));
