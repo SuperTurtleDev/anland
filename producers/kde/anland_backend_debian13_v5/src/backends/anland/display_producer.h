@@ -67,6 +67,7 @@ int  set_pre_release_callback(display_ctx *ctx, void (*on_pre_release)(void *), 
 int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
 
 bool is_fallback(display_ctx *ctx);
+void enter_fallback(display_ctx *ctx);
 
 /* Reject the currently acquired consumer generation after a producer-side import
  * or validation failure. Moves the transport back to fallback, releases all

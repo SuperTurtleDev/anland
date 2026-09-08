@@ -475,11 +475,6 @@ bool is_fallback(display_ctx *ctx)
     return ctx->fallback;
 }
 
-void reject_consumer_resources(display_ctx *ctx)
-{
-    enter_fallback(ctx);
-}
-
 int try_exit_fallback(display_ctx *ctx)
 {
     if (!ctx->fallback)
