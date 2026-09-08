@@ -61,7 +61,9 @@ static void release_consumer_resources(display_ctx *ctx)
     if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
 }
 
-static void enter_fallback(display_ctx *ctx)
+/* Not static: declared in display_producer.h because the kwin/mutter
+ * backends call it from their own TUs. */
+void enter_fallback(display_ctx *ctx)
 {
     if (ctx->fallback)
         return;
@@ -520,8 +522,4 @@ int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
     }
     *fd_count = got;
     return 1;
-}
-
-int get_service_fds(display_ctx *ctx, int *fds, int max_fds, int timeout_ms) {
-    return poll_input_event_extend_fds(ctx, fds, max_fds, timeout_ms);
 }
