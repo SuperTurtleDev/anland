@@ -161,10 +161,24 @@ struct awl_surface {
     int pending_attached;
     int32_t pending_offset_x, pending_offset_y;
 
-    /* damage (accumulated in pending, moved to current on commit; coords=buffer pixels) */
+    /* damage (wl_surface.damage/damage_buffer accumulated in pending —
+     * surface-local px, bbox merge; moved to cur on the commit/latch-apply
+     * that presents a buffer). cur_* = damage since the renderer last
+     * consumed it (awl_surface_get_damage / _damage_consumed):
+     *   NONE    nothing changed since the last upload (cursor/layer move
+     *           re-render → the renderer skips the upload entirely)
+     *   RECT    the bbox rect needs re-uploading
+     *   FULL    a commit attached a buffer with NO damage — protocol
+     *           default: whole surface (client gave no information)
+     * cd_gen increments on every change: the renderer consumes only when
+     * token+gen still match (a commit racing the upload keeps its damage
+     * for the next frame — over-upload is always safe, under-upload never).
+     * All owned by this surface's ev_lock. */
     int32_t pd_x, pd_y, pd_w, pd_h;
     int pending_damage_empty;
     int32_t cur_damage_x, cur_damage_y, cur_damage_w, cur_damage_h;
+    int cd_state;               /* AWL_DMG_* (awl.h; NONE = 0, calloc-init) */
+    uint32_t cd_gen;
 
     struct wl_list frame_callbacks;
     bool dirty;                      /* awaiting render after commit */
@@ -295,6 +309,11 @@ struct awl_surface* awl_surface_from_res(struct wl_resource* res);
  * added; 0 = empty region — callers treat it as "unconstrained/whole") */
 int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,
                     int32_t* w, int32_t* h);
+/* Pending → current damage merge at every commit / sync-subsurface latch
+ * apply (caller holds s->ev_lock; awl_surface.c + awl_subsurface.c).
+ * has_attach = this commit presented a new buffer — attach without damage
+ * then means FULL; an empty commit (neither) is a no-op. */
+void awl_damage_merge_pending(struct awl_surface* s, int has_attach);
 
 /* Shared by dmabuf/shm: on buffer destroy, unlink it from current/pending */
 void awl_surface_detach_buffer(struct wl_resource* buffer_res);

@@ -335,6 +335,39 @@ static void surface_damage_buffer(struct wl_client* client,
     surface_damage(client, res, x, y, w, h);
 }
 
+/* Pending damage merges into the renderer-visible damage at every commit
+ * (damage is double-buffered surface state — it applies on commit regardless
+ * of attach; clients that redraw a wl_buffer in place send damage+commit
+ * WITHOUT re-attaching). has_attach: this commit presented a new buffer —
+ * an attach without any damage then means FULL (protocol default: no
+ * information = whole surface), while an empty commit (no attach, no damage)
+ * changes nothing and keeps the state (otherwise every ack_configure would
+ * force a full re-upload). Caller holds s->ev_lock (surface_commit immediate
+ * path + sync-subsurface latch apply, awl_subsurface.c). */
+void awl_damage_merge_pending(struct awl_surface* s, int has_attach) {
+    if (s->pending_damage_empty) {
+        if (!has_attach) return;   /* empty commit: nothing changed */
+        s->cd_state = AWL_DMG_FULL;
+    } else if (s->cd_state == AWL_DMG_NONE) {
+        s->cur_damage_x = s->pd_x;
+        s->cur_damage_y = s->pd_y;
+        s->cur_damage_w = s->pd_w;
+        s->cur_damage_h = s->pd_h;
+        s->cd_state = AWL_DMG_RECT;
+    } else if (s->cd_state == AWL_DMG_RECT) {   /* bbox union */
+        int32_t x2 = s->cur_damage_x + s->cur_damage_w;
+        int32_t y2 = s->cur_damage_y + s->cur_damage_h;
+        if (s->pd_x < s->cur_damage_x) s->cur_damage_x = s->pd_x;
+        if (s->pd_y < s->cur_damage_y) s->cur_damage_y = s->pd_y;
+        if (s->pd_x + s->pd_w > x2) x2 = s->pd_x + s->pd_w;
+        if (s->pd_y + s->pd_h > y2) y2 = s->pd_y + s->pd_h;
+        s->cur_damage_w = x2 - s->cur_damage_x;
+        s->cur_damage_h = y2 - s->cur_damage_y;
+    }   /* FULL stays full (rect damage subsumed) */
+    s->pending_damage_empty = 1;
+    s->cd_gen++;
+}
+
 /* no-op requests (region/transform recording left for later, no protocol error sent to the client) */
 static void surface_set_opaque_region(struct wl_client* c, struct wl_resource* r,
                                       struct wl_resource* region) {
@@ -440,6 +473,9 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         off_y = s->pending_offset_y;
         s->pending_offset_x = s->pending_offset_y = 0;   /* consumed with the attach */
     }
+    /* damage applies on EVERY commit (not just attach-commits): damage+commit
+     * without re-attach is the standard in-place redraw pattern */
+    awl_damage_merge_pending(s, attached);
     /* Extract the first-map window size inside the lock: window_created
      * below is a callback outside the lock, during which shm_buffer_gone
      * may strip current to NULL (dangling dereference) */
@@ -538,6 +574,7 @@ static void compositor_create_surface(struct wl_client* client,
     s->id = g_srv.next_surface_id++;   /* event thread is the sole writer, no lock */
     s->role = AWL_ROLE_NONE;
     s->buf_scale = 1;   /* #31: wl_surface.set_buffer_scale defaults to 1 */
+    s->pending_damage_empty = 1;   /* damage accumulator starts empty (calloc 0 = "has rect") */
     {
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
@@ -707,6 +744,53 @@ void awl_surface_presented(uint64_t id) {
         wl_buffer_send_release(s->release_q[i]);
     s->release_q_n = 0;
     wl_client_flush(wl_resource_get_client(s->resource));
+    pthread_mutex_unlock(&s->ev_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+/* ---- Damage snapshot / consume (shm render path, see awl.h) ---- */
+
+int awl_surface_get_damage(uint64_t id, int32_t* x, int32_t* y,
+                           int32_t* w, int32_t* h, void** token, uint32_t* gen) {
+    *x = *y = *w = *h = 0;
+    *token = NULL;
+    *gen = 0;
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (!s) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return AWL_DMG_NONE;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    int st = s->cd_state;
+    if (st == AWL_DMG_RECT) {
+        /* surface-local → buffer px (damage_buffer at scale 1 is the same;
+         * buf_scale is de-facto always 1 here — zoom goes through viewport) */
+        int32_t bs = s->buf_scale > 1 ? s->buf_scale : 1;
+        *x = s->cur_damage_x * bs;
+        *y = s->cur_damage_y * bs;
+        *w = s->cur_damage_w * bs;
+        *h = s->cur_damage_h * bs;
+    }
+    *token = s->current_buffer_res;   /* the rect describes this buffer's content */
+    *gen = s->cd_gen;
+    pthread_mutex_unlock(&s->ev_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    return st;
+}
+
+void awl_surface_damage_consumed(uint64_t id, void* token, uint32_t gen) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (!s) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    /* clear only when still current: a buffer swap or a newer commit that
+     * raced the upload keeps its damage for the next frame */
+    if (s->current_buffer_res == token && s->cd_gen == gen)
+        s->cd_state = AWL_DMG_NONE;
     pthread_mutex_unlock(&s->ev_lock);
     pthread_rwlock_unlock(&g_srv.rwl);
 }

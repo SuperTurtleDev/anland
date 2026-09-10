@@ -98,6 +98,7 @@ struct wl_window {
     GLuint program = 0;
     GLuint vbo = 0;
     bool logged_frame = false;     /* first-frame log (diagnostics) */
+    bool logged_dmg = false;       /* first partial-damage upload log (diagnostics) */
     std::map<uint64_t, wl_tex> layers;   /* layer id → texture (includes root's own id) */
 
     /* dedicated render thread: context bound 1:1 to the thread, requests coalesced via condvar */
@@ -791,11 +792,35 @@ static bool import_dmabuf_texture(wl_tex* t, const awl_buffer_info_t* b) {
     return true;
 }
 
-/* shm → GL texture upload (GPU, BGRA passed through directly) */
-static bool upload_shm_texture(wl_tex* t, const awl_buffer_info_t* b) {
+/* shm → GL texture upload (GPU, BGRA passed through directly).
+ * Damage dispatch (awl_surface_get_damage):
+ *   NONE + same buffer          → skip the upload entirely (re-render caused
+ *                                 by a cursor/layer move — texture is current)
+ *   RECT + same buffer + gen    → glTexSubImage2D of the bbox only
+ *   FULL / token mismatch / size change → full upload; token mismatch does
+ *                                 NOT consume (the damage belongs to the
+ *                                 newer buffer — the next frame uploads it) */
+struct shm_damage {
+    int state;
+    int32_t x, y, w, h;
+    void* token;
+    uint32_t gen;
+};
+
+static bool upload_shm_texture(wl_window* win, uint64_t sid, wl_tex* t,
+                               const awl_buffer_info_t* b,
+                               const shm_damage* d) {
     if (b->drm_format != AWL_FOURCC_ARGB8888 && b->drm_format != AWL_FOURCC_XRGB8888) {
         LOGE("shm format 0x%08x unsupported", b->drm_format);
         return false;
+    }
+    bool same_buf = d->token == b->token;
+    bool need_full = t->tex_is_image || t->tex_w != b->width || t->tex_h != b->height
+                     || d->state == AWL_DMG_FULL || !same_buf;
+    if (!need_full && d->state == AWL_DMG_NONE) {
+        /* nothing changed on this layer since the last upload (the render was
+         * requested by a cursor move / another layer) */
+        return true;
     }
     void* data = wl_shm_buffer_get_data(b->shm);
     if (!data) return false;
@@ -823,15 +848,42 @@ static bool upload_shm_texture(wl_tex* t, const awl_buffer_info_t* b) {
                      0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, data);
         t->tex_w = b->width;
         t->tex_h = b->height;
-    } else {
-        /* damage-region upload (v1 uploads in full; damage optimization later) */
+    } else if (need_full) {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)b->width, (GLsizei)b->height,
                         GL_BGRA_EXT, GL_UNSIGNED_BYTE, data);
+    } else {
+        /* damage bbox only: clamp to the buffer (clients may over-draw), then
+         * upload the sub-rect via the row-length pitch + pointer offset */
+        int32_t x = d->x < 0 ? 0 : d->x;
+        int32_t y = d->y < 0 ? 0 : d->y;
+        int32_t w = d->w, h = d->h;
+        if (x > (int32_t)b->width) x = (int32_t)b->width;
+        if (y > (int32_t)b->height) y = (int32_t)b->height;
+        if (w > (int32_t)b->width - x) w = (int32_t)b->width - x;
+        if (h > (int32_t)b->height - y) h = (int32_t)b->height - y;
+        if (w > 0 && h > 0) {
+            int32_t stride = wl_shm_buffer_get_stride(b->shm);
+            const void* src = (const char*)data + (size_t)y * (size_t)stride
+                            + (size_t)x * 4;
+            glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h,
+                            GL_BGRA_EXT, GL_UNSIGNED_BYTE, src);
+            if (!win->logged_dmg && (w < (int32_t)b->width || h < (int32_t)b->height)) {
+                win->logged_dmg = true;
+                LOGI("window %llu layer %llu partial damage upload %dx%d@%d,%d (buffer %ux%u)",
+                     (unsigned long long)win->id, (unsigned long long)sid,
+                     w, h, x, y, b->width, b->height);
+            }
+        }
+        /* empty rect after clamp: texture unchanged — damage still consumed */
     }
     GLenum up_err = glGetError();
     if (up_err != GL_NO_ERROR)
         LOGE("shm upload glerr=0x%x (%ux%u)", up_err, b->width, b->height);
     wl_shm_buffer_end_access(b->shm);
+    /* consume only when the snapshot still describes the current buffer
+     * (mismatch = a commit raced: keep its damage for the next frame) */
+    if (same_buf)
+        awl_surface_damage_consumed(sid, d->token, d->gen);
     return true;
 }
 
@@ -896,8 +948,15 @@ static void render_frame(wl_window* w) {
         wl_tex& t = w->layers[lay[i].surface_id];   /* layers seen this frame */
         seen[nseen++] = lay[i].surface_id;
         bool ok = false;
-        if (is_dmabuf) ok = import_dmabuf_texture(&t, &b);
-        else if (b.kind == AWL_BUFFER_SHM) ok = upload_shm_texture(&t, &b);
+        if (is_dmabuf) {
+            ok = import_dmabuf_texture(&t, &b);
+        } else if (b.kind == AWL_BUFFER_SHM) {
+            shm_damage d;
+            d.state = awl_surface_get_damage(lay[i].surface_id,
+                                             &d.x, &d.y, &d.w, &d.h,
+                                             &d.token, &d.gen);
+            ok = upload_shm_texture(w, lay[i].surface_id, &t, &b, &d);
+        }
         if (is_dmabuf) close(b.fd);   /* import holds its own reference internally; return the dup when done */
         if (b.kind == AWL_BUFFER_SHM && b.shm) {
             /* Return the pinned references (taken by get_buffer) — after return

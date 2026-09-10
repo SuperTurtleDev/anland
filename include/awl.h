@@ -243,6 +243,32 @@ typedef struct awl_buffer_info {
  * safe). Returns 0 = present, <0 = none */
 int  awl_surface_get_buffer(uint64_t id, awl_buffer_info_t* out);
 
+/* ---- Damage (shm render path; wl_surface.damage accumulation) ----
+ * get_damage returns the damage accumulated since the renderer last consumed
+ * it (read-only snapshot under rdlock+ev_lock):
+ *   AWL_DMG_NONE  nothing changed — skip the upload entirely (re-render
+ *                 triggered by a cursor/layer move)
+ *   AWL_DMG_RECT  re-upload the bbox (x,y,w,h, buffer px, already scaled by
+ *                 buffer_scale; clamp to the buffer before use)
+ *   AWL_DMG_FULL  the client committed a buffer with no damage — upload in
+ *                 full (protocol default)
+ * token = the wl_buffer resource the damage applies to, gen = its revision.
+ * Compare token with the awl_buffer_info_t.token from get_buffer: mismatch
+ * (buffer swapped between the two calls) → upload in full and do NOT consume.
+ * After a successful upload call awl_surface_damage_consumed with the same
+ * token+gen — it clears the damage only when still current (a commit that
+ * raced the upload keeps its damage for the next frame). Over-upload is
+ * always safe, under-upload never. dmabuf layers ignore this (the texture
+ * samples the memory in place). */
+enum {
+    AWL_DMG_NONE = 0,
+    AWL_DMG_RECT = 1,
+    AWL_DMG_FULL = 2,
+};
+int  awl_surface_get_damage(uint64_t id, int32_t* x, int32_t* y,
+                            int32_t* w, int32_t* h, void** token, uint32_t* gen);
+void awl_surface_damage_consumed(uint64_t id, void* token, uint32_t gen);
+
 /* ---- Sublayer composition snapshot (wl_subsurface, render thread) ----
  * #31 zoom: coordinates/sizes are always logical px (viewport dst | source |
  * buffer/scale); the render side scales dst by window-physical /

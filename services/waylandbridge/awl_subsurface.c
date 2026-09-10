@@ -95,11 +95,13 @@ static void sub_apply_state(struct awl_surface* ch) {
         }
     }
     ch->latched_buffer_res = NULL;
+    int had_attach = ch->latched_attach;
     ch->latched_attach = 0;
     ch->sub_latched = 0;
-    ch->cur_damage_x = ch->pd_x; ch->cur_damage_y = ch->pd_y;
-    ch->cur_damage_w = ch->pd_w; ch->cur_damage_h = ch->pd_h;
-    ch->pending_damage_empty = 1;
+    /* latched state applies now — its damage with it (also covers a latched
+     * damage-only commit: no attach, pd accumulated, function's empty-check
+     * handles the "nothing changed" case) */
+    awl_damage_merge_pending(ch, had_attach);
     pthread_mutex_unlock(&ch->ev_lock);
 }
 
