@@ -75,8 +75,10 @@ static bool binder_plat_init(void) {
 #include <sys/system_properties.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -969,8 +971,72 @@ static bool wl_str_alloc(void* data, int32_t length, char** buffer) {
 static void* host_on_create(void* args) { return args; }
 static void host_on_destroy(void* userData) {}
 
+/* ---------------- Caller verification (uid allowlist) ----------------
+ * The service is reachable by every app on the device (sepolicy grants
+ * find/call to all untrusted domains — SELinux cannot split packages within
+ * one domain) while the transactions are powerful: input injection, clipboard
+ * push, config writes, root `am start`, and a caller-chosen death/ctrl
+ * binder in SURFACE. uid is the only reliable identity visible to the NDK:
+ * assigned by the binder driver (not spoofable), valid for oneway calls too
+ * (getCallingPid returns 0 there; no getCallingSid in libbinder_ndk).
+ * Allow: root(0)/self + AWL_PKG's uid. The uid is looked up FRESH on every
+ * call from /data/system/packages.list (plain text, "pkg uid flag dataDir
+ * …", ~70KB — PackageManager's own dump; packages.xml is ABX binary since
+ * Android 16): no cache means a reinstall with a new uid is picked up by
+ * the very next call, and the scan is µs-scale (safe on the input hot path).
+ * Same appId in ANY user passes (uid % 100000 — the same installed package
+ * under another user/work profile). */
+static int lookup_app_uid(void) {
+    static bool open_failed_logged = false;
+    FILE* f = fopen("/data/system/packages.list", "re");
+    if (!f) {
+        if (!open_failed_logged) {   /* one line: this fires per call otherwise */
+            LOGE("binder auth: open packages.list: %s", strerror(errno));
+            open_failed_logged = true;
+        }
+        return 0;
+    }
+    char line[1024];
+    int uid = 0;
+    while (fgets(line, sizeof line, f)) {
+        char pkg[256];
+        int u;
+        if (sscanf(line, "%255s %d", pkg, &u) == 2 && strcmp(pkg, AWL_PKG) == 0) {
+            uid = u;
+            break;
+        }
+    }
+    fclose(f);
+    return uid;
+}
+
+/* Entry gate for host_on_transact. Denials log one line per uid (an abusive
+ * caller must not flood the log). */
+static bool caller_ok(void) {
+    uid_t u = AIBinder_getCallingUid();
+    if (u == 0 || u == (uid_t)getuid()) return true;   /* root / self */
+
+    int app_uid = lookup_app_uid();
+    if (app_uid > 10000 &&
+        (u == (uid_t)app_uid || u % 100000 == (uid_t)(app_uid % 100000)))
+        return true;
+
+    static std::mutex rej_lock;
+    static std::vector<uid_t> rej_seen;
+    {
+        std::lock_guard<std::mutex> lk(rej_lock);
+        if (std::find(rej_seen.begin(), rej_seen.end(), u) == rej_seen.end()) {
+            if (rej_seen.size() >= 16) rej_seen.clear();   /* bounded, uids repeat anyway */
+            rej_seen.push_back(u);
+            LOGE("binder auth: uid=%u rejected (not %s), call dropped", u, AWL_PKG);
+        }
+    }
+    return false;
+}
+
 static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t code,
                                         const AParcel* in, AParcel* out) {
+    if (!caller_ok()) return STATUS_PERMISSION_DENIED;
     switch (code) {
     case AWL_T_SURFACE: {
         int64_t id64; int32_t w, h;
