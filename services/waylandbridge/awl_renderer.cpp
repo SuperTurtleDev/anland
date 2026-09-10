@@ -1022,8 +1022,12 @@ static void render_frame(wl_window* w) {
         }
     }
 
-    /* ensure sampling finished before releasing the client buffer (correctness first; switch to a fence later) */
-    glFinish();
+    /* no glFinish: eglSwapBuffers submits with a native fence the driver attaches
+     * (EGL_ANDROID_native_fence_sync, SF waits GPU-side before scanout), and the
+     * client-buffer reuse below is ordered by kernel dma-buf resv implicit sync
+     * (container Mesa write ↔ host kgsl read, same model v5 runs on). CPU stays
+     * free — frame_done goes out at submit time so the client's next frame
+     * overlaps this one's GPU composite. */
     glDisable(GL_BLEND);
 
     if (!eglSwapBuffers(g.display, w->surface)) {

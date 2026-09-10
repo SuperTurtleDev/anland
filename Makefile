@@ -133,6 +133,9 @@ libffi: check-tools
 	  echo "libffi already built"; exit 0
 	fi
 	git submodule update --init third_party/libffi
+	if [ ! -x third_party/libffi/configure ]; then
+	  (cd third_party/libffi && ./autogen.sh)   # git checkouts ship no configure (release tarballs do)
+	fi
 	TC="$(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin"
 	rm -rf build/libffi-android
 	mkdir -p build/libffi-android

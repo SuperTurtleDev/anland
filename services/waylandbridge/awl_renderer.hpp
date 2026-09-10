@@ -21,7 +21,7 @@ int  awl_renderer_attach(uint64_t id, ANativeWindow* nw);   /* NULL=detach */
 
 /* Request a render (any thread, returns fast): sets the window's render
  * request and wakes its render thread. The actual GL runs on each window's
- * own thread — windows render in parallel, glFinish only blocks itself */
+ * own thread — windows render in parallel, a frame submit only blocks itself */
 void awl_renderer_request_render(uint64_t id);
 
 void awl_renderer_shutdown(void);
