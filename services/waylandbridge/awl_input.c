@@ -25,6 +25,14 @@
  * adaptation layer hides the Android system pointer (cbs.pointer_cursor).
  * Android is the position authority: every enter/motion stores the pointer
  * position in one atomic word, the render thread reads it lock-free.
+ *
+ * Pointer constraints (zwp_pointer_constraints_v1, section at the end of
+ * this file): pure state sync — the forwarding path above is untouched, no
+ * constraint branch anywhere. Request → C_CAPTURE (mode + confine rect) →
+ * the Activity requestPointerCapture()s, reports PTR_REL
+ * (AXIS_RELATIVE_X/Y) and synthesizes any clamped absolute motion itself;
+ * object/surface destruction → C_CAPTURE none → release. The daemon never
+ * filters or synthesizes pointer events: the APK is the authority.
  */
 #define _GNU_SOURCE   /* bionic: memfd_create */
 #include "awl_internal.h"
@@ -36,6 +44,7 @@
 
 #include "keymap_evdev.h"
 #include "relative-pointer-unstable-v1-server-protocol.h"
+#include "pointer-constraints-unstable-v1-server-protocol.h"
 
 /* ---------------- Input proxy table (topology: rwl protected) ---------------- */
 
@@ -215,11 +224,12 @@ static void seat_bind(struct wl_client* client, void* data,
 /* ---------------- Relative motion reporting (zwp_relative_pointer_v1) ----------------
  * Pure event forwarding: PTR_REL → relative_motion (the Xwayland warp
  * emulator converts this into X relative MotionNotify, game mouse-look).
- * No pointer-constraints — dx is computed on the APK side without capture
- * (AXIS_RELATIVE_X/Y or absolute delta, see the legacy equivalent); this
- * side keeps zero state and broadcasts per client. The list is built/
- * destroyed on the client dispatch thread and read on the binder input
- * thread — guarded by its own g_rel_lock. */
+ * dx is computed on the APK side: absolute-position diff normally, or
+ * AXIS_RELATIVE_X/Y while a pointer-constraint capture is active (see the
+ * constraints section at the end of this file); this side keeps zero state
+ * and broadcasts per client. The list is built/destroyed on the client
+ * dispatch thread and read on the binder input thread — guarded by its own
+ * g_rel_lock. */
 static struct wl_list g_relptrs;
 static pthread_mutex_t g_rel_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -274,13 +284,26 @@ static void relmgr_bind(struct wl_client* client, void* data,
     wl_resource_set_implementation(res, &relmgr_iface, NULL, NULL);
 }
 
+/* ---------------- Pointer constraints state (zwp_pointer_constraints_v1) ----------------
+ * Sync-only model (design principle): the input translation path never
+ * consults this state. The list exists for the already_constrained check
+ * and surface-death cleanup. Locking: rwl(rd) → g_constr_lock → ev_lock;
+ * the resource destroy handler takes g_constr_lock only (it may run inside
+ * wl_map teardown, when another thread holds rwl — see the section at the
+ * end of this file). */
+static struct wl_list g_constrs;
+static pthread_mutex_t g_constr_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void cursor_reset_state(void);   /* cursor section */
+static void pcmgr_bind(struct wl_client* client, void* data,
+                       uint32_t version, uint32_t id);   /* constraints section */
 
 void awl_input_setup(void) {
     wl_list_init(&g_ptrs);
     wl_list_init(&g_kbds);
     wl_list_init(&g_tchs);
     wl_list_init(&g_relptrs);
+    wl_list_init(&g_constrs);
     g_mods_depressed = g_mods_locked = 0;
     memset(g_keys_down, 0, sizeof(g_keys_down));
     cursor_reset_state();
@@ -291,6 +314,10 @@ void awl_input_setup(void) {
                           &zwp_relative_pointer_manager_v1_interface,
                           1, NULL, relmgr_bind))
         LOGE("zwp_relative_pointer_manager_v1 global create failed");
+    if (!wl_global_create(g_srv.display,
+                          &zwp_pointer_constraints_v1_interface,
+                          1, NULL, pcmgr_bind))
+        LOGE("zwp_pointer_constraints_v1 global create failed");
 }
 
 
@@ -1087,4 +1114,296 @@ uint64_t awl_input_surface_gone(struct awl_surface* s) {
 
 void awl_input_cursor_gone_notify(uint64_t win) {
     cursor_restore(win);
+}
+
+/* ---------------- Pointer constraints (zwp_pointer_constraints_v1) ----------------
+ * Pure state sync (design principle: the input translation path in this
+ * file is untouched — no constraint branch anywhere; the daemon never
+ * filters or synthesizes pointer events). The compositor-side job is
+ * exactly:
+ *   lock_pointer / confine_pointer request → send locked/confined once,
+ *     then cbs.pointer_lock → C_CAPTURE (mode + confine rect, view px) →
+ *     the Activity requestPointerCapture()s and becomes the authority
+ *     (PTR_REL + clamped absolute motion are all APK-side)
+ *   object destroy / client gone / surface gone → cbs.pointer_lock(none)
+ *     → releasePointerCapture
+ *   set_region on a live constraint → re-convert + re-send C_CAPTURE
+ * Activation gating (pointer focus), oneshot-vs-persistent transitions and
+ * region clamping are all APK-side; the lifetime enum is therefore not
+ * tracked (the APK re-requests capture per focus, re-attach re-pushes the
+ * mirror — a oneshot client that needs out destroys the object itself).
+ * already_constrained stays protocol-exact (kwin: one constraint per
+ * surface, the object keeps blocking new requests until destroyed).
+ *
+ * Region coordinates: interpreted in root-local logical px (the same space
+ * input_target produces), converted to Activity view px once at
+ * request/set_region time (inverse of view_to_surface; the APK intersects
+ * the rect with the live window on every event, so a stale rect is safe).
+ * The wl_region resource is copied (bbox), never held. */
+struct awl_constr {
+    struct wl_resource* res;     /* zwp_locked/confined_pointer_v1 */
+    struct wl_client* client;
+    uint64_t surface_id;         /* requesting surface (already_constrained key) */
+    uint64_t root_id;            /* root window (C_CAPTURE address) */
+    int mode;                    /* AWL_CAPTURE_CONFINE / _LOCK */
+    int dead;                    /* surface gone: object stays until the client destroys it */
+    int has_region;
+    int32_t rg_x, rg_y, rg_w, rg_h;   /* confine region, root-local logical */
+    int32_t r[4];                /* last C_CAPTURE rect, view px (cached: the
+                                  * destroy path may not take rwl to re-convert) */
+    struct wl_list link;
+};
+
+/* Region (root-local logical) → Activity view px, the inverse of
+ * view_to_surface: view = (rg − geometry origin) × phys / content-base.
+ * Caller holds rwl.rd + root ev_lock. No region / unknown window size →
+ * the whole window (zeros are the APK's "whole window" convention). */
+static void constr_app_rect(struct awl_surface* root, int has_region,
+                            int32_t rx, int32_t ry, int32_t rw, int32_t rh,
+                            int32_t* out) {
+    float cw = 0, ch = 0;
+    awl_surface_content_size(root, &cw, &ch);
+    if (!has_region || root->phys_w <= 0 || root->phys_h <= 0 ||
+        cw <= 0.5f || ch <= 0.5f) {
+        out[0] = 0; out[1] = 0;
+        out[2] = root->phys_w; out[3] = root->phys_h;
+        return;
+    }
+    float fx = (float)root->phys_w / cw, fy = (float)root->phys_h / ch;
+    float x = (float)rx, y = (float)ry, w = (float)rw, h = (float)rh;
+    if (root->geom_valid) { x -= (float)root->geom_x; y -= (float)root->geom_y; }
+    out[0] = x < 0 ? 0 : (int32_t)(x * fx);
+    out[1] = y < 0 ? 0 : (int32_t)(y * fy);
+    out[2] = w < 0 ? 0 : (int32_t)(w * fx);
+    out[3] = h < 0 ? 0 : (int32_t)(h * fy);
+}
+
+static void constr_destroy(struct wl_client* client, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+
+/* Resource teardown (destroy request / client disconnect / wl_map teardown):
+ * takes g_constr_lock ONLY — never rwl (teardown may run while another
+ * thread holds it). A live constraint ending → C_CAPTURE none, unless a
+ * sibling constraint of the same root survives (its cached state is
+ * re-pushed — the r[] cache makes this rwl-free). */
+static void constr_res_destroy(struct wl_resource* res) {
+    struct awl_constr* c = wl_resource_get_user_data(res);
+    if (!c) return;
+    pthread_mutex_lock(&g_constr_lock);
+    wl_list_remove(&c->link);
+    struct awl_constr* keep = NULL;
+    struct awl_constr* it;
+    wl_list_for_each(it, &g_constrs, link) {
+        if (it->root_id == c->root_id && !it->dead) { keep = it; break; }
+    }
+    int dead = c->dead;
+    uint64_t root = c->root_id;
+    int keep_mode = keep ? keep->mode : 0;
+    int32_t r[4] = {0, 0, 0, 0};
+    if (keep) memcpy(r, keep->r, sizeof(r));
+    pthread_mutex_unlock(&g_constr_lock);
+    free(c);
+    if (dead || !g_srv.cbs.pointer_lock) return;   /* surface already gone: none was pushed then */
+    if (keep)
+        g_srv.cbs.pointer_lock(g_srv.cbs.user, root, keep_mode,
+                               r[0], r[1], r[2], r[3]);
+    else
+        g_srv.cbs.pointer_lock(g_srv.cbs.user, root, AWL_CAPTURE_NONE, 0, 0, 0, 0);
+}
+
+/* Android owns the pointer position: the hint (kwin warps the cursor here)
+ * cannot be applied — log only */
+static void locked_set_cursor_position_hint(struct wl_client* client,
+                                            struct wl_resource* res,
+                                            wl_fixed_t sx, wl_fixed_t sy) {
+    LOGD("locked_pointer cursor position hint %.1f,%.1f ignored",
+         wl_fixed_to_double(sx), wl_fixed_to_double(sy));
+}
+
+/* set_region (both object types): applies immediately (no commit
+ * double-buffer — the APK intersects the rect with the live window on
+ * every event anyway) and re-pushes C_CAPTURE with the re-converted rect */
+static void constr_set_region(struct wl_client* client, struct wl_resource* res,
+                              struct wl_resource* region) {
+    struct awl_constr* c = wl_resource_get_user_data(res);
+    if (!c || c->dead) return;
+    int32_t x = 0, y = 0, w = 0, h = 0;
+    int has = awl_region_bbox(region, &x, &y, &w, &h);
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* root = awl_surface_by_id(c->root_id);
+    if (!root) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    pthread_mutex_lock(&g_constr_lock);
+    pthread_mutex_lock(&root->ev_lock);
+    c->has_region = has;
+    c->rg_x = x; c->rg_y = y; c->rg_w = w; c->rg_h = h;
+    constr_app_rect(root, has, x, y, w, h, c->r);
+    pthread_mutex_unlock(&root->ev_lock);
+    int mode = c->mode;
+    int32_t r[4];
+    memcpy(r, c->r, sizeof(r));
+    pthread_mutex_unlock(&g_constr_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    if (g_srv.cbs.pointer_lock)
+        g_srv.cbs.pointer_lock(g_srv.cbs.user, c->root_id, mode,
+                               r[0], r[1], r[2], r[3]);
+}
+
+static const struct zwp_locked_pointer_v1_interface locked_iface = {
+    .destroy = constr_destroy,
+    .set_cursor_position_hint = locked_set_cursor_position_hint,
+    .set_region = constr_set_region,
+};
+static const struct zwp_confined_pointer_v1_interface confined_iface = {
+    .destroy = constr_destroy,
+    .set_region = constr_set_region,
+};
+
+/* lock_pointer / confine_pointer common path (client dispatch thread):
+ * already_constrained check → create → locked/confined once → C_CAPTURE
+ * push after rwl release (callbacks never run under a logic-layer lock). */
+static void constr_create(struct wl_client* client, struct wl_resource* mgr,
+                          uint32_t id, struct wl_resource* surface_res,
+                          struct wl_resource* region, int mode) {
+    int32_t x = 0, y = 0, w = 0, h = 0;
+    int has = awl_region_bbox(region, &x, &y, &w, &h);
+
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = surface_res ? wl_resource_get_user_data(surface_res) : NULL;
+    if (s) {   /* kwin: one constraint per surface until the object is destroyed */
+        pthread_mutex_lock(&g_constr_lock);
+        struct awl_constr* it;
+        int clash = 0;
+        wl_list_for_each(it, &g_constrs, link) {
+            if (it->surface_id == s->id) { clash = 1; break; }
+        }
+        pthread_mutex_unlock(&g_constr_lock);
+        if (clash) {
+            pthread_rwlock_unlock(&g_srv.rwl);
+            wl_resource_post_error(mgr,
+                    ZWP_POINTER_CONSTRAINTS_V1_ERROR_ALREADY_CONSTRAINED,
+                    "a pointer constraint already exists on that surface");
+            return;
+        }
+    }
+
+    struct wl_resource* obj = wl_resource_create(
+            client,
+            mode == AWL_CAPTURE_LOCK ? &zwp_locked_pointer_v1_interface
+                                     : &zwp_confined_pointer_v1_interface,
+            1, id);
+    struct awl_constr* c = calloc(1, sizeof(*c));
+    if (!obj || !c) {
+        if (obj) wl_resource_destroy(obj);
+        free(c);
+        pthread_rwlock_unlock(&g_srv.rwl);
+        wl_resource_post_no_memory(mgr);
+        return;
+    }
+    c->res = obj;
+    c->client = client;
+    c->mode = mode;
+    c->has_region = has;
+    c->rg_x = x; c->rg_y = y; c->rg_w = w; c->rg_h = h;
+    if (!s) {
+        c->dead = 1;   /* surface already destroyed (unreachable in practice: same-client requests serialize) */
+    } else {
+        c->surface_id = s->id;
+        c->root_id = awl_subsurface_root(s)->id;
+        struct awl_surface* root = awl_surface_by_id(c->root_id);
+        pthread_mutex_lock(&g_constr_lock);
+        if (root) {
+            pthread_mutex_lock(&root->ev_lock);
+            constr_app_rect(root, has, x, y, w, h, c->r);
+            pthread_mutex_unlock(&root->ev_lock);
+        }
+        wl_list_insert(g_constrs.prev, &c->link);
+        pthread_mutex_unlock(&g_constr_lock);
+        /* activation = creation (sync model): the event once, in the same
+         * ev_lock group as the pointer stream of that window */
+        if (root) {
+            pthread_mutex_lock(&root->ev_lock);
+            if (mode == AWL_CAPTURE_LOCK)
+                zwp_locked_pointer_v1_send_locked(obj);
+            else
+                zwp_confined_pointer_v1_send_confined(obj);
+            wl_client_flush(client);
+            pthread_mutex_unlock(&root->ev_lock);
+        }
+    }
+    wl_resource_set_implementation(
+            obj,
+            mode == AWL_CAPTURE_LOCK ? (const void*)&locked_iface
+                                     : (const void*)&confined_iface,
+            c, constr_res_destroy);
+    uint64_t root_id = c->root_id;
+    int dead = c->dead;
+    int32_t r[4];
+    memcpy(r, c->r, sizeof(r));
+    pthread_rwlock_unlock(&g_srv.rwl);
+    LOGI("%s constraint: window %llu region(view px)=%d,%d %dx%d",
+         mode == AWL_CAPTURE_LOCK ? "lock" : "confine",
+         (unsigned long long)root_id, r[0], r[1], r[2], r[3]);
+    if (!dead && g_srv.cbs.pointer_lock)
+        g_srv.cbs.pointer_lock(g_srv.cbs.user, root_id, mode,
+                               r[0], r[1], r[2], r[3]);
+}
+
+static void pcmgr_lock_pointer(struct wl_client* client, struct wl_resource* res,
+                               uint32_t id, struct wl_resource* surface,
+                               struct wl_resource* pointer,
+                               struct wl_resource* region, uint32_t lifetime) {
+    constr_create(client, res, id, surface, region, AWL_CAPTURE_LOCK);
+}
+static void pcmgr_confine_pointer(struct wl_client* client, struct wl_resource* res,
+                                  uint32_t id, struct wl_resource* surface,
+                                  struct wl_resource* pointer,
+                                  struct wl_resource* region, uint32_t lifetime) {
+    constr_create(client, res, id, surface, region, AWL_CAPTURE_CONFINE);
+}
+static const struct zwp_pointer_constraints_v1_interface pcmgr_iface = {
+    .destroy = constr_destroy,
+    .lock_pointer = pcmgr_lock_pointer,
+    .confine_pointer = pcmgr_confine_pointer,
+};
+static void pcmgr_bind(struct wl_client* client, void* data,
+                       uint32_t version, uint32_t id) {
+    struct wl_resource* res = wl_resource_create(
+            client, &zwp_pointer_constraints_v1_interface, 1, id);
+    if (!res) { wl_client_post_no_memory(client); return; }
+    wl_resource_set_implementation(res, &pcmgr_iface, NULL, NULL);
+}
+
+/* ---- surface death (awl_surface.c destroy path; caller holds rwl.wr) ----
+ * Every constraint on this surface / its root dies with it:
+ * unlocked/unconfined is still sent (the client usually outlives its
+ * surface); the object itself stays (destroying it here would recurse into
+ * constr_res_destroy under rwl.wr — the client destroys it, or its
+ * disconnect does). Returns the root window whose capture state changed
+ * (0 = none) for awl_input_constr_gone_notify AFTER the rwl release. */
+uint64_t awl_input_constr_surface_gone(struct awl_surface* s) {
+    pthread_mutex_lock(&g_constr_lock);
+    uint64_t root = 0;
+    struct awl_constr* c;
+    struct awl_constr* tmp;
+    wl_list_for_each_safe(c, tmp, &g_constrs, link) {
+        if (c->dead || (c->surface_id != s->id && c->root_id != s->id)) continue;
+        c->dead = 1;
+        root = c->root_id;
+        if (c->mode == AWL_CAPTURE_LOCK)
+            zwp_locked_pointer_v1_send_unlocked(c->res);
+        else
+            zwp_confined_pointer_v1_send_unconfined(c->res);
+        wl_client_flush(c->client);
+    }
+    pthread_mutex_unlock(&g_constr_lock);
+    return root;
+}
+
+void awl_input_constr_gone_notify(uint64_t win) {
+    if (!win || !g_srv.cbs.pointer_lock) return;
+    g_srv.cbs.pointer_lock(g_srv.cbs.user, win, AWL_CAPTURE_NONE, 0, 0, 0, 0);
 }

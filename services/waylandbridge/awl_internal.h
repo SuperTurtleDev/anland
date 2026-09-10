@@ -291,6 +291,10 @@ extern struct awl_server g_srv;
 void awl_surface_setup(void);
 struct awl_surface* awl_surface_by_id(uint64_t id);
 struct awl_surface* awl_surface_from_res(struct wl_resource* res);
+/* wl_region bounding box snapshot (returns 1 = at least one rectangle was
+ * added; 0 = empty region — callers treat it as "unconstrained/whole") */
+int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,
+                    int32_t* w, int32_t* h);
 
 /* Shared by dmabuf/shm: on buffer destroy, unlink it from current/pending */
 void awl_surface_detach_buffer(struct wl_resource* buffer_res);
@@ -316,6 +320,19 @@ uint64_t awl_input_surface_gone(struct awl_surface* s);
 void awl_input_cursor_gone_notify(uint64_t win);
 uint64_t awl_input_cursor_window(struct awl_surface* s);   /* caller holds rwl (rd/wr) */
 void awl_input_cursor_commit(struct awl_surface* s, int32_t off_x, int32_t off_y);
+
+/* Pointer-constraint hooks (zwp_pointer_constraints_v1 state lives in
+ * awl_input.c under g_constr_lock — pure state sync, the input translation
+ * path never reads it; activation/clamping are APK-side):
+ *  - constr_surface_gone: caller holds rwl.wr (awl_surface.c destroy path).
+ *    Constraints on this surface / its root die: unlocked/unconfined is
+ *    sent to the still-live client, the objects stay until the client
+ *    destroys them. Returns the root window whose capture state changed
+ *    (0 = none) — pass it to awl_input_constr_gone_notify AFTER releasing
+ *    rwl (the C_CAPTURE callback must not run under the topology write
+ *    lock). */
+uint64_t awl_input_constr_surface_gone(struct awl_surface* s);
+void awl_input_constr_gone_notify(uint64_t win);
 
 /* awl_data_device.c — wl_data_device_manager v3 (full selection + DnD state
  * machine, semantics aligned with kwin-6.6.5; see the file-header lock note).

@@ -127,9 +127,13 @@ enum {
                                  + text:string16) editor state snapshot → IME context/candidate window */
 #define AWL_C_CLIP_WRITE 6    /* (text:string16) wl client set_selection → this Activity
                                  writes the Android clipboard (empty string = clear; echo suppressed by the APK) */
-#define AWL_C_CAPTURE 7       /* (on:i32) pointer lock state (pointer-constraints
-                                 lock_pointer create/destroy) → requestPointerCapture,
-                                 captured-state motion is literally translated as AWL_IN_PTR_REL (#21) */
+#define AWL_C_CAPTURE 7       /* (mode x y w h:i32×5) pointer-constraints
+                                 activation (mode = 1 confine / 2 lock →
+                                 requestPointerCapture; 0 none → release; x,y,w,h
+                                 = confine region in view pixels, zeros = whole
+                                 window). While captured the Activity delivers
+                                 AWL_IN_PTR_REL and, for confine, synthesizes
+                                 the clamped absolute motion itself */
 #define AWL_C_CURSOR 8        /* (hidden:i32) client took over the cursor via
                                  wl_pointer.set_cursor (image composited by the
                                  renderer on top of the window, or NULL = invisible)
@@ -155,6 +159,13 @@ struct awl_win_state {
     char ime_text[4001];  /* UTF-8 surrounding (client set_surrounding_text) */
     int32_t ime_cursor, ime_anchor;   /* byte offsets (Activity side converts to chars) */
     int32_t ime_cx, ime_cy, ime_cw, ime_ch;   /* cursor rectangle (surface coords) */
+
+    /* Pointer constraint (mirror of the logic-layer zwp_pointer_constraints
+     * state; kept alive across detach like the IME mirror): on re-attach the
+     * constraint may still be active (persistent lifetime) → re-send
+     * C_CAPTURE so the new Activity instance captures again. */
+    int capture_mode = 0;   /* AWL_CAPTURE_* (0 = none) */
+    int32_t cap_rect[4] = {0, 0, 0, 0};   /* confine region, view pixels */
 };
 
 static std::mutex g_state_lock;
@@ -570,18 +581,53 @@ static void ime_reopen_on_attach(uint64_t id) {
          (unsigned long long)id);
 }
 
-/* Pointer lock state (#21): tell the corresponding Activity to
- * requestPointerCapture/releasePointerCapture — in captured state the
- * Activity converts motion events to relative deltas for literal
- * translation. */
-static void cb_pointer_lock(void* user, uint64_t id, int locked) {
+/* Pointer constraint state (zwp_pointer_constraints_v1 activate/deactivate):
+ * tell the matching Activity to requestPointerCapture/releasePointerCapture
+ * with the mode + confine region (view pixels). The mirror is updated FIRST,
+ * with or without a live ctrl — an unattached window (paused / app died)
+ * keeps the state so a later attach re-pushes it. */
+static void cb_pointer_lock(void* user, uint64_t id, int mode,
+                            int32_t rx, int32_t ry, int32_t rw, int32_t rh) {
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        auto it = g_wins.find(id);
+        if (it == g_wins.end()) return;
+        it->second.capture_mode = mode;
+        it->second.cap_rect[0] = rx; it->second.cap_rect[1] = ry;
+        it->second.cap_rect[2] = rw; it->second.cap_rect[3] = rh;
+    }
     AIBinder* ctrl = ctrl_of(id);
-    if (!ctrl) return;   /* no Activity attached: drop (the client re-locks on its own after re-attach) */
-    int32_t args[1] = { locked };
-    ctrl_send_ints(ctrl, AWL_C_CAPTURE, args, 1);
+    if (!ctrl) return;   /* no Activity attached: mirror only (state re-sent on attach) */
+    int32_t args[5] = { mode, rx, ry, rw, rh };
+    ctrl_send_ints(ctrl, AWL_C_CAPTURE, args, 5);
     AIBinder_decStrong(ctrl);
-    LOGI("window %llu pointer %s", (unsigned long long)id,
-         locked ? "locked (Activity capture)" : "unlocked");
+    LOGI("window %llu pointer constraint mode=%d rect=%d,%d %dx%d",
+         (unsigned long long)id, mode, rx, ry, rw, rh);
+}
+
+/* Re-attach: the logic-layer constraint outlived the detach (persistent
+ * lifetime, or the app died while locked) → re-send the capture state so the
+ * new Activity instance captures again before any motion is delivered.
+ * Called at the end of SURFACE handling (ctrl already registered). */
+static void capture_reopen_on_attach(uint64_t id) {
+    AIBinder* ctrl = nullptr;
+    int mode = 0;
+    int32_t r[4] = {0, 0, 0, 0};
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        auto it = g_wins.find(id);
+        if (it == g_wins.end() || it->second.capture_mode == 0 || !it->second.ctrl)
+            return;
+        mode = it->second.capture_mode;
+        memcpy(r, it->second.cap_rect, sizeof(r));
+        ctrl = it->second.ctrl;
+        AIBinder_incStrong(ctrl);
+    }
+    int32_t args[5] = { mode, r[0], r[1], r[2], r[3] };
+    ctrl_send_ints(ctrl, AWL_C_CAPTURE, args, 5);
+    AIBinder_decStrong(ctrl);
+    LOGI("window %llu: capture mode=%d re-pushed on attach",
+         (unsigned long long)id, mode);
 }
 
 /* Client cursor (wl_pointer.set_cursor): hidden=1 → the renderer now draws
@@ -863,6 +909,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             return STATUS_OK;
         }
         ime_reopen_on_attach(id);            /* input state kept alive: enabled during detach → reopen */
+        capture_reopen_on_attach(id);        /* constraint still active (persistent) → re-capture */
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
         awl_renderer_request_render(id);     /* render a first frame */

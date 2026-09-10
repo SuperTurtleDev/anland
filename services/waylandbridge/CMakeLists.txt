@@ -112,8 +112,7 @@ add_custom_command(
 
 # relative-pointer v1 protocol codegen (relative motion reporting: PTR_REL →
 # relative_motion; the Xwayland warp emulator converts it into X relative
-# MotionNotify. pointer-constraints is gone — no lock/confine semantics,
-# pure event forwarding)
+# MotionNotify)
 set(RP_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/relative-pointer-unstable-v1.xml)
 add_custom_command(
   OUTPUT ${AWL_GENERATED}/relative-pointer-unstable-v1-server-protocol.h
@@ -125,6 +124,20 @@ add_custom_command(
   COMMAND ${WAYLAND_SCANNER} private-code ${RP_XML}
           ${AWL_GENERATED}/relative-pointer-unstable-v1-protocol.c
   DEPENDS ${RP_XML})
+
+# pointer-constraints v1 protocol codegen (lock/confine; awl_input.c in this
+# dir — activation tells the Activity to requestPointerCapture via C_CAPTURE)
+set(PC_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/pointer-constraints-unstable-v1.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/pointer-constraints-unstable-v1-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${PC_XML}
+          ${AWL_GENERATED}/pointer-constraints-unstable-v1-server-protocol.h
+  DEPENDS ${PC_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/pointer-constraints-unstable-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${PC_XML}
+          ${AWL_GENERATED}/pointer-constraints-unstable-v1-protocol.c
+  DEPENDS ${PC_XML})
 
 # xwayland-shell v1 protocol codegen (Xwayland rootless window association,
 # awl_xwayland.c in this dir)
@@ -205,6 +218,8 @@ add_library(androidwayland STATIC
   ${AWL_GENERATED}/xwayland-shell-v1-server-protocol.h
   ${AWL_GENERATED}/relative-pointer-unstable-v1-protocol.c
   ${AWL_GENERATED}/relative-pointer-unstable-v1-server-protocol.h
+  ${AWL_GENERATED}/pointer-constraints-unstable-v1-protocol.c
+  ${AWL_GENERATED}/pointer-constraints-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/viewporter-protocol.c
   ${AWL_GENERATED}/viewporter-server-protocol.h
   ${AWL_GENERATED}/fractional-scale-v1-protocol.c

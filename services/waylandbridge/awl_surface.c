@@ -126,16 +126,42 @@ static void frame_cb_res_destroy(struct wl_resource* res) {
     }
 }
 
-/* ---------------- wl_region (recorded, not part of layout) ---------------- */
+/* ---------------- wl_region (bounding box, not part of layout) ----------------
+ * Consumers today only need a rectangle (pointer-constraints confine region).
+ * The region records the union bounding box of the added rectangles;
+ * subtract is ignored for the box (holes and true region algebra are out of
+ * scope — real confine regions are single rects). Consumers copy the box at
+ * request time; the wl_region resource itself is never held. */
+struct awl_region_bb {
+    int32_t x, y, w, h;
+    int set;   /* any rectangle added */
+};
 
+static void region_res_destroy(struct wl_resource* res) {
+    free(wl_resource_get_user_data(res));
+}
 static void region_destroy(struct wl_client* client, struct wl_resource* res) {
     wl_resource_destroy(res);
 }
 static void region_add(struct wl_client* client, struct wl_resource* res,
                        int32_t x, int32_t y, int32_t w, int32_t h) {
+    struct awl_region_bb* bb = wl_resource_get_user_data(res);
+    if (!bb || w <= 0 || h <= 0) return;
+    if (!bb->set) {
+        bb->x = x; bb->y = y; bb->w = w; bb->h = h;
+        bb->set = 1;
+    } else {
+        int32_t x2 = bb->x + bb->w, y2 = bb->y + bb->h;
+        if (x < bb->x) bb->x = x;
+        if (y < bb->y) bb->y = y;
+        if (x + w > x2) x2 = x + w;
+        if (y + h > y2) y2 = y + h;
+        bb->w = x2 - bb->x; bb->h = y2 - bb->y;
+    }
 }
 static void region_subtract(struct wl_client* client, struct wl_resource* res,
                             int32_t x, int32_t y, int32_t w, int32_t h) {
+    /* bbox ignores holes (see section comment) */
 }
 
 static const struct wl_region_interface region_iface = {
@@ -143,6 +169,16 @@ static const struct wl_region_interface region_iface = {
     .add = region_add,
     .subtract = region_subtract,
 };
+
+/* Bounding-box snapshot for consumers (pointer-constraints confine region);
+ * 0 = no rectangle was ever added */
+int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,
+                    int32_t* w, int32_t* h) {
+    struct awl_region_bb* bb = region ? wl_resource_get_user_data(region) : NULL;
+    if (!bb || !bb->set) return 0;
+    *x = bb->x; *y = bb->y; *w = bb->w; *h = bb->h;
+    return 1;
+}
 
 /* ---------------- wl_surface ---------------- */
 
@@ -171,6 +207,9 @@ static void surface_destroy_impl(struct wl_resource* res) {
      * cursor is dropped; the window is redrawn without it and its Android
      * pointer restored after the lock (callbacks never run under rwl.wr) */
     uint64_t cursor_win = awl_input_surface_gone(s);
+    /* constraints on this surface / its root die with it: unlock + release
+     * the Activity capture after the lock (same notify-after-unlock shape) */
+    uint64_t constr_win = awl_input_constr_surface_gone(s);
 
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
@@ -236,6 +275,7 @@ static void surface_destroy_impl(struct wl_resource* res) {
     if (sub_dirty && g_srv.cbs.window_dirty)   /* child layer gone → root window redraw */
         g_srv.cbs.window_dirty(g_srv.cbs.user, sub_root_id);
     awl_input_cursor_gone_notify(cursor_win);   /* redraw without the cursor + restore the Android pointer */
+    awl_input_constr_gone_notify(constr_win);   /* C_CAPTURE none: the Activity releases the capture */
     wl_resource_set_user_data(res, NULL);
 }
 
@@ -519,7 +559,9 @@ static void compositor_create_region(struct wl_client* client,
     struct wl_resource* rres = wl_resource_create(
             client, &wl_region_interface, wl_resource_get_version(res), id);
     if (!rres) { wl_resource_post_no_memory(res); return; }
-    wl_resource_set_implementation(rres, &region_iface, NULL, NULL);
+    struct awl_region_bb* bb = calloc(1, sizeof(*bb));
+    if (!bb) { wl_resource_destroy(rres); wl_resource_post_no_memory(res); return; }
+    wl_resource_set_implementation(rres, &region_iface, bb, region_res_destroy);
 }
 
 static const struct wl_compositor_interface compositor_iface = {

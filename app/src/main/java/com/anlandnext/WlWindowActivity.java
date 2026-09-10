@@ -78,17 +78,25 @@ public class WlWindowActivity extends Activity {
                                                   + text:string16) editor state snapshot */
     private static final int C_CLIP_WRITE = 6; /* (text:string16) wl set_selection → write
                                                   the Android clipboard (empty = clear) */
-    private static final int C_CAPTURE = 7;    /* (on:i32) deprecated: after
-                                                  pointer-constraints removal the
-                                                  daemon no longer sends it; the
-                                                  handler stays only for old-
-                                                  daemon compatibility (#21) */
+    private static final int C_CAPTURE = 7;    /* (mode x y w h:i32×5)
+                                                  pointer-constraints state
+                                                  sync (zwp lock/confine):
+                                                  mode = 1 confine / 2 lock →
+                                                  requestPointerCapture
+                                                  (x,y,w,h = confine region
+                                                  in view px, zeros = whole
+                                                  window), 0 → release;
+                                                  re-sent on set_region and
+                                                  re-attach */
     private static final int C_CURSOR = 8;     /* (hidden:i32) wl client took over the
                                                   cursor (wl_pointer.set_cursor: image
                                                   composited by the daemon renderer on
                                                   top of the window, or NULL = invisible)
                                                   → hide the Android pointer; 0 = restore */
     private static final int STATE_RESET = 0x1;   /* v1 reset → clear composing state + restartInput */
+    private static final int CAPTURE_NONE = 0;
+    private static final int CAPTURE_CONFINE = 1;
+    private static final int CAPTURE_LOCK = 2;
 
     /** Unique Activity instance id (trailing host field of SURFACE/PAUSE: daemon eviction criterion) */
     private static final AtomicLong HOST_SEQ = new AtomicLong();
@@ -196,8 +204,10 @@ public class WlWindowActivity extends Activity {
                 return true;
             }
             if (code == C_CAPTURE) {
-                final boolean on = data.readInt() != 0;
-                runOnUiThread(() -> setPointerCaptured(on));
+                final int mode = data.readInt();
+                final int rx = data.readInt(), ry = data.readInt();
+                final int rw = data.readInt(), rh = data.readInt();
+                runOnUiThread(() -> setPointerCaptureMode(mode, rx, ry, rw, rh));
                 return true;
             }
             if (code == C_CURSOR) {
@@ -245,6 +255,7 @@ public class WlWindowActivity extends Activity {
         long nid = intent.getLongExtra("id", id);
         if (nid != id) {
             if (attached) WlBinder.pause(id, host);   /* daemon detaches the old id */
+            setPointerCaptureMode(CAPTURE_NONE, 0, 0, 0, 0);   /* the old window's constraint does not carry over */
             LIVE.remove(id);
             id = nid;
             host = HOST_SEQ.incrementAndGet();
@@ -431,12 +442,15 @@ public class WlWindowActivity extends Activity {
                 && sv.getHolder().getSurface().isValid())
             sendSurface(sv.getHolder(), lastW, lastH);
         Log.i(TAG, "win " + id + " RESUME");
+        /* capture state is daemon-owned: the SURFACE re-attach re-pushes
+         * C_CAPTURE (a persistent constraint survives the pause) */
     }
 
     @Override
     protected void onPause() {
         if (clipMgr != null)
             clipMgr.removePrimaryClipChangedListener(clipListener);
+        setPointerCaptureMode(CAPTURE_NONE, 0, 0, 0, 0);   /* release + local mode reset (the daemon mirror survives; re-pushed on re-attach) */
         endPadStream();   /* the touchpad pointer stream may be interrupted by lifecycle: make up leave/button releases */
         /* treat as minimize: daemon full detach (rendering resources freed,
          * wayland window kept alive). Clear attached locally too —
@@ -452,8 +466,9 @@ public class WlWindowActivity extends Activity {
         super.onWindowFocusChanged(hasFocus);
         WlBinder.focus(id, hasFocus);   /* focus notifies the wayland client (configure ACTIVATED) */
         if (hasFocus) {
-            tryShowIme();     /* C_IME_SHOW may arrive before focus does (input state kept across re-attach) */
-            pushClipboard();  /* daemon restart / listener missed the change → re-push while focused */
+            tryShowIme();        /* C_IME_SHOW may arrive before focus does (input state kept across re-attach) */
+            pushClipboard();     /* daemon restart / listener missed the change → re-push while focused */
+            applyPointerCapture();   /* the system broke the capture silently on focus loss — re-request (mode unchanged) */
         }
         Log.i(TAG, "win " + id + " focus=" + hasFocus);
     }
@@ -995,27 +1010,75 @@ public class WlWindowActivity extends Activity {
             KEY = 9, TOUCH_DOWN = 11, TOUCH_MOTION = 12, TOUCH_UP = 13,
             TOUCH_CANCEL = 14;
 
-    /* ---- Pointer capture (deprecated, #21) ----
-     * The pointer-constraints implementation is gone: the daemon no longer
-     * sends C_CAPTURE — relative motion is now computed without capture (see
-     * sendMotionAndRel, same as legacy). The system-capture hookup + the
-     * C_CAPTURE handler remain only for old-daemon compatibility; normally
-     * always false. */
-    private boolean ptrCaptured;
+    /* ---- Pointer capture (zwp_pointer_constraints_v1 state sync) ----
+     * The daemon only mirrors the client's constraint state (C_CAPTURE:
+     * mode + confine rect in view px — see the daemon's pure-sync design);
+     * activation and limiting are entirely local:
+     *   NONE    — normal mode: absolute positions, rel = absolute-position
+     *             diff (the uncaptured AXIS_RELATIVE_* is always 0);
+     *   CONFINE — requestPointerCapture + a virtual clamped position:
+     *             confinex/y accumulates AXIS_RELATIVE_* inside the rect and
+     *             the clamped point is sent as absolute motion;
+     *   LOCK    — requestPointerCapture, relative-only: AXIS_RELATIVE_*
+     *             deltas, no absolute motion (the client cursor stays frozen
+     *             where capture started; buttons anchor at that point).
+     * The system silently breaks capture on focus loss; onWindowFocusChanged
+     * re-requests it (the daemon never re-sends C_CAPTURE for that — the
+     * constraint object lives on, its mirror is unchanged).
+     * Benign race: C_CAPTURE (ctrl node) and input events (input node) are
+     * unordered across binder nodes — for at most one event around a mode
+     * switch the old mode's classification applies. */
+    private int captureMode = CAPTURE_NONE;
+    private final int[] capRect = new int[4];   /* confine region, view px (zeros = whole window) */
+    private float confinex, confiney;           /* virtual clamped position (CONFINE) */
 
-    private void setPointerCaptured(boolean on) {
-        if (ptrCaptured == on) return;
-        ptrCaptured = on;
+    /* confine box = capRect ∩ live window (invalid/zero rect = whole window;
+     * a degenerate intersection collapses to its lower edge) */
+    private float confLoX() { return capRect[2] > 0 ? Math.max(0, capRect[0]) : 0f; }
+    private float confLoY() { return capRect[3] > 0 ? Math.max(0, capRect[1]) : 0f; }
+    private float confHiX() {
+        return capRect[2] > 0 ? Math.max(confLoX(),
+                Math.min(lastW - 1f, capRect[0] + capRect[2] - 1f)) : lastW - 1f;
+    }
+    private float confHiY() {
+        return capRect[3] > 0 ? Math.max(confLoY(),
+                Math.min(lastH - 1f, capRect[1] + capRect[3] - 1f)) : lastH - 1f;
+    }
+
+    /** New constraint state from the daemon (request / set_region / destroy):
+     *  adopt the mode + rect, anchor the virtual position, (re)capture. */
+    private void setPointerCaptureMode(int mode, int rx, int ry, int rw, int rh) {
+        captureMode = mode;
+        capRect[0] = rx; capRect[1] = ry; capRect[2] = rw; capRect[3] = rh;
+        if (mode == CAPTURE_CONFINE) {
+            /* anchor inside the box: the current pointer when known, else the box center */
+            float ax = Float.isNaN(lastMouseX) ? (confLoX() + confHiX()) / 2f : lastMouseX;
+            float ay = Float.isNaN(lastMouseY) ? (confLoY() + confHiY()) / 2f : lastMouseY;
+            confinex = limitRange(confLoX(), confHiX(), ax);
+            confiney = limitRange(confLoY(), confHiY(), ay);
+        } else if (mode == CAPTURE_LOCK) {
+            /* buttons anchor at the frozen position (window center if unknown) */
+            if (Float.isNaN(lastMouseX)) lastMouseX = lastW / 2f;
+            if (Float.isNaN(lastMouseY)) lastMouseY = lastH / 2f;
+        }
+        applyPointerCapture();
+        Log.i(TAG, "win " + id + ": pointer capture mode=" + mode
+                + " rect=" + rx + "," + ry + " " + rw + "x" + rh);
+    }
+
+    /** (Re-)request/release the system capture without touching the anchor
+     *  (focus regained: capture broke silently, the mode is unchanged). */
+    private void applyPointerCapture() {
         android.view.View v = getWindow().getDecorView();
-        if (on) v.requestPointerCapture();
+        if (captureMode != CAPTURE_NONE) v.requestPointerCapture();
         else v.releasePointerCapture();
-        Log.i(TAG, "win " + id + ": pointer capture " + (on ? "on" : "off"));
     }
 
     @Override
     public void onPointerCaptureChanged(boolean hasCapture) {
         super.onPointerCaptureChanged(hasCapture);
-        ptrCaptured = hasCapture;   /* sync when the system side breaks in (the daemon-side suppression still applies) */
+        Log.i(TAG, "win " + id + ": pointer capture " + (hasCapture ? "granted" : "lost")
+                + " (mode=" + captureMode + ")");   /* log-only: the daemon owns the mode */
     }
 
     /* ---- Client cursor (wl_pointer.set_cursor) ----
@@ -1106,6 +1169,29 @@ public class WlWindowActivity extends Activity {
         lastMouseX = lastMouseY = Float.NaN;   /* no rel diff across a leave */
     }
 
+    /** Make up the pointer enter at the mode-valid position (NONE = raw event
+     *  position, CONFINE = the virtual clamped position, LOCK = the frozen
+     *  anchor, window center when unknown) — protocol requires enter before
+     *  motion/button/axis. */
+    private void padEnter(MotionEvent ev) {
+        padInWin = true;
+        switch (captureMode) {
+        case CAPTURE_LOCK:
+            if (Float.isNaN(lastMouseX)) lastMouseX = lastW / 2f;
+            if (Float.isNaN(lastMouseY)) lastMouseY = lastH / 2f;
+            break;
+        case CAPTURE_CONFINE:
+            lastMouseX = confinex;
+            lastMouseY = confiney;
+            break;
+        default:
+            lastMouseX = ev.getX();
+            lastMouseY = ev.getY();
+            break;
+        }
+        WlBinder.input(id, PTR_ENTER, 0, lastMouseX, lastMouseY, 0, 0, 0);
+    }
+
     /* ---- Main pointer handling (legacy handleMouseEvent = the virtual
      *      mouse for physical-mouse events AND single-finger touchpad
      *      contact) ----
@@ -1126,22 +1212,56 @@ public class WlWindowActivity extends Activity {
     private int mouseSavedBS;
     private float lastMouseX = Float.NaN, lastMouseY = Float.NaN;
 
+    private float limitRange(float a, float b, float val){
+        if(val<a) return a;
+        if(val>b) return b;
+        return val;
+    }
+
+    /* Three-mode dispatch (see the capture block above): NONE = absolute +
+     * abs-diff rel; LOCK = AXIS_RELATIVE_* only, position frozen at the
+     * capture point; CONFINE = AXIS_RELATIVE_* accumulated into the clamped
+     * virtual position, sent as absolute motion. lastMouseX/Y always hold
+     * the position the client believes the pointer is at. */
     private void handleMouseEvent(MotionEvent ev) {
-        float x = ev.getX(), y = ev.getY();
-        if (!padInWin) {   /* no prior hover (touchpad tap / scroll without hover) → make up the enter: protocol requires it before motion/button */
-            padInWin = true;
-            WlBinder.input(id, PTR_ENTER, 0, x, y, 0, 0, 0);
+        float ex = ev.getX(), ey = ev.getY();
+        float dx, dy;
+        boolean sendabs;
+        float x, y;
+        switch (captureMode) {
+        case CAPTURE_LOCK:
+            /* captured: only the relative axes are populated (sum over the
+             * batch); no absolute motion — the client cursor stays frozen */
+            dx = sumAxis(ev, MotionEvent.AXIS_RELATIVE_X);
+            dy = sumAxis(ev, MotionEvent.AXIS_RELATIVE_Y);
+            if (Float.isNaN(lastMouseX)) lastMouseX = lastW / 2f;
+            if (Float.isNaN(lastMouseY)) lastMouseY = lastH / 2f;
+            sendabs = false;
+            x = lastMouseX; y = lastMouseY;
+            break;
+        case CAPTURE_CONFINE:
+            dx = sumAxis(ev, MotionEvent.AXIS_RELATIVE_X);
+            dy = sumAxis(ev, MotionEvent.AXIS_RELATIVE_Y);
+            confinex = limitRange(confLoX(), confHiX(), confinex + dx);
+            confiney = limitRange(confLoY(), confHiY(), confiney + dy);
+            sendabs = true;
+            x = lastMouseX = confinex;
+            y = lastMouseY = confiney;
+            break;
+        default:   /* CAPTURE_NONE — uncaptured AXIS_RELATIVE_* is always 0 */
+            dx = Float.isNaN(lastMouseX) ? 0f : ex - lastMouseX;
+            dy = Float.isNaN(lastMouseY) ? 0f : ey - lastMouseY;
+            sendabs = true;
+            x = lastMouseX = ex;
+            y = lastMouseY = ey;
+            break;
         }
-        float dx = 0f, dy = 0f;
-        if (!Float.isNaN(lastMouseX)) {
-            dx = x - lastMouseX;
-            dy = y - lastMouseY;
-        }
-        lastMouseX = x;
-        lastMouseY = y;
-        WlBinder.input(id, PTR_MOTION, 0, x, y, 0, 0, 0);
+        if (!padInWin)
+            padEnter(ev);   /* no prior hover (touchpad tap without hover) → make up the enter */
         if (dx != 0f || dy != 0f)
             WlBinder.input(id, PTR_REL, 0, dx, dy, 0, 0, 0);
+        if (sendabs)
+            WlBinder.input(id, PTR_MOTION, 0, x, y, 0, 0, 0);
         int bs = ev.getButtonState();
         int diff = mouseSavedBS ^ bs;
         if (diff != 0) {
@@ -1199,12 +1319,8 @@ public class WlWindowActivity extends Activity {
             return;
         }
         if (a != MotionEvent.ACTION_MOVE) return;
-        if (!padInWin) {
-            padInWin = true;
-            lastMouseX = ev.getX();
-            lastMouseY = ev.getY();
-            WlBinder.input(id, PTR_ENTER, 0, lastMouseX, lastMouseY, 0, 0, 0);
-        }
+        if (!padInWin)
+            padEnter(ev);   /* the classifier may tag cls=3 from the first event → enter before the axis */
         float v = sumAxis(ev, MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE);
         float h = sumAxis(ev, MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE);
         if (v != 0 || h != 0)
@@ -1291,32 +1407,45 @@ public class WlWindowActivity extends Activity {
         Log.d(TAG, "generic act=" + ev.getActionMasked() + " src=0x"
                 + Integer.toHexString(ev.getSource()) + " tool=" + ev.getToolType(0)
                 + " hist=" + ev.getHistorySize());
-        if (!isMouse(ev))
+        /* Capture 模式下事件源不同:requestPointerCapture 后系统停掉 hover 合成
+         * (PointerChoreographer 不再产出 0x2002 鼠标流),触摸板原始流以
+         * ACTION_MOVE + SOURCE_TOUCHPAD(0x100008) 到达,相对量在
+         * AXIS_RELATIVE_X/Y — isMouse() 的 0x2002 判定不再命中,按捕获态放行
+         * (NONE 模式照旧忽略,两条流不会重复处理)。 */
+        boolean capturedPad = captureMode != CAPTURE_NONE
+                && ev.isFromSource(InputDevice.SOURCE_TOUCHPAD);
+        if (!isMouse(ev) && !capturedPad)
             return super.onGenericMotionEvent(ev);
         switch (ev.getActionMasked()) {
+        case MotionEvent.ACTION_MOVE:
+            /* captured 原始触摸板流(单指移动 = 虚拟鼠标;两指 = 滚动) */
+            if (ev.getClassification() == CLS_TWO_FINGER_SWIPE) {
+                handleTouchpadScroll(ev);
+                return true;
+            }
+            if (ev.getClassification() == CLS_MULTI_FINGER_SWIPE
+                    || ev.getClassification() == CLS_PINCH)
+                return true;   /* captured: no touch-passthrough stream, swallow */
+            handleMouseEvent(ev);
+            return true;
         case MotionEvent.ACTION_HOVER_ENTER:
             if (padInWin) {   /* pointer already inside (made up by a scroll/tap) → protocol forbids a 2nd enter, treat as motion */
                 handleMouseEvent(ev);
                 return true;
             }
-            padInWin = true;
-            lastMouseX = ev.getX();
-            lastMouseY = ev.getY();
-            WlBinder.input(id, PTR_ENTER, 0, ev.getX(), ev.getY(), 0, 0, 0);
+            padEnter(ev);
             return true;
         case MotionEvent.ACTION_HOVER_MOVE:
             handleMouseEvent(ev);   /* motion + rel diff + button diff (enter already paired by HOVER_ENTER) */
             return true;
         case MotionEvent.ACTION_HOVER_EXIT:
+            if (captureMode != CAPTURE_NONE)
+                return true;   /* captured: the pointer cannot leave the window (this exit is capture-start churn) */
             endPadStream();   /* leave + release leftovers + reset the rel anchor */
             return true;
         case MotionEvent.ACTION_SCROLL: {
-            if (!padInWin) {   /* same as the scroll-classification path: enter before the axis */
-                padInWin = true;
-                lastMouseX = ev.getX();
-                lastMouseY = ev.getY();
-                WlBinder.input(id, PTR_ENTER, 0, ev.getX(), ev.getY(), 0, 0, 0);
-            }
+            if (!padInWin)   /* same as the scroll-classification path: enter before the axis */
+                padEnter(ev);
             float fv = sumAxis(ev, MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE);
             float fh = sumAxis(ev, MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE);
             if (fv != 0 || fh != 0) {   /* touchpad pixel distances: finger source, no position (see handleTouchpadScroll) */
@@ -1325,8 +1454,16 @@ public class WlWindowActivity extends Activity {
             }
             float v = ev.getAxisValue(MotionEvent.AXIS_VSCROLL);
             float h = ev.getAxisValue(MotionEvent.AXIS_HSCROLL);
-            if (v != 0 || h != 0)   /* wheel notches; v1/v2 = pointer position (surface-coord motion made up in the axis frame) */
-                WlBinder.input(id, PTR_AXIS, 0, -v, h, ev.getX(), ev.getY(), 0);
+            if (v != 0 || h != 0) {
+                /* wheel notches; v1/v2 = pointer position for the synthesized
+                 * surface-coord motion in the axis frame: LOCK = 0,0 (no
+                 * motion — the client cursor is frozen), CONFINE = the
+                 * clamped virtual position, NONE = raw */
+                float px = 0f, py = 0f;
+                if (captureMode == CAPTURE_CONFINE) { px = confinex; py = confiney; }
+                else if (captureMode == CAPTURE_NONE) { px = ev.getX(); py = ev.getY(); }
+                WlBinder.input(id, PTR_AXIS, 0, -v, h, px, py, 0);
+            }
             return true;
         }
         case MotionEvent.ACTION_BUTTON_PRESS:

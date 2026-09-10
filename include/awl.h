@@ -35,12 +35,18 @@ typedef struct awl_window_callbacks {
     void (*window_destroyed)(void* user, uint64_t id);
     void (*window_title)(void* user, uint64_t id, const char* title);
 
-    /* Pointer capture state change (zwp_pointer_constraints_v1 lock_pointer
-     * created/destroyed, invoked on the client's protocol dispatch thread) →
-     * the adaptation layer tells the Activity to
-     * requestPointerCapture/releasePointerCapture (while captured, relative
-     * motion is delivered as AWL_IN_PTR_REL). */
-    void (*pointer_lock)(void* user, uint64_t id, int locked);
+    /* Pointer constraint state change (zwp_pointer_constraints_v1
+     * lock/confine request, set_region on a live constraint, or object /
+     * surface destruction — pure state sync, always on the client's
+     * dispatch thread; the input forwarding path never branches on this) →
+     * the adaptation layer tells the Activity over C_CAPTURE: mode =
+     * CONFINE/LOCK → requestPointerCapture (captured motion arrives as
+     * AWL_IN_PTR_REL, the Activity synthesizes any clamped absolute motion
+     * itself), NONE → releasePointerCapture. rx,ry,rw,rh = confine region
+     * in Activity view pixels (zeros = whole window for CONFINE, ignored
+     * for NONE/LOCK). */
+    void (*pointer_lock)(void* user, uint64_t id, int mode,
+                         int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 
     /* surface commit (new buffer ready) → the adaptation layer pulls and renders */
     void (*window_dirty)(void* user, uint64_t id);
@@ -134,6 +140,14 @@ int awl_display_zoom(void);           /* current zoom pct (daemon config reads) 
  * Each event carries its target window id (input reaching an Activity goes
  * to that window). */
 
+/* pointer_lock modes (mirror of the Activity's CAPTURE_* in
+ * WlWindowActivity.java — do not renumber, they cross the ctrl parcel) */
+enum {
+    AWL_CAPTURE_NONE    = 0,
+    AWL_CAPTURE_CONFINE = 1,
+    AWL_CAPTURE_LOCK    = 2,
+};
+
 enum {
     AWL_IN_PTR_ENTER = 1,    /* x,y view coordinates */
     AWL_IN_PTR_LEAVE = 2,
@@ -143,7 +157,10 @@ enum {
                                (×10+discrete), code=1 touchpad finger pixel
                                distance (source=finger, raw value, no
                                discrete) */
-    AWL_IN_PTR_REL = 6,      /* x,y relative motion (captured state; capture protocol todo) */
+    AWL_IN_PTR_REL = 6,      /* x,y relative motion (captured state: while a
+                               lock/confine constraint is active the Activity
+                               reports AXIS_RELATIVE_X/Y, otherwise the
+                               absolute-position diff) */
     AWL_IN_KBD_ENTER = 7,    /* id gained keyboard focus */
     AWL_IN_KBD_LEAVE = 8,
     AWL_IN_KEY = 9,          /* code=evdev, v1=state(1/0) */
