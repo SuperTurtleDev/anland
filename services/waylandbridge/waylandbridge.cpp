@@ -176,6 +176,14 @@ struct death_link {
 };
 static std::vector<death_link*> g_links;   /* guarded by g_state_lock */
 
+/* Any window still attached? (caller holds g_state_lock) — foreground
+ * scheduling keeps the daemon boosted while the attach count is non-zero */
+static bool any_attached_locked(void) {
+    for (auto& [id, ws] : g_wins)
+        if (ws.attached) return true;
+    return false;
+}
+
 /* Full detach (minimize semantics: wayland window kept alive, render
  * resources/control channel fully torn down).
  * pause / evict / process death / window destroy all take this path.
@@ -184,11 +192,14 @@ static std::vector<death_link*> g_links;   /* guarded by g_state_lock */
  * goes through rwl+ev_lock+socket flush; must not hold g_state_lock). */
 static void detach_window(uint64_t id) {
     bool had_kbd = false;
+    bool sched_drop = false;      /* was attached → restore the client's cgroups */
+    bool sched_none_left = false; /* this detach emptied the attach set → self falls back */
     awl_renderer_attach(id, nullptr);      /* free GL resources (window and texture state stays inside the renderer) */
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
         auto it = g_wins.find(id);
         if (it != g_wins.end()) {
+            sched_drop = it->second.attached;
             it->second.attached = false;
             had_kbd = it->second.kbd_focus;
             it->second.kbd_focus = false;
@@ -198,6 +209,14 @@ static void detach_window(uint64_t id) {
                 it->second.ctrl = nullptr;
             }
         }
+        sched_none_left = sched_drop && !any_attached_locked();   /* attach count hit 0 → self falls back */
+    }
+    /* foreground scheduling restore (cgroup IO + /proc walk: outside g_state_lock;
+     * the wayland window is alive here, so the id still resolves to its client) */
+    if (sched_drop) {
+        pid_t p = awl_window_client_pid(id);
+        if (p > 0) awl_sched_set(p, 0);
+        if (sched_none_left) awl_sched_set(getpid(), 0);
     }
     /* only synthesize leave when it held keyboard focus: avoids a duplicate
      * leave after T_FOCUS(false) was already sent, and the side effect of
@@ -435,18 +454,30 @@ static void cb_window_destroyed(void* user, uint64_t id) {
     LOGI("window %llu destroyed", (unsigned long long)id);
     awl_renderer_attach(id, nullptr);
     AIBinder* ctrl = nullptr;
+    bool sched_drop = false;      /* was attached → restore the client's cgroups */
+    bool sched_none_left = false; /* the destroy emptied the attach set → self falls back */
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
         auto it = g_wins.find(id);
         if (it != g_wins.end()) {
             ctrl = it->second.ctrl;
             it->second.ctrl = nullptr;    /* ownership transferred to this send */
+            sched_drop = it->second.attached;
         }
         g_wins.erase(id);
+        sched_none_left = sched_drop && !any_attached_locked();
         for (death_link* dl : g_links) {
             for (auto it2 = dl->ids.begin(); it2 != dl->ids.end(); ++it2)
                 if (*it2 == id) { dl->ids.erase(it2); break; }
         }
+    }
+    /* foreground scheduling restore: this callback still runs before the
+     * logic layer unlinks the surface, so the id resolves to its client even
+     * on the client-death path (resources die before the wl_client) */
+    if (sched_drop) {
+        pid_t p = awl_window_client_pid(id);
+        if (p > 0) awl_sched_set(p, 0);
+        if (sched_none_left) awl_sched_set(getpid(), 0);
     }
     /* tell the Activity to finish over the control channel (client already
        closed the window); on failure fall back to an explicit broadcast
@@ -955,6 +986,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         /* single atomic decision point (mutually exclusive with cb_window_destroyed / concurrent SURFACE) */
         AIBinder* evicted = nullptr;
         bool gone = false;
+        bool was_attached = true;   /* pre-decision value: false→true flip = first holder (fg-sched boost) */
         {
             std::lock_guard<std::mutex> lk(g_state_lock);
             auto it = g_wins.find(id);
@@ -962,6 +994,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
                 gone = true;   /* window destroyed during attach → rollback */
             } else {
                 awl_win_state& ws = it->second;
+                was_attached = ws.attached;   /* read before the evict branch clears it */
                 /* a different holder already exists → evict (single-attach
                  * invariant): detach the old ctrl, order it to kill itself
                  * over the old channel outside the lock; same host
@@ -1000,6 +1033,16 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
                  (unsigned long long)id);
             AParcel_writeInt32(out, -1);
             return STATUS_OK;
+        }
+        /* foreground scheduling: first holder of this window → boost the
+         * client's process subtree (+ ourselves, idempotent). The flip guard
+         * skips repeat SURFACE and the evict branch (no net attach change). */
+        if (!was_attached) {
+            pid_t cpid = awl_window_client_pid(id);
+            if (cpid > 0) {
+                awl_sched_set(cpid, 1);
+                awl_sched_set(getpid(), 1);
+            }
         }
         ime_reopen_on_attach(id);            /* input state kept alive: enabled during detach → reopen */
         capture_reopen_on_attach(id);        /* constraint still active (persistent) → re-capture */

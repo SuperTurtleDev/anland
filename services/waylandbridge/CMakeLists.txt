@@ -220,6 +220,7 @@ add_executable(waylandbridge
   awl_data_device.c
   awl_viewport.c
   awl_xwayland.c
+  awl_sched.c
   ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
   ${AWL_GENERATED}/xwayland-shell-v1-server-protocol.h
   ${AWL_GENERATED}/relative-pointer-unstable-v1-protocol.c

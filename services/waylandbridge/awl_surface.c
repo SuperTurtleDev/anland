@@ -59,6 +59,23 @@ struct awl_surface* awl_surface_from_res(struct wl_resource* res) {
     return wl_resource_get_user_data(res);
 }
 
+/* Window id → client host pid, for foreground scheduling (awl_sched.c).
+ * wl_client_get_credentials reads the pid libwayland cached from the socket
+ * credentials at connect time — a plain field copy, valid at any point the
+ * surface still resolves (the window_destroyed callback fires before the
+ * surface is unlinked, so it works on the destroy path too; when a client
+ * dies its resources are torn down before the wl_client itself). Callers
+ * hold no daemon locks (rwl.rd is taken here). */
+pid_t awl_window_client_pid(uint64_t id) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    struct wl_client* c = (s && s->resource) ? wl_resource_get_client(s->resource) : NULL;
+    pid_t pid = -1;
+    if (c) wl_client_get_credentials(c, &pid, NULL, NULL);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    return pid > 0 ? pid : 0;
+}
+
 /* Enqueue a deferred release (caller holds this surface's ev_lock).
  * Full queue = rendering stalled: release the head immediately so the
  * client does not starve (old timing, better than deadlock). */

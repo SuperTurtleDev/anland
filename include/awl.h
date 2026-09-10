@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/types.h>   /* pid_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -132,6 +133,13 @@ int  awl_xwayland_window_serial(uint64_t id, uint64_t* serial);  /* Xwayland
     * that has been associated, 0 = not) — used to pair X-side operations
     * (resize/close) over the mini-wm control channel */
 void awl_window_set_activated(uint64_t id, int activated);   /* ACTIVATED state */
+pid_t awl_window_client_pid(uint64_t id);   /* window id → client host pid, read
+    * fresh from the connect-time cached credentials (0 = unknown/destroyed) */
+/* Foreground scheduling (awl_sched.c): on = move pid's whole /proc subtree
+ * into Android's top-app cgroups, off = back to the root groups. Stateless
+ * and synchronous — the adapter calls it on window attach/detach and with
+ * getpid() for its own boost. Any thread, no daemon locks held. */
+void awl_sched_set(pid_t pid, int on);
 void awl_display_set_zoom(int pct);   /* zoom = 100×Z (50..300; dynamic, #31) */
 int awl_display_zoom(void);           /* current zoom pct (daemon config reads) */
 /* Initial-configure placeholder size (#33, daemon config init_w/init_h — the
