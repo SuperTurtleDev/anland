@@ -290,6 +290,13 @@ struct awl_server {
      * zoom_pct×120/100 via wp_fractional_scale_v1 (kwin round(z×120)). */
     atomic_int zoom_pct;   /* binder thread set_zoom ↔ protocol dispatch threads read, atomic */
 
+    /* View mapping mode (#34, daemon config scale_mode — AWL_SCALE_* in awl.h):
+     * how the content-base rectangle maps into the Android window. Pure
+     * presentation-layer state: render dst / input / confine / IME-rect all
+     * convert through awl_view_map(); no configure size changes. Binder config
+     * thread writes, dispatch/render threads read — atomic, no lock. */
+    atomic_int scale_mode;
+
     /* Initial-configure placeholder size (#33, daemon config init_w/init_h):
      * sent before the Android window exists (get_toplevel initial configure +
      * set_maximized/fullscreen placeholders). Set from the binder config
@@ -359,6 +366,14 @@ void awl_input_cursor_commit(struct awl_surface* s, int32_t off_x, int32_t off_y
  *    lock). */
 uint64_t awl_input_constr_surface_gone(struct awl_surface* s);
 void awl_input_constr_gone_notify(uint64_t win);
+/* Re-convert + re-push the confine rects (view px) of this root's live
+ * constraints — the view mapping changed underneath them (scale_mode switch
+ * or a window resize that moved the letterbox offset / stretch ratio; without
+ * this the APK clamp box sits over the black bars). root_id 0 = every root.
+ * Takes rwl.rd itself: call with no logic-layer lock held; callbacks fire
+ * after release (awl_xdg.c awl_window_resize tail / awl_viewport.c
+ * set_scale_mode). */
+void awl_input_constr_remap(uint64_t root_id);
 
 /* awl_idle.c — zwp_idle_inhibit_manager_v1 (inhibitor state under
  * g_inhib_lock — pure state sync like the constraints above; the Activity

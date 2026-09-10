@@ -795,6 +795,7 @@ static std::mutex g_cfg_lock;
 static int g_cfg_zoom = 100;       /* persisted mirror (real state lives in the logic layer's g_srv.zoom_pct) */
 static int g_cfg_init_w = 800;     /* initial-configure placeholder (#33; mirror of g_srv.init_conf_*) */
 static int g_cfg_init_h = 600;
+static int g_cfg_scale_mode = 0;   /* view mapping mode (#34; mirror of g_srv.scale_mode, AWL_SCALE_*) */
 static char g_sock_dir[256] = "/data/local/tmp/awl";   /* runtime_dir (startup-loaded; see above) */
 
 /* known config keys → valid domain (under g_cfg_lock); unknown keys rejected */
@@ -802,6 +803,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "zoom") { *lo = 50; *hi = 300; return true; }
     if (key == "init_w") { *lo = 100; *hi = 7680; return true; }
     if (key == "init_h") { *lo = 100; *hi = 4320; return true; }
+    if (key == "scale_mode") { *lo = 0; *hi = 2; return true; }
     return false;
 }
 
@@ -857,8 +859,9 @@ static void cfg_save_locked(void) {
     snprintf(tmp, sizeof(tmp), "%s.tmp", AWL_CFG_PATH);
     FILE* f = fopen(tmp, "w");
     if (!f) { LOGE("config save open %s: %s", tmp, strerror(errno)); return; }
-    fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n  \"runtime_dir\": \"%s\"\n}\n",
-            g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, rt);
+    fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
+               "  \"scale_mode\": %d,\n  \"runtime_dir\": \"%s\"\n}\n",
+            g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode, rt);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
     if (rename(tmp, AWL_CFG_PATH) != 0)
@@ -920,6 +923,17 @@ static void cfg_load_and_apply(void) {
     } else if (iw != -1 || ih != -1) {
         LOGE("config: init size %dx%d out of range, ignored", iw, ih);
     }
+    int sm = cfg_parse_int(buf, "scale_mode");
+    if (sm >= AWL_SCALE_STRETCH && sm <= AWL_SCALE_CENTER) {
+        awl_display_set_scale_mode(sm);   /* no windows at startup: remap is a no-op */
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            g_cfg_scale_mode = sm;
+        }
+        LOGI("config: scale_mode=%d (applied at startup)", sm);
+    } else if (sm != -1) {
+        LOGE("config: scale_mode=%d out of range (0..2), ignored", sm);
+    }
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -945,6 +959,26 @@ static int cfg_set(const std::string& key, int32_t val) {
         cfg_save_locked();
         LOGI("config set init size %dx%d (applied to new windows + persisted)",
              g_cfg_init_w, g_cfg_init_h);
+    } else if (key == "scale_mode") {
+        /* zoom shape: apply OUTSIDE g_cfg_lock (the remap chain fires
+         * C_CAPTURE callbacks → binder transacts under g_state_lock); lock
+         * only wraps the mirror + persist */
+        awl_display_set_scale_mode(val);   /* re-pushes confine rects itself */
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            g_cfg_scale_mode = val;
+            cfg_save_locked();
+        }
+        /* every attached window renders one fresh frame under the new dst
+         * mapping (unattached ones draw with it on the next attach) */
+        std::vector<uint64_t> ids;
+        {
+            std::lock_guard<std::mutex> lk(g_state_lock);
+            for (auto& [id, ws] : g_wins)
+                if (ws.attached) ids.push_back(id);
+        }
+        for (uint64_t id : ids) awl_renderer_request_render(id);
+        LOGI("config set scale_mode=%d (applied + persisted)", val);
     }
     return 0;
 }
@@ -1315,6 +1349,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             awl_display_init_size(&iw, &ih);
             v = key == "init_w" ? iw : ih;
         }
+        else if (key == "scale_mode") v = awl_display_scale_mode();
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;

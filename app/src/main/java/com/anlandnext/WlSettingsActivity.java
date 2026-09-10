@@ -117,6 +117,39 @@ public class WlSettingsActivity extends Activity {
         }
         root.addView(presets);
 
+        /* ---- Window scaling mode (fixed-size windows under resize, daemon
+         *      config scale_mode; #34 — stretch/fit-letterbox/centered 1:1) ---- */
+        android.widget.Space gap25 = new android.widget.Space(this);
+        gap25.setMinimumHeight(64);
+        root.addView(gap25);
+
+        TextView scaleTip = new TextView(this);
+        scaleTip.setText(R.string.scale_mode_tip);
+        root.addView(scaleTip);
+
+        RadioGroup scaleRg = new RadioGroup(this);
+        RadioButton stretch = new RadioButton(this);
+        stretch.setId(5);   /* unique within this activity (IME group uses 3/4) */
+        stretch.setText(R.string.scale_mode_stretch);
+        RadioButton fit = new RadioButton(this);
+        fit.setId(6);
+        fit.setText(R.string.scale_mode_fit);
+        RadioButton center = new RadioButton(this);
+        center.setId(7);
+        center.setText(R.string.scale_mode_center);
+        scaleRg.addView(stretch);
+        scaleRg.addView(fit);
+        scaleRg.addView(center);
+        int gotMode = WlBinder.configGet("scale_mode");
+        if (gotMode < 0 || gotMode > 2) gotMode = 0;   /* daemon down / unknown → stretch */
+        (gotMode == 2 ? center : gotMode == 1 ? fit : stretch).setChecked(true);
+        /* listener AFTER the initial setChecked: opening the page must not
+         * fire a write back to the daemon */
+        scaleRg.setOnCheckedChangeListener((g, checkedId) ->
+                WlBinder.configSet("scale_mode",
+                        checkedId == 7 ? 2 : checkedId == 6 ? 1 : 0));
+        root.addView(scaleRg);
+
         /* ---- Initial window size (first-frame configure placeholder; #33,
          *      daemon config init_w/init_h — new windows only) ---- */
         android.widget.Space gap3 = new android.widget.Space(this);

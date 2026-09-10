@@ -21,6 +21,10 @@
     <string name="ime_mode_inset">让位（surface 缩到键盘上方, 客户端 reflow）</string>
     <string name="ime_mode_overlay">覆盖（键盘悬浮在窗口上层, surface 不变）</string>
     <string name="zoom_tip">显示缩放（wayland 窗口整体, 立即生效）:</string>
+    <string name="scale_mode_tip">窗口缩放方式（固定尺寸窗口被拉伸时, 立即生效）:</string>
+    <string name="scale_mode_stretch">拉伸（填满窗口, 比例可能失真）</string>
+    <string name="scale_mode_fit">等比缩放（完整显示, 居中留黑边）</string>
+    <string name="scale_mode_center">原始大小（1:1 不缩放, 居中）</string>
     <string name="init_size_tip">初始窗口尺寸（Android 定尺寸前的首帧占位, 仅对新窗口生效）:</string>
     <string name="init_size_w">宽</string>
     <string name="init_size_h">高</string>

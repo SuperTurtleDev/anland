@@ -895,10 +895,11 @@ static bool upload_shm_texture(wl_window* win, uint64_t sid, wl_tex* t,
 static void render_frame(wl_window* w) {
     /* Layer snapshot (root first, child layers in render stack order bottom→top);
      * layers that fail to fetch / have no buffer are skipped.
-     * #31 zoom: coordinates/sizes are root logical pixels — dst×rs (rs = window
-     * physical / root logical). After scaling, the view still aligns to the
-     * geometry origin (chrome buffer carries 16/10px shadow margins, sharing
-     * the same origin as input mapping). */
+     * #31 zoom: coordinates/sizes are root logical pixels. #34: dst goes
+     * through the unified awl_view_map (×s + centered offset o per
+     * scale_mode), keeping the geometry-origin alignment (chrome buffer
+     * carries 16/10px shadow margins, sharing the same origin as input
+     * mapping). */
     awl_layer_info_t lay[AWL_MAX_LAYERS + 1];   /* +1: client cursor image appended on top */
     int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
     if (n <= 0) return;
@@ -919,12 +920,16 @@ static void render_frame(wl_window* w) {
     glClear(GL_COLOR_BUFFER_BIT);
 
     /* Content basis (geometry rectangle; chrome dst includes shadow margins →
-     * out-of-bounds clipped) → window physical ratio (Z; fixed-size clients
-     * have no valid geometry → root logical size = stretch ratio) */
-    float rsx = gw > 0.5f ? (float)vw / gw
-              : (lay[0].w > 0.5f ? (float)vw / lay[0].w : 1.0f);
-    float rsy = gh > 0.5f ? (float)vh / gh
-              : (lay[0].h > 0.5f ? (float)vh / lay[0].h : 1.0f);
+     * out-of-bounds clipped; fixed-size clients have no valid geometry →
+     * root logical size) → window view rect through the unified awl_view_map
+     * (#34 scale_mode): stretch fills each axis, fit/center scale uniformly
+     * with a centered offset — the bars around the content stay the clear
+     * color above. Degenerate basis → identity map. */
+    float bw = gw > 0.5f ? gw : (lay[0].w > 0.5f ? lay[0].w : 0.0f);
+    float bh = gh > 0.5f ? gh : (lay[0].h > 0.5f ? lay[0].h : 0.0f);
+    float rsx, rsy, rox, roy;
+    awl_view_map(awl_display_scale_mode(), (float)vw, (float)vh, bw, bh,
+                 &rsx, &rsy, &rox, &roy);
 
     glUseProgram(w->program);
     GLint loc = glGetAttribLocation(w->program, "pos");
@@ -980,8 +985,8 @@ static void render_frame(wl_window* w) {
          * GL_BGRA_EXT upload, no swap (chrome+Xwayland showed inverted colors
          * on device, 2026-09-09) */
         glUniform1i(swap_loc, is_dmabuf ? 1 : 0);
-        glUniform4f(dst_loc, ((float)lay[i].x - (float)gox) * rsx,
-                    ((float)lay[i].y - (float)goy) * rsy,
+        glUniform4f(dst_loc, ((float)lay[i].x - (float)gox) * rsx + rox,
+                    ((float)lay[i].y - (float)goy) * rsy + roy,
                     lay[i].w * rsx, lay[i].h * rsy);
         glUniform4f(uv_loc, lay[i].u0, lay[i].v0, lay[i].su, lay[i].sv);
         glBindTexture(GL_TEXTURE_2D, t.texture);

@@ -84,6 +84,47 @@ void awl_surface_content_size(struct awl_surface* s, float* w, float* h) {
     awl_surface_logical_size(s, w, h);
 }
 
+/* ---------------- unified view mapping (#34, daemon config scale_mode) ----------------
+ * Content base (logical) rect → Android window view px: view = logical×s + o.
+ * The ONE conversion shared by render dst, input inverse, relative deltas,
+ * confine regions and the IME cursor rect — every site that used to compute
+ * per-axis phys/content stretch now goes through here, so the scale_mode
+ * geometry (uniform scale + letterbox offset) cannot drift between them.
+ * Degenerate input = identity (pw/ph ≤ 0: toplevel before its first resize;
+ * cw/ch ≤ 0.5: no buffer/geometry yet) — the caller needs no guard of its
+ * own, and the inverse (division) can never hit s = 0. */
+void awl_view_map(int mode, float pw, float ph, float cw, float ch,
+                  float* sx, float* sy, float* ox, float* oy) {
+    if (pw <= 0.0f || ph <= 0.0f || cw <= 0.5f || ch <= 0.5f || mode < 0) {
+        *sx = *sy = 1.0f;
+        *ox = *oy = 0.0f;
+        return;
+    }
+    float kx = pw / cw, ky = ph / ch;
+    float k, dx, dy;   /* uniform scale + centering distance */
+    switch (mode) {
+    case AWL_SCALE_FIT:
+        k = kx < ky ? kx : ky;
+        dx = pw - cw * k;
+        dy = ph - ch * k;
+        break;
+    case AWL_SCALE_CENTER:
+        k = 1.0f;
+        dx = pw - cw;
+        dy = ph - ch;
+        break;
+    default:   /* AWL_SCALE_STRETCH (and any unknown value): legacy fill */
+        *sx = kx; *sy = ky;
+        *ox = *oy = 0.0f;
+        return;
+    }
+    *sx = *sy = k;
+    /* roundf: with zoom≠100% cw = round(phys×100/pct) is not an exact divisor,
+     * an unrounded offset leaves a half-sampled edge column/row that shimmers */
+    *ox = roundf(dx * 0.5f);
+    *oy = roundf(dy * 0.5f);
+}
+
 /* Sample region (viewport source; absent = whole buffer) → normalized uv
  * transform for the layer snapshot / cursor layer. The shader uv is already
  * Y-flipped (top-down) and the source rectangle is top-down too, so a plain
@@ -306,6 +347,7 @@ static void fsm_bind(struct wl_client* client, void* data,
 void awl_viewport_setup(void) {
     wl_list_init(&g_srv.frac_scales);
     g_srv.zoom_pct = 100;
+    g_srv.scale_mode = AWL_SCALE_STRETCH;   /* #34 default: legacy fill */
     g_srv.g_viewporter = wl_global_create(
             g_srv.display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
     g_srv.g_frac_scale_mgr = wl_global_create(
@@ -358,4 +400,30 @@ void awl_display_set_zoom(int pct) {
 
 int awl_display_zoom(void) {
     return g_srv.zoom_pct;
+}
+
+/* ---------------- scale mode change (daemon T_CFG_SET → here; any thread) ----
+ * #34: pure presentation-layer switch (render dst / input mapping / confine
+ * rects / IME cursor rect all re-derive per frame or per event from
+ * awl_view_map + this atom). No client re-configure (unlike zoom, the logical
+ * size the client sees never changes — a client filling the window aspect
+ * keeps rendering 1:1 in every mode). The only state cached across frames is
+ * the confine rect in view px → remap + re-push every live constraint after
+ * storing the mode. */
+void awl_display_set_scale_mode(int mode) {
+    if (mode < AWL_SCALE_STRETCH || mode > AWL_SCALE_CENTER) {
+        LOGE("scale mode %d invalid (0..2), ignored", mode);
+        return;
+    }
+    if (mode == g_srv.scale_mode) return;
+    g_srv.scale_mode = mode;
+    LOGI("scale mode → %d (%s)", mode,
+         mode == AWL_SCALE_FIT ? "fit" : mode == AWL_SCALE_CENTER ? "center" : "stretch");
+    /* view-px confine rects are stale under the new mapping → re-convert +
+     * re-push C_CAPTURE (takes rwl itself: call with no logic-layer lock) */
+    awl_input_constr_remap(0);
+}
+
+int awl_display_scale_mode(void) {
+    return g_srv.scale_mode;
 }

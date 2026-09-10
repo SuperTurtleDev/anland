@@ -651,10 +651,13 @@ static int32_t phys_to_logical(int32_t v) {
 }
 
 void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
+    int hit = 0, changed = 0;
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s = awl_surface_by_id(id);
     if (s && (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_XWAYLAND)) {
+        hit = 1;
         pthread_mutex_lock(&s->ev_lock);
+        changed = s->phys_w != w || s->phys_h != h;
         s->phys_w = w;   /* Android window size (for view→logical conversion / render ratio) */
         s->phys_h = h;
         if (s->role == AWL_ROLE_XWAYLAND) {
@@ -665,27 +668,30 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
              * record the size. */
             LOGD("xwayland window %llu phys=%dx%d", (unsigned long long)s->id,
                     w, h);
-            pthread_mutex_unlock(&s->ev_lock);
-            pthread_rwlock_unlock(&g_srv.rwl);
-            return;
+        } else {
+            int32_t lw = phys_to_logical(w);
+            int32_t lh = phys_to_logical(h);
+            if (!s->xdg_role_res || !s->mapped) {
+                /* Window not ready (first buffer not committed / role not built):
+                 * cache it; awl_xdg_flush_pending forces the send after map — the
+                 * initial size signal is not lost */
+                s->pend_w = w;
+                s->pend_h = h;
+                s->has_pending = 1;
+            } else if (lw != s->conf_w || lh != s->conf_h) {
+                s->has_pending = 0;   /* exact value arrived, invalidate the cache */
+                send_configure_locked(s, lw, lh, NULL, 0);
+                wl_client_flush(wl_resource_get_client(s->xdg_role_res));
+            }   /* same size: prevent loops, no resend */
         }
-        int32_t lw = phys_to_logical(w);
-        int32_t lh = phys_to_logical(h);
-        if (!s->xdg_role_res || !s->mapped) {
-            /* Window not ready (first buffer not committed / role not built):
-             * cache it; awl_xdg_flush_pending forces the send after map — the
-             * initial size signal is not lost */
-            s->pend_w = w;
-            s->pend_h = h;
-            s->has_pending = 1;
-        } else if (lw != s->conf_w || lh != s->conf_h) {
-            s->has_pending = 0;   /* exact value arrived, invalidate the cache */
-            send_configure_locked(s, lw, lh, NULL, 0);
-            wl_client_flush(wl_resource_get_client(s->xdg_role_res));
-        }   /* same size: prevent loops, no resend */
         pthread_mutex_unlock(&s->ev_lock);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
+    /* #34: phys moved → the view mapping moved (letterbox offset / stretch
+     * ratio) → this root's cached confine rects (view px) are stale. Remap
+     * takes rwl itself, so it must run after the release above; skipped on a
+     * no-op resize to keep duplicate SURFACE/RESIZE traffic quiet. */
+    if (hit && changed) awl_input_constr_remap(id);
 }
 
 /* Android foreground/focus change → xdg_toplevel ACTIVATED state (configure

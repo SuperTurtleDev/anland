@@ -153,6 +153,30 @@ pid_t awl_window_client_pid(uint64_t id);   /* window id → client host pid, re
 void awl_sched_set(pid_t pid, int on);
 void awl_display_set_zoom(int pct);   /* zoom = 100×Z (50..300; dynamic, #31) */
 int awl_display_zoom(void);           /* current zoom pct (daemon config reads) */
+
+/* View mapping mode (#34, daemon config scale_mode): how the content-base
+ * rectangle is placed inside the Android window. Presentation-layer only —
+ * configure sizes are unaffected (a client that fills the window's aspect
+ * renders 1:1 in every mode; one that keeps a fixed size gets letterboxed
+ * instead of stretched). */
+enum {
+    AWL_SCALE_STRETCH = 0,   /* fill each axis independently (legacy behavior) */
+    AWL_SCALE_FIT = 1,       /* uniform scale to fit inside, centered, letterbox */
+    AWL_SCALE_CENTER = 2,    /* 1:1, centered (content larger than the window is cropped) */
+};
+
+/* Unified view mapping, the single source of truth shared by every
+ * coordinate conversion between the client's content base (logical px) and
+ * the Android window (view px):
+ *   view = logical × s + o        (render dst, confine region, IME cursor rect)
+ *   logical = (view − o) / s      (input, relative deltas)
+ * Degenerate input (pw/ph ≤ 0 — no resize recorded yet — or cw/ch ≤ 0.5)
+ * yields the identity map; an unknown mode falls back to stretch. Pure math,
+ * any thread, no locks. */
+void awl_view_map(int mode, float pw, float ph, float cw, float ch,
+                  float* sx, float* sy, float* ox, float* oy);
+void awl_display_set_scale_mode(int mode);   /* dynamic; invalid → ignored + LOGE */
+int awl_display_scale_mode(void);            /* current mode (daemon config reads) */
 /* Initial-configure placeholder size (#33, daemon config init_w/init_h — the
  * size sent before the Android window exists; the real size follows via
  * awl_window_resize once the Activity surface is ready). Applies to new
