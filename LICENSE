@@ -1,0 +1,74 @@
+awl — Android Wayland Host
+Copyright (c) 2026 Anland Project. All rights reserved.
+
+This repository, its source code and its build artifacts ("the Software")
+are the property of the copyright holder. All rights are reserved; no
+rights are granted except as expressly set out below.
+
+The Software is made available under your choice of three licenses. You
+choose the license that fits your use; the Community and Contributor
+licenses apply at your option, without contacting the copyright holder,
+and the Commercial License requires the copyright holder's written grant.
+
+  1. Anland Community License (LICENSE-COMMUNITY.txt)
+     Free for non-commercial use. You may use, study, modify, and
+     redistribute the Software, provided that any redistribution —
+     including of your modifications — is made to its recipients under
+     the same Community License, with the corresponding source code.
+
+  2. Anland Contributor License (LICENSE-CONTRIBUTOR.txt)
+     Small-scale commercial use: you may use the Software and your
+     modifications commercially while the total number of devices you
+     have deployed them on remains below 1,000 (cumulative, per
+     organization). Modifications must be open-sourced when distributed.
+     You may redistribute the Software and your modifications, but every
+     such distribution is licensed to its recipients under the Anland
+     Community License — the Contributor License does not travel with
+     distributions, and recipients do not acquire your commercial-use
+     rights.
+
+  3. Anland Commercial License (LICENSE-COMMERCIAL.txt)
+     Commercial use without the copyleft or device restrictions: you may
+     use, modify, and deploy the Software commercially on any number of
+     devices, and you may keep your modifications closed-source. You may
+     not sublicense or otherwise redistribute this license to third
+     parties. This license is granted by the copyright holder through a
+     separate written agreement (see "Commercial licensing" below).
+
+License compatibility note. The Community and Contributor licenses are
+based on the GNU General Public License, version 3, with an additional
+commercial-use restriction. Because the GPL does not permit the addition
+of such a restriction, those licenses are NOT the GNU GPL: the Software
+may not be redistributed under the plain GPLv3 or represented as
+GPL-licensed, and combining it with GPL-licensed code is permitted only
+where the combined work can satisfy both licenses at once.
+
+Scope. Everything in this repository is covered by this licensing scheme,
+with the following exceptions, which are third-party material that keeps
+its own license:
+
+  - third_party/libffi (git submodule) — libffi,
+    Copyright (c) 1996-2024 Anthony Green, Red Hat, Inc. and others.
+    MIT License — see third_party/libffi/LICENSE.
+
+  - third_party/wayland (git submodule) — libwayland (fork of the
+    upstream freedesktop.org project, carried patches on top),
+    Copyright (c) 2008-2012 Kristian Høgsberg and contributors.
+    MIT-style license — see third_party/wayland/COPYING.
+
+  - services/waylandbridge/protocols/*.xml — Wayland protocol
+    definitions taken from the Wayland and wayland-protocols projects,
+    Copyright (c) 2008-2022 Intel Corporation, Collabora Ltd., Red Hat,
+    Inc., and other contributors named in each file's copyright header.
+    MIT License — see the copyright notices inside each file. Code
+    generated from these files (build/gen/*-protocol.c and the
+    *-server-protocol.h headers) inherits their license.
+
+The copyright holder's grants under this scheme cover only the project's
+own code. Nothing in this repository relicenses the third-party
+components above, which remain available to you under their own (MIT)
+terms.
+
+Commercial licensing. For a Commercial License grant, or for commercial
+use exceeding the terms of the Anland Contributor License, contact the
+copyright holder through the project's repository.

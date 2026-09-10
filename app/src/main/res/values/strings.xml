@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Anland Wayland</string>
+
+    <!-- MainActivity -->
+    <string name="settings_title">Window Settings</string>
+    <string name="status_daemon_unreachable">daemon not connected (binder anland.host unreachable)</string>
+    <string name="status_window_count">Windows: %1$d (daemon running)</string>
+    <string name="status_empty">No wayland windows yet\n(start a Wayland app in the container)</string>
+    <string name="window_fallback_title">Window %1$d</string>
+    <string name="menu_close">Close</string>
+    <string name="menu_window_info">Window info</string>
+    <string name="window_info_format">Window id: %1$d\nTitle: %2$s\nState: %3$s</string>
+    <string name="title_none">(none)</string>
+    <string name="state_attached_foreground">Attached (foreground)</string>
+    <string name="state_detached_kept">Detached (kept alive)</string>
+    <string name="dialog_ok">OK</string>
+
+    <!-- WlSettingsActivity -->
+    <string name="ime_mode_tip">When the soft keyboard opens, the wayland window:</string>
+    <string name="ime_mode_inset">Inset (surface shrinks above the keyboard, client reflows)</string>
+    <string name="ime_mode_overlay">Overlay (keyboard floats over the window, surface unchanged)</string>
+    <string name="zoom_tip">Display zoom (whole wayland window, applies immediately):</string>
+</resources>

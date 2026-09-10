@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="@string/app_name"
+        android:allowBackup="false">
+
+        <!-- Launcher entry: window list (Attached/Detached state) -->
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- wayland window (multi-instance: documentLaunchMode + unique data URI
+             per id → one task per id); theme/configChanges mimic legacy: no-title
+             fullscreen + rotation never rebuilds (surface resize only) -->
+        <activity android:name=".WlWindowActivity"
+            android:exported="false"
+            android:launchMode="standard"
+            android:documentLaunchMode="intoExisting"
+            android:excludeFromRecents="false"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
+
+        <!-- Window behavior settings -->
+        <activity android:name=".WlSettingsActivity" android:exported="false"/>
+
+        <!-- client closed its own window → daemon notification finishes the Activity -->
+        <receiver android:name=".WindowGoneReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="anland.WINDOW_GONE"/>
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

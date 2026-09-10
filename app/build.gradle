@@ -1,0 +1,51 @@
+// Single-module gradle project: root project IS the application. Pure Java
+// APK — all rendering/protocol lives in the root daemon (waylandbridge), so
+// there are no dependencies and no native libs. Signing uses debug.keystore
+// (gitignored; the Makefile bootstraps it with keytool when missing) so
+// release APKs stay installable over previous dev builds.
+plugins {
+    id 'com.android.application' version '9.4.0'
+}
+
+android {
+    namespace 'com.anlandnext'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.anlandnext'
+        minSdk 29
+        targetSdk 29
+        versionCode 1
+        versionName '0.1'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    signingConfigs {
+        release {
+            storeFile file('debug.keystore')
+            storePassword 'anland'
+            keyAlias 'anland'
+            keyPassword 'anland'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    lint {
+        // Sideloaded root tool — never distributed via Google Play; targetSdk 29
+        // is deliberate (legacy surface/popup semantics).
+        disable 'ExpiredTargetSdkVersion'
+    }
+}
+
+dependencies {
+}

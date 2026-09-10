@@ -1,0 +1,16 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+// Single-module project: the root project IS the application (no ':app'
+// child module) — gradle stays confined to app/, the awl repo root keeps
+// only the Makefile.
+rootProject.name = "anland-wayland"

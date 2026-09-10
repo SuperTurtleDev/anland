@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Anland Wayland</string>
+
+    <!-- MainActivity -->
+    <string name="settings_title">窗口设置</string>
+    <string name="status_daemon_unreachable">daemon 未连接（binder anland.host 不可达）</string>
+    <string name="status_window_count">窗口数: %1$d（daemon 运行中）</string>
+    <string name="status_empty">暂无 wayland 窗口\n（在容器中启动 Wayland 应用）</string>
+    <string name="window_fallback_title">窗口 %1$d</string>
+    <string name="menu_close">关闭</string>
+    <string name="menu_window_info">窗口信息</string>
+    <string name="window_info_format">窗口 id: %1$d\n标题: %2$s\n状态: %3$s</string>
+    <string name="title_none">（无）</string>
+    <string name="state_attached_foreground">Attached（前台）</string>
+    <string name="state_detached_kept">Detached（保活）</string>
+    <string name="dialog_ok">确定</string>
+
+    <!-- WlSettingsActivity -->
+    <string name="ime_mode_tip">软键盘弹出时 wayland 窗口的显示:</string>
+    <string name="ime_mode_inset">让位（surface 缩到键盘上方, 客户端 reflow）</string>
+    <string name="ime_mode_overlay">覆盖（键盘悬浮在窗口上层, surface 不变）</string>
+    <string name="zoom_tip">显示缩放（wayland 窗口整体, 立即生效）:</string>
+</resources>

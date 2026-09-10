@@ -1,0 +1,11 @@
+# Build artifacts (incl. apk intermediates / libffi-android-out)
+build/
+
+# Debug signing (generated locally; bootstrapped by keytool in make apk when missing)
+app/debug.keystore
+
+# gradle
+.gradle/
+local.properties
+
+

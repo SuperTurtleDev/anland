@@ -1,0 +1,149 @@
+ANLAND CONTRIBUTOR LICENSE
+Version 1.0 — September 2026
+
+Copyright (c) 2026 Anland Project. All rights reserved.
+
+This License applies to awl — Android Wayland Host — and to any
+Modification of it, as made available by the copyright holder. By
+exercising any right granted here, You accept the terms of this License.
+
+0. BASIS OF THIS LICENSE
+
+This License is based on the GNU General Public License, version 3, as
+published by the Free Software Foundation (https://www.gnu.org/licenses/
+gpl-3.0.html), modified by the small-scale commercial-use condition in
+Section 4 and the distribution conditions in Section 3. Because the GPL
+does not permit the addition of such conditions, this License is NOT the
+GNU General Public License, is not OSI-approved, and software distributed
+under it must not be represented as GPL-licensed.
+
+1. DEFINITIONS
+
+"The Software" means awl — Android Wayland Host — together with all of
+its source code, build scripts, and binaries, as made available under
+this License.
+
+"Modification" means any work, in source or object form, that is derived
+from or based on the Software, in whole or in part, including combined
+works in which the Software or portions of it are included verbatim or
+with changes.
+
+"Corresponding Source" means all source code needed to generate, build,
+and install the object code of a work, in the preferred form for making
+Modifications, including the interface definition files and the scripts
+used to control compilation and installation.
+
+"Distribute" means to convey or otherwise make the Software or a
+Modification available to any third party, by any means.
+
+"Commercial Use" means any use of the Software intended for, or in
+pursuit of, commercial advantage or monetary compensation. It includes
+deploying the Software in products or services that are sold, licensed,
+or monetized, in business operations, or on behalf of a commercial
+entity.
+
+"Device" means any single hardware unit on which the Software or a
+Modification executes or from which it is provided — a phone, a tablet,
+a single-board computer, a virtual machine instance, or similar.
+
+2. GRANT
+
+Subject to the terms of this License, the copyright holder grants You a
+worldwide, royalty-free, non-exclusive license to use, reproduce, study,
+modify, and Distribute the Software and Modifications, including for
+Commercial Use within the limits of Section 4.
+
+3. DISTRIBUTION — UNDER THE COMMUNITY LICENSE ONLY
+
+3.1 This License does not travel with distributions. If You Distribute
+    the Software, in source or object/executable form, the distribution
+    is licensed to its recipients under the Anland Community License
+    (LICENSE-COMMUNITY.txt), and You must give each recipient a copy of
+    that license together with it. Recipients acquire their rights from
+    the Anland Community License, not from this License: they acquire no
+    commercial-use rights through Your distribution, and they may not
+    Distribute under this License.
+
+3.2 If You Distribute a Modification, You must license it to its
+    recipients under the Anland Community License and, for object or
+    executable forms, make its Corresponding Source available to those
+    recipients at no charge — bundled with the distribution, through a
+    written offer valid for at least three years, or through a network
+    server at no charge. When You share a modified build, You must share
+    its source, and Your Modification is received by recipients under
+    the Anland Community License.
+
+3.3 You may not impose on recipients any restriction or condition that
+    contradicts the Anland Community License, and You may not Distribute
+    the Software or a Modification under any other license — including
+    this License, the Anland Commercial License, or the plain GNU GPL.
+
+3.4 Mere use, reproduction, or modification for Your own purposes,
+    including internal deployment within the limits of Section 4,
+    requires no publication of source code.
+
+4. SMALL-SCALE COMMERCIAL USE LIMIT
+
+4.1 Commercial Use is permitted under this License only while the total
+    number of Devices on which You have deployed the Software or any
+    Modification of it is fewer than 1,000.
+
+4.2 The count is cumulative over time and is aggregated across Your
+    entire organization, including subsidiaries and entities under Your
+    common control. A Device on which the Software (or a Modification)
+    has at any time been deployed counts toward the total unless the
+    Software has since been permanently removed from it.
+
+4.3 Upon reaching 1,000 Devices, You must obtain the Anland Commercial
+    License (or cease further commercial deployment) before deploying
+    the Software on any additional Device.
+
+4.4 You must keep records sufficient to demonstrate compliance with this
+    Section and make them available to the copyright holder upon
+    reasonable request.
+
+5. PATENTS
+
+Each contributor grants You a non-exclusive, worldwide, royalty-free
+patent license to make, use, sell, offer for sale, import, and otherwise
+run, modify, and propagate the Software, limited to those patent claims
+licensable by that contributor that are necessarily infringed by their
+contribution(s), alone or in combination with the Software. If You
+institute patent litigation against any entity alleging that the
+Software constitutes patent infringement, this License terminates for You
+as of the institution of such litigation.
+
+6. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+7. TERMINATION AND REINSTATEMENT
+
+Any breach of this License terminates it for You. If You cease the
+breach and cure it within 30 days of becoming aware of it, the License is
+reinstated retroactively, unless the copyright holder has informed You by
+other means that Your license is terminated.
+
+8. GENERAL
+
+8.1 You are not required to accept this License in order to receive or
+    run a copy of the Software. However, nothing other than this License
+    grants You permission to Distribute or modify the Software; these
+    acts infringe copyright if You do not accept this License.
+
+8.2 If any provision of this License is held unenforceable, it applies to
+    the maximum extent permissible, and the remaining provisions remain
+    in force.
+
+8.3 The copyright holder may publish revised versions of this License.
+    You may continue to follow the version under which You received the
+    Software.
+
+8.4 Only the copyright holder may relicense the Software. The fact that
+    the Software is based on GPLv3 does not give You the right to
+    redistribute it under the GPL — see Section 0.

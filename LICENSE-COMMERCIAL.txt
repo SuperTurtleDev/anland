@@ -1,0 +1,95 @@
+ANLAND COMMERCIAL LICENSE
+Version 1.0 — September 2026
+
+Copyright (c) 2026 Anland Project. All rights reserved.
+
+This document states the standard terms under which the copyright holder
+of awl — Android Wayland Host ("the Software") offers commercial
+licenses. An actual grant is made in a separate written agreement between
+You and the copyright holder (identifying the licensee, pricing, support,
+and any deviating terms); that agreement prevails over this document
+where they differ. By exercising any right granted under such an
+agreement, You accept these terms unless the agreement says otherwise.
+
+1. GRANT
+
+Subject to the terms of this License and of the applicable written
+agreement, the copyright holder grants You — the individual or entity
+identified in that agreement — a perpetual, worldwide, non-exclusive,
+non-transferable, non-sublicensable license to:
+
+  a. use the Software for any commercial or non-commercial purpose;
+
+  b. reproduce the Software and deploy it on any number of devices,
+     including as part of products or services that You offer, sell, or
+     operate;
+
+  c. modify the Software and create derivative works, and to keep those
+     modifications and derivatives closed-source — nothing in this
+     License obliges You to disclose source code to anyone, and Your
+     modifications do not become subject to any copyleft obligation.
+
+2. NO LICENSE DISTRIBUTION
+
+2.1 This License is granted to You alone. You may not sublicense,
+    assign, transfer, or redistribute this License, and You may not
+    represent or imply that any third party has acquired rights under it.
+
+2.2 Copies of the Software deployed as part of Your product or service
+    are covered by Your license. The operators and end users of those
+    copies receive no rights under this License beyond operating them as
+    part of Your deployment; they acquire no right to redistribute,
+    sublicense, or modify the Software, and they acquire no Commercial
+    License rights.
+
+2.3 If You wish to convey the Software itself to a third party for that
+    party's own use, modification, or redistribution, that conveyance
+    must take place under the Anland Community License or the Anland
+    Contributor License (as applicable to that recipient), or with the
+    copyright holder's prior written permission.
+
+3. OBLIGATIONS
+
+3.1 You must retain all copyright, trademark, attribution, and legal
+    notices contained in the Software and reproduce them in copies You
+    make.
+
+3.2 You may not use the names "Anland", "awl", or the names of the
+    copyright holders to promote or endorse Your products or services
+    without prior written permission.
+
+3.3 The third-party components bundled with the Software (libffi,
+    libwayland, and the Wayland protocol definitions — see the LICENSE
+    file in the Software's repository) remain governed by their own
+    licenses, and You must comply with those licenses, including their
+    attribution requirements.
+
+4. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+Unless expressly agreed otherwise in the written agreement, the copyright
+holder provides no support, maintenance, or updates under this License.
+
+5. TERM AND TERMINATION
+
+This License continues in force unless terminated. It terminates
+automatically upon Your material breach of its terms if the breach is not
+cured within 30 days of written notice from the copyright holder. Upon
+termination, You must cease new deployments of the Software; copies
+already lawfully deployed as part of Your product remain governed by
+this License for their remaining life.
+
+6. GENERAL
+
+6.1 If any provision of this License is held unenforceable, it applies to
+    the maximum extent permissible, and the remaining provisions remain
+    in force.
+
+6.2 This License is the entire allocation of rights between You and the
+    copyright holder with respect to the Software's commercial use,
+    except for the written agreement referenced above.

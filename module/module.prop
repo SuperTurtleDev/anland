@@ -1,0 +1,6 @@
+id=anland-awl
+name=Anland Wayland Host
+version=0.4
+versionCode=4
+author=anland
+description=Wayland compositor root daemon waylandbridge (single ELF; contexts generated at flash time from the live system file by customize.sh)

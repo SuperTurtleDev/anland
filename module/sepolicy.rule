@@ -1,0 +1,10 @@
+# anland-awl: register the formal binder service anland.host (own type)
+# Syntax: ksud sepolicy patch — space separated, no colons (the colon form is
+# silently dropped!)
+type anland_host_service service_manager_type
+allow untrusted_app_29 anland_host_service service_manager find
+allow untrusted_app anland_host_service service_manager find
+allow shell anland_host_service service_manager find
+# APP ↔ daemon binder calls (Surface transfer / linkToDeath)
+allow untrusted_app_29 ksu binder { call transfer }
+allow ksu untrusted_app_29 binder { call transfer }

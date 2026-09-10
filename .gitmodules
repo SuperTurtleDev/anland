@@ -1,0 +1,7 @@
+[submodule "third_party/libffi"]
+	path = third_party/libffi
+	url = https://github.com/libffi/libffi.git
+[submodule "third_party/wayland"]
+	path = third_party/wayland
+	url = https://github.com/SuperTurtleDev/libwayland.git
+	branch = awl

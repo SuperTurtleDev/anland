@@ -1,0 +1,343 @@
+/* awl_viewport.c — wp_viewporter + zwp_fractional_scale_manager_v1 (#31
+ * arbitrary-ratio zoom 1.5/1.75/2.5..., applied dynamically)
+ *
+ * Reference: kwin-6.6.5 src/wayland/{fractionalscale_v1,viewporter}.cpp:
+ *   - wl_output.scale is always 1 (fractional ratios not expressible);
+ *     clients (chrome/GTK) instead learn the zoom from the preferred_scale
+ *     event of zwp_fractional_scale_v1 — the value is in 1/120 units (kwin:
+ *     send_preferred_scale(round(z * 120))); the client picks its own integer
+ *     buffer scale (usually ceil) and declares the logical size via
+ *     wp_viewport set_destination, the buffer is sampled scaled into dst.
+ *   - preferred_scale: current value sent on object creation (kwin ctor);
+ *     resent on change (kwin setPreferredBufferScale sends only on change).
+ *   - viewport state (source/destination) is double-buffered, effective on
+ *     the same commit as the buffer (kwin pending→current); -1 resets;
+ *     out-of-range values are the protocol error bad_value.
+ *   - At most one viewport / one fractional_scale per surface (duplicate =
+ *     protocol error).
+ *
+ * Coordinate model (repo-wide convention, see the surface note in
+ * awl_internal.h): layer stack/geometry/popup/input event coordinates are
+ * always logical px; the render side scales by the window-physical/
+ * root-logical ratio.
+ *
+ * Zoom change (awl_display_set_zoom):
+ *   preferred_scale broadcast to every fractional_scale object + re-configure
+ *   every toplevel (phys/zoom) — after the client acks it re-lays out buffer/
+ *   viewport at the new ratio, the render side adapts to the actual buffer,
+ *   no window restart needed. */
+#include "awl_internal.h"
+
+#include <viewporter-server-protocol.h>
+#include "fractional-scale-v1-server-protocol.h"
+
+#include <string.h>
+
+/* ---------------- logical size (public helpers, awl_internal.h) ---------------- */
+
+/* Current buffer size in pixels (caller holds ev_lock; 0 = no buffer) */
+static void vp_buf_size(struct awl_surface* s, uint32_t* w, uint32_t* h) {
+    *w = *h = 0;
+    if (!s->current_buffer_res) return;
+    struct wl_shm_buffer* shm = wl_shm_buffer_get(s->current_buffer_res);
+    if (shm) {
+        *w = (uint32_t)wl_shm_buffer_get_width(shm);
+        *h = (uint32_t)wl_shm_buffer_get_height(shm);
+        return;
+    }
+    struct awl_buffer* b = wl_resource_get_user_data(s->current_buffer_res);
+    if (b && b->width) { *w = b->width; *h = b->height; }
+}
+
+/* isomorphic to kwin SurfaceInterfacePrivate::applyState surfaceSize */
+void awl_surface_logical_size(struct awl_surface* s, float* w, float* h) {
+    if (s->vp_dst_w > 0 && s->vp_dst_h > 0) {
+        *w = (float)s->vp_dst_w;
+        *h = (float)s->vp_dst_h;
+        return;
+    }
+    if (s->vp_has_src) {
+        *w = s->vp_sw;
+        *h = s->vp_sh;
+        return;
+    }
+    uint32_t bw = 0, bh = 0;
+    vp_buf_size(s, &bw, &bh);
+    float sc = s->buf_scale > 0 ? (float)s->buf_scale : 1.0f;
+    *w = (float)bw / sc;
+    *h = (float)bh / sc;
+}
+
+/* View mapping base size (#31 chrome shadow-margin findings: viewport dst =
+ * configure + margins 16/10/16/32, real content = the xdg geometry
+ * rectangle). Valid geometry → geometry size; otherwise the surface logical
+ * size (for a pure fractional client dst is the content; for a fixed-size
+ * client it is the buffer). Shared by render rs / input f / IME cursor ×r —
+ * geometry rectangle ↔ window view, margins out of bounds are cropped.
+ * Caller holds ev_lock. */
+void awl_surface_content_size(struct awl_surface* s, float* w, float* h) {
+    if (s->geom_valid && s->geom_w > 0 && s->geom_h > 0) {
+        *w = (float)s->geom_w;
+        *h = (float)s->geom_h;
+        return;
+    }
+    awl_surface_logical_size(s, w, h);
+}
+
+/* ---------------- wp_viewport ---------------- */
+
+static void vp_destroy(struct wl_client* c, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+
+static void vp_set_source(struct wl_client* c, struct wl_resource* res,
+                          wl_fixed_t xf, wl_fixed_t yf,
+                          wl_fixed_t wf, wl_fixed_t hf) {
+    struct awl_surface* surf = wl_resource_get_user_data(res);
+    if (!surf) {
+        wl_resource_post_error(res, WP_VIEWPORT_ERROR_NO_SURFACE,
+                               "the wl_surface for this viewport no longer exists");
+        return;
+    }
+    double x = wl_fixed_to_double(xf), y = wl_fixed_to_double(yf);
+    double w = wl_fixed_to_double(wf), h = wl_fixed_to_double(hf);
+    pthread_mutex_lock(&surf->ev_lock);
+    if (x == -1.0 && y == -1.0 && w == -1.0 && h == -1.0) {
+        surf->pend_vps = 1;
+        surf->pend_vps_x = surf->pend_vps_y = 0;
+        surf->pend_vps_w = surf->pend_vps_h = 0;   /* 0 = reset */
+    } else if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+        pthread_mutex_unlock(&surf->ev_lock);
+        wl_resource_post_error(res, WP_VIEWPORT_ERROR_BAD_VALUE,
+                               "invalid source geometry");
+        return;
+    } else {
+        surf->pend_vps = 1;
+        surf->pend_vps_x = (float)x;
+        surf->pend_vps_y = (float)y;
+        surf->pend_vps_w = (float)w;
+        surf->pend_vps_h = (float)h;
+    }
+    pthread_mutex_unlock(&surf->ev_lock);
+}
+
+static void vp_set_destination(struct wl_client* c, struct wl_resource* res,
+                               int32_t w, int32_t h) {
+    struct awl_surface* s = wl_resource_get_user_data(res);
+    if (!s) {
+        wl_resource_post_error(res, WP_VIEWPORT_ERROR_NO_SURFACE,
+                               "the wl_surface for this viewport no longer exists");
+        return;
+    }
+    if (w == -1 && h == -1) {
+        pthread_mutex_lock(&s->ev_lock);
+        s->pend_vpd = 1;
+        s->pend_vpd_w = s->pend_vpd_h = 0;   /* 0 = reset */
+        pthread_mutex_unlock(&s->ev_lock);
+        return;
+    }
+    if (w <= 0 || h <= 0) {
+        wl_resource_post_error(res, WP_VIEWPORT_ERROR_BAD_VALUE,
+                               "invalid destination size");
+        return;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    s->pend_vpd = 1;
+    s->pend_vpd_w = w;
+    s->pend_vpd_h = h;
+    pthread_mutex_unlock(&s->ev_lock);
+}
+
+/* viewport resource destroy (client destroy / cleanup when the surface died
+ * first): the state reset goes into pending — same as kwin, effective on the
+ * next commit. The surface may already be cleared (user_data NULL). */
+static void vp_res_destroy(struct wl_resource* res) {
+    struct awl_surface* s = wl_resource_get_user_data(res);
+    if (!s) return;
+    pthread_mutex_lock(&s->ev_lock);
+    if (s->viewport_res == res) s->viewport_res = NULL;
+    s->pend_vpd = 1;
+    s->pend_vpd_w = s->pend_vpd_h = 0;
+    s->pend_vps = 1;
+    s->pend_vps_x = s->pend_vps_y = s->pend_vps_w = s->pend_vps_h = 0;
+    pthread_mutex_unlock(&s->ev_lock);
+}
+
+static const struct wp_viewport_interface viewport_iface = {
+    .destroy = vp_destroy,
+    .set_source = vp_set_source,
+    .set_destination = vp_set_destination,
+};
+
+static void viewporter_get_viewport(struct wl_client* c, struct wl_resource* res,
+                                    uint32_t id, struct wl_resource* surface_res) {
+    struct awl_surface* s = surface_res ? wl_resource_get_user_data(surface_res) : NULL;
+    if (!s) return;
+    pthread_mutex_lock(&s->ev_lock);
+    if (s->viewport_res) {
+        pthread_mutex_unlock(&s->ev_lock);
+        wl_resource_post_error(res, WP_VIEWPORTER_ERROR_VIEWPORT_EXISTS,
+                               "the specified surface already has a viewport");
+        return;
+    }
+    pthread_mutex_unlock(&s->ev_lock);
+    struct wl_resource* vres = wl_resource_create(
+            c, &wp_viewport_interface, wl_resource_get_version(res), id);
+    if (!vres) { wl_resource_post_no_memory(res); return; }
+    wl_resource_set_implementation(vres, &viewport_iface, s, vp_res_destroy);
+    pthread_mutex_lock(&s->ev_lock);
+    s->viewport_res = vres;
+    pthread_mutex_unlock(&s->ev_lock);
+}
+
+static void viewporter_destroy(struct wl_client* c, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+
+static const struct wp_viewporter_interface viewporter_iface = {
+    .destroy = viewporter_destroy,
+    .get_viewport = viewporter_get_viewport,
+};
+
+/* ---------------- zwp_fractional_scale_v1 ---------------- */
+
+struct awl_frac_scale {
+    struct wl_resource* res;        /* zwp_fractional_scale_v1 */
+    struct wl_list link;            /* g_srv.frac_scales (rwl topology) */
+};
+
+static uint32_t zoom_preferred_scale(void) {
+    /* kwin: round(z × 120); integer zoom_pct avoids float drift */
+    return (uint32_t)((g_srv.zoom_pct * 120 + 50) / 100);
+}
+
+static void frac_destroy(struct wl_client* c, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+
+static void frac_res_destroy(struct wl_resource* res) {
+    struct awl_frac_scale* fs = wl_resource_get_user_data(res);
+    if (!fs) return;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    wl_list_remove(&fs->link);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    free(fs);
+}
+
+static const struct wp_fractional_scale_v1_interface frac_iface = {
+    .destroy = frac_destroy,
+};
+
+static void fsm_get_fractional_scale(struct wl_client* c, struct wl_resource* res,
+                                     uint32_t id, struct wl_resource* surface_res) {
+    struct awl_surface* s = surface_res ? wl_resource_get_user_data(surface_res) : NULL;
+    if (!s) return;
+    pthread_mutex_lock(&s->ev_lock);
+    if (s->frac_res) {
+        pthread_mutex_unlock(&s->ev_lock);
+        wl_resource_post_error(res,
+                WP_FRACTIONAL_SCALE_MANAGER_V1_ERROR_FRACTIONAL_SCALE_EXISTS,
+                "the specified surface already has a fractional scale");
+        return;
+    }
+    pthread_mutex_unlock(&s->ev_lock);
+    struct wl_resource* fres = wl_resource_create(
+            c, &wp_fractional_scale_v1_interface,
+            wl_resource_get_version(res), id);
+    if (!fres) { wl_resource_post_no_memory(res); return; }
+    struct awl_frac_scale* fs = calloc(1, sizeof(*fs));
+    if (!fs) { wl_resource_destroy(fres); wl_resource_post_no_memory(res); return; }
+    fs->res = fres;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    wl_list_insert(g_srv.frac_scales.prev, &fs->link);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    wl_resource_set_implementation(fres, &frac_iface, fs, frac_res_destroy);
+    pthread_mutex_lock(&s->ev_lock);
+    s->frac_res = fres;
+    pthread_mutex_unlock(&s->ev_lock);
+    /* kwin ctor: send the current preferred scale on creation (client lays out at Z from the first frame) */
+    wp_fractional_scale_v1_send_preferred_scale(fres, zoom_preferred_scale());
+    wl_client_flush(c);
+}
+
+static void fsm_destroy(struct wl_client* c, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+
+static const struct wp_fractional_scale_manager_v1_interface fsm_iface = {
+    .destroy = fsm_destroy,
+    .get_fractional_scale = fsm_get_fractional_scale,
+};
+
+static void viewporter_bind(struct wl_client* client, void* data,
+                            uint32_t version, uint32_t id) {
+    struct wl_resource* res = wl_resource_create(
+            client, &wp_viewporter_interface, 1, id);
+    if (!res) { wl_client_post_no_memory(client); return; }
+    wl_resource_set_implementation(res, &viewporter_iface, NULL, NULL);
+}
+
+static void fsm_bind(struct wl_client* client, void* data,
+                     uint32_t version, uint32_t id) {
+    struct wl_resource* res = wl_resource_create(
+            client, &wp_fractional_scale_manager_v1_interface, 1, id);
+    if (!res) { wl_client_post_no_memory(client); return; }
+    wl_resource_set_implementation(res, &fsm_iface, NULL, NULL);
+}
+
+void awl_viewport_setup(void) {
+    wl_list_init(&g_srv.frac_scales);
+    g_srv.zoom_pct = 100;
+    g_srv.g_viewporter = wl_global_create(
+            g_srv.display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
+    g_srv.g_frac_scale_mgr = wl_global_create(
+            g_srv.display, &wp_fractional_scale_manager_v1_interface,
+            1, NULL, fsm_bind);
+    if (!g_srv.g_viewporter || !g_srv.g_frac_scale_mgr)
+        LOGE("viewporter/fractional-scale global create failed");
+}
+
+/* ---------------- zoom change (daemon T_ZOOM → here; any thread) ----------------
+ * pct = 100 × Z (integer 50..300). Applied dynamically:
+ *   1) broadcast preferred_scale = pct×120/100 to all zwp_fractional_scale_v1
+ *      objects;
+ *   2) re-configure all toplevels with the remembered Android window size
+ *      (phys×100/pct)
+ * After receiving, the client (chrome) re-lays out buffer + viewport at the
+ * new ratio; newly committed frames follow naturally. */
+void awl_display_set_zoom(int pct) {
+    if (pct < 50) pct = 50;
+    if (pct > 300) pct = 300;
+    if (pct == g_srv.zoom_pct) return;
+    g_srv.zoom_pct = pct;
+    LOGI("zoom → %d%% (preferred_scale=%u)", pct, zoom_preferred_scale());
+
+    /* Broadcast preferred_scale (kwin: resend on change; sending under rwl.rd is safe) */
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_frac_scale* fs;
+    wl_list_for_each(fs, &g_srv.frac_scales, link) {
+        wp_fractional_scale_v1_send_preferred_scale(fs->res, zoom_preferred_scale());
+        wl_client_flush(wl_resource_get_client(fs->res));
+    }
+    /* Collect toplevel window sizes (re-configure after dropping the lock via
+     * awl_window_resize — that API takes rwl.rd itself, no nested holding) */
+    struct { uint64_t id; int32_t w, h; } wins[64];
+    int nw = 0;
+    struct awl_surface* s;
+    wl_list_for_each(s, &g_srv.surfaces, link) {
+        if (s->role == AWL_ROLE_TOPLEVEL && s->phys_w > 0 && nw < 64) {
+            wins[nw].id = s->id;
+            wins[nw].w = s->phys_w;
+            wins[nw].h = s->phys_h;
+            nw++;
+        }
+    }
+    pthread_rwlock_unlock(&g_srv.rwl);
+
+    for (int i = 0; i < nw; i++)
+        awl_window_resize(wins[i].id, wins[i].w, wins[i].h);
+}
+
+int awl_display_zoom(void) {
+    return g_srv.zoom_pct;
+}
