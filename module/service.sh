@@ -1,5 +1,9 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 chmod 755 "$MODDIR/waylandbridge" 2>/dev/null
-rm -f /data/local/tmp/awl/wayland-0
+# wayland socket dir: manual-only config key runtime_dir (config.json);
+# default /data/local/tmp/awl — keep in sync with waylandbridge.cpp cfg_load_sock_dir
+RT=$(sed -n 's/.*"runtime_dir": *"\([^"]*\)".*/\1/p' "$MODDIR/config.json" 2>/dev/null | head -1)
+case "$RT" in /*) ;; *) RT=/data/local/tmp/awl ;; esac
+rm -f "$RT/wayland-0"
 nohup "$MODDIR/waylandbridge" > /data/local/tmp/awl_daemon.log 2>&1 &

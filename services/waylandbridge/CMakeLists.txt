@@ -202,8 +202,14 @@ target_compile_definitions(wayland-server-static PRIVATE
   HAVE_MEMFD_CREATE=1 HAVE_ACCEPT4=1 HAVE_SYS_UCRED_H=0 HAVE_XUCRED_CR_PID=0
   HAVE_BROKEN_MSG_CMSG_CLOEXEC=0)
 
-# ---------------- Logic layer (static, linked into the single binary) ----------------
-add_library(androidwayland STATIC
+# ---------------- Single waylandbridge binary (root daemon, module install) ----
+# One executable target: logic layer (protocol state machines) + adaptation
+# layer (GPU renderer, binder host) compiled straight in — no adapt/logic
+# static-lib split, the artifact is one ELF (no .so / LD_LIBRARY_PATH /
+# exe-lib mismatch issues). Only third-party libwayland stays a static lib
+# (own bionic-compat flags below).
+add_executable(waylandbridge
+  # logic layer
   awl_server.c
   awl_surface.c
   awl_xdg.c
@@ -232,36 +238,19 @@ add_library(androidwayland STATIC
   ${AWL_GENERATED}/text-input-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/text-input-unstable-v3-protocol.c
   ${AWL_GENERATED}/text-input-unstable-v3-server-protocol.h
-)
-target_include_directories(androidwayland PUBLIC
-  ${AWL}/include ${AWL_GENERATED}
-  ${AWL}/third_party)   # keymap_evdev.h (embedded xkb keymap)
-target_link_libraries(androidwayland
-  PRIVATE wayland-server-static log)
-set_target_properties(androidwayland PROPERTIES
-  COMPILE_OPTIONS "-Wno-unused-parameter")
-
-# ---------------- Adaptation layer (static, linked into the single binary) ----------------
-add_library(sfwaylandadapt STATIC
-  awl_jni.cpp
+  # adaptation layer
   awl_renderer.cpp
+  waylandbridge.cpp
 )
-target_include_directories(sfwaylandadapt PRIVATE
+target_include_directories(waylandbridge PRIVATE
   ${AWL}/include ${AWL_GENERATED}
   ${WAYLAND_SRC}/src
   ${AWL_GENERATED}/config
-  ${AWL}/third_party/include
+  ${AWL}/third_party          # keymap_evdev.h (embedded xkb keymap)
+  ${AWL}/third_party/include  # sys/ucred.h shim
   ${LIBFFI_DIR}/include)
-target_link_libraries(sfwaylandadapt
-  PRIVATE androidwayland android log EGL GLESv3 nativewindow)
-# ---------------- Single waylandbridge binary (root daemon, module install) ----------------
-# Logic + adaptation layers fully linked in statically: the artifact is one
-# ELF, no .so / LD_LIBRARY_PATH / exe-lib mismatch issues (the old deploy's
-# library md5 checks are obsolete for this reason).
-add_executable(waylandbridge waylandbridge.cpp)
-target_include_directories(waylandbridge PRIVATE
-  ${AWL}/include ${AWL_GENERATED})
 target_link_libraries(waylandbridge
-  PRIVATE sfwaylandadapt binder_ndk nativewindow log)
+  PRIVATE wayland-server-static binder_ndk android log EGL GLESv3 nativewindow)
 set_target_properties(waylandbridge PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY ${AWL_OUT})
+  RUNTIME_OUTPUT_DIRECTORY ${AWL_OUT}
+  COMPILE_OPTIONS "-Wno-unused-parameter")   # protocol handlers have unused params

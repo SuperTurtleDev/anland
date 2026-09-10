@@ -84,8 +84,6 @@ static bool binder_plat_init(void) {
 #include <thread>
 #include <vector>
 
-#define AWL_SOCK_DIR  "/data/local/tmp/awl"
-#define AWL_SOCK_PATH AWL_SOCK_DIR "/wayland-0"
 #define AWL_BINDER_NAME "anland.host"
 #define AWL_PKG  "com.anlandnext"
 #define AWL_WIN_ACT AWL_PKG "/.WlWindowActivity"
@@ -699,7 +697,12 @@ static awl_window_callbacks_t k_cbs = {
  * Daemon-relevant config (zoom, initial-configure size) is daemon-owned:
  * read and applied at startup; on set, applied + atomically persisted
  * (tmp+rename). The APK stores nothing itself — it only reads/writes values
- * over binder. */
+ * over binder.
+ * MANUAL-ONLY key: "runtime_dir" (wayland socket dir, default
+ * /data/local/tmp/awl). Never exposed over binder (cfg_set rejects it) —
+ * hand-edited in config.json, read at daemon startup before the socket is
+ * bound; a change needs a daemon restart. Daemon-driven saves preserve its
+ * file value verbatim (re-read at save time). */
 
 #define AWL_CFG_PATH "/data/adb/modules/anland-awl/config.json"
 
@@ -707,6 +710,7 @@ static std::mutex g_cfg_lock;
 static int g_cfg_zoom = 100;       /* persisted mirror (real state lives in the logic layer's g_srv.zoom_pct) */
 static int g_cfg_init_w = 800;     /* initial-configure placeholder (#33; mirror of g_srv.init_conf_*) */
 static int g_cfg_init_h = 600;
+static char g_sock_dir[256] = "/data/local/tmp/awl";   /* runtime_dir (startup-loaded; see above) */
 
 /* known config keys → valid domain (under g_cfg_lock); unknown keys rejected */
 static bool cfg_domain(const std::string& key, int* lo, int* hi) {
@@ -727,17 +731,74 @@ static int cfg_parse_int(const char* buf, const char* key) {
     return atoi(p + 1);
 }
 
+/* same, string value: contents of the first quoted token after the colon
+ * (paths contain no escapes/quotes). Returns 0 on success. */
+static int cfg_parse_str(const char* buf, const char* key, char* out, size_t n) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* p = strstr(buf, pat);
+    if (!p) return -1;
+    p = strchr(p + strlen(pat) - 1, ':');
+    if (!p) return -1;
+    p++;   /* past the colon */
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return -1;
+    p++;
+    const char* e = strchr(p, '"');
+    if (!e || (size_t)(e - p) >= n) return -1;
+    memcpy(out, p, (size_t)(e - p));
+    out[e - p] = '\0';
+    return 0;
+}
+
 static void cfg_save_locked(void) {
+    /* runtime_dir is manual-only: carry the FILE's current value over verbatim
+     * (a hand edit made while the daemon runs survives this rewrite), falling
+     * back to the effective startup value when absent/unreadable */
+    char rt[256];
+    memcpy(rt, g_sock_dir, sizeof(rt));
+    {
+        FILE* f = fopen(AWL_CFG_PATH, "r");
+        if (f) {
+            char buf[512] = "";
+            fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            char got[256];
+            if (cfg_parse_str(buf, "runtime_dir", got, sizeof(got)) == 0 && got[0] == '/')
+                memcpy(rt, got, sizeof(rt));
+        }
+    }
     char tmp[128];
     snprintf(tmp, sizeof(tmp), "%s.tmp", AWL_CFG_PATH);
     FILE* f = fopen(tmp, "w");
     if (!f) { LOGE("config save open %s: %s", tmp, strerror(errno)); return; }
-    fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d\n}\n",
-            g_cfg_zoom, g_cfg_init_w, g_cfg_init_h);
+    fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n  \"runtime_dir\": \"%s\"\n}\n",
+            g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, rt);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
     if (rename(tmp, AWL_CFG_PATH) != 0)
         LOGE("config rename %s: %s", AWL_CFG_PATH, strerror(errno));
+}
+
+/* Startup socket-dir load (main, before mkdir/listen — runs once, no binder):
+ * manual-only key "runtime_dir"; absolute path, parent must exist (single
+ * mkdir, same as before). Invalid/absent → default. */
+static void cfg_load_sock_dir(void) {
+    FILE* f = fopen(AWL_CFG_PATH, "r");
+    if (!f) return;
+    char buf[512] = "";
+    fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    char dir[256];
+    if (cfg_parse_str(buf, "runtime_dir", dir, sizeof(dir)) != 0)
+        return;   /* key absent → default */
+    if (dir[0] != '/' || strlen(dir) + 16 >= sizeof(g_sock_dir)) {
+        LOGE("config: runtime_dir '%s' invalid (need absolute, short) — using default %s",
+             dir, g_sock_dir);
+        return;
+    }
+    memcpy(g_sock_dir, dir, sizeof(g_sock_dir));
+    LOGI("config: runtime_dir=%s", g_sock_dir);
 }
 
 /* startup load + apply (after awl_server_start; no windows at startup →
@@ -1178,15 +1239,18 @@ int main(int argc, char** argv) {
 
     LOGI("awl-daemon starting (pid=%d uid=%d)", getpid(), getuid());
 
-    mkdir(AWL_SOCK_DIR, 0777);
-    chmod(AWL_SOCK_DIR, 0777);
+    cfg_load_sock_dir();   /* runtime_dir before mkdir/bind (manual-only key) */
+    mkdir(g_sock_dir, 0777);
+    chmod(g_sock_dir, 0777);
 
     awl_display_info_t info;
     query_display(&info);
 
-    int fd = create_listen_socket(AWL_SOCK_PATH);
+    char sock_path[288];
+    snprintf(sock_path, sizeof(sock_path), "%s/wayland-0", g_sock_dir);
+    int fd = create_listen_socket(sock_path);
     if (fd < 0) { LOGE("listen socket failed"); return 1; }
-    LOGI("wayland socket: %s", AWL_SOCK_PATH);
+    LOGI("wayland socket: %s", sock_path);
 
     if (awl_server_start(fd, &info, &k_cbs) != 0) {
         LOGE("awl_server_start failed");
