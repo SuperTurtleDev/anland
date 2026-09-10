@@ -73,10 +73,8 @@ static const char* k_frag_src =
     "in vec2 uv;\n"
     "out vec4 color;\n"
     "uniform sampler2D tex;\n"
-    "uniform bool u_swap_rb;\n"
     "void main() {\n"
-    "  vec4 c = texture(tex, uv);\n"
-    "  color = u_swap_rb ? c.bgra : c;\n"   /* dmabuf sampled in DRM fourcc byte order */
+    "  color = texture(tex, uv);\n"   /* channel order comes from the texture format (dmabuf = BGRA_8888) */
     "}\n";
 
 /* Per-layer texture state (one per root / each wl_subsurface child layer, keyed by surface id) */
@@ -382,11 +380,10 @@ struct ahb_calib {
     int idx_size = -1;
     int idx_stride_b = -1;
 };
-/* One slot per HAL format (concurrent multi-window mixed formats must not evict
- * and force recalibration): with a single cache not keyed by fmt, chrome
- * (AR24→RGBA_8888) and Xwayland (XR24→RGBX_8888) render threads importing
- * alternately → full recalibration every frame (logs measured alternating
- * calib ok every 50-100ms). Each format calibrated once, no mutual eviction. */
+/* One slot per HAL format (keyed lookup — concurrent windows never evict each
+ * other's calibration). Since the BGRA_8888 switch all dmabufs (AR24/XR24) map
+ * to a single HAL format, in practice one slot covers everything; the table
+ * stays generic for future formats. */
 static struct ahb_calib k_calibs[8];
 static int k_n_calibs = 0;
 static struct ahb_calib* calib_slot(uint32_t fmt) {
@@ -731,6 +728,10 @@ static void destroy_dmabuf_texture(wl_tex* t) {
     t->buf_token = NULL;
 }
 
+/* HAL_PIXEL_FORMAT_BGRA_8888 (=5): platform graphics.h value — the NDK
+ * AHardwareBuffer_Format enum skips it (defines 1..4 then jumps to 0x16) */
+#define AWL_HAL_BGRA_8888 5u
+
 static void tex_params_default(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -748,9 +749,13 @@ static bool import_dmabuf_texture(wl_tex* t, const awl_buffer_info_t* b) {
 
     destroy_dmabuf_texture(t);      /* destroy the EGLImage before releasing the AHB */
 
-    /* HAL format: DRM ARGB8888→RGBA_8888(1), XR24→RGBX_8888(2);
-     * sampled-only usage (texture) — GPU_FRAMEBUFFER not declared */
-    uint32_t hal = b->drm_format == AWL_FOURCC_ARGB8888 ? 1 : 2;
+    /* HAL format: DRM AR24/XR24 memory order B,G,R,(A|X) → HAL BGRA_8888 — the
+     * GPU samples the buffer's true channel order, the R/B fix lives in the
+     * texture descriptor instead of the shader (no u_swap_rb). XR24 alpha = the
+     * X byte: harmless for blend-off layer 0 (Xwayland root); XR24 as a blended
+     * child layer is not a real client pattern (chrome subsurfaces are AR24).
+     * Sampled-only usage (texture) — GPU_FRAMEBUFFER not declared */
+    uint32_t hal = AWL_HAL_BGRA_8888;
     uint64_t usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
 
     AHardwareBuffer* donor = NULL;
@@ -940,7 +945,6 @@ static void render_frame(wl_window* w) {
     GLint dst_loc = glGetUniformLocation(w->program, "u_dst");
     GLint uv_loc = glGetUniformLocation(w->program, "u_uv");
     glUniform1i(glGetUniformLocation(w->program, "tex"), 0);
-    GLint swap_loc = glGetUniformLocation(w->program, "u_swap_rb");
     glActiveTexture(GL_TEXTURE0);
 
     uint64_t seen[AWL_MAX_LAYERS + 1];
@@ -978,13 +982,9 @@ static void render_frame(wl_window* w) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         }
-        /* dmabuf byte-order fix: DRM AR24/XR24 memory order B,G,R,(A|X) (fourcc
-         * naming refers to the 32-bit little-endian word), but the AHB is sampled
-         * as HAL RGBA_8888/RGBX_8888 (R,G,B,X memory order) → R/B swapped;
-         * swizzle back after sampling. shm path: GL already converts to RGBA on
-         * GL_BGRA_EXT upload, no swap (chrome+Xwayland showed inverted colors
-         * on device, 2026-09-09) */
-        glUniform1i(swap_loc, is_dmabuf ? 1 : 0);
+        /* dmabuf textures are imported as their true channel order (HAL
+         * BGRA_8888, see import_dmabuf_texture) and shm uploads convert on
+         * GL_BGRA_EXT upload — both sample correct as-is, no per-layer swizzle */
         glUniform4f(dst_loc, ((float)lay[i].x - (float)gox) * rsx + rox,
                     ((float)lay[i].y - (float)goy) * rsy + roy,
                     lay[i].w * rsx, lay[i].h * rsy);
