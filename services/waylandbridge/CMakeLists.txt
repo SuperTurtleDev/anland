@@ -139,6 +139,21 @@ add_custom_command(
           ${AWL_GENERATED}/pointer-constraints-unstable-v1-protocol.c
   DEPENDS ${PC_XML})
 
+# idle-inhibit v1 protocol codegen (idle inhibitor: keep the screen on while
+# the inhibiting surface is visible; awl_idle.c in this dir — activation tells
+# the Activity to set FLAG_KEEP_SCREEN_ON via C_KEEPON)
+set(II_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/idle-inhibit-unstable-v1.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/idle-inhibit-unstable-v1-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${II_XML}
+          ${AWL_GENERATED}/idle-inhibit-unstable-v1-server-protocol.h
+  DEPENDS ${II_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/idle-inhibit-unstable-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${II_XML}
+          ${AWL_GENERATED}/idle-inhibit-unstable-v1-protocol.c
+  DEPENDS ${II_XML})
+
 # xwayland-shell v1 protocol codegen (Xwayland rootless window association,
 # awl_xwayland.c in this dir)
 set(XWLS_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/xwayland-shell-v1.xml)
@@ -220,6 +235,7 @@ add_executable(waylandbridge
   awl_data_device.c
   awl_viewport.c
   awl_xwayland.c
+  awl_idle.c
   awl_sched.c
   ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
   ${AWL_GENERATED}/xwayland-shell-v1-server-protocol.h
@@ -227,6 +243,8 @@ add_executable(waylandbridge
   ${AWL_GENERATED}/relative-pointer-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/pointer-constraints-unstable-v1-protocol.c
   ${AWL_GENERATED}/pointer-constraints-unstable-v1-server-protocol.h
+  ${AWL_GENERATED}/idle-inhibit-unstable-v1-protocol.c
+  ${AWL_GENERATED}/idle-inhibit-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/viewporter-protocol.c
   ${AWL_GENERATED}/viewporter-server-protocol.h
   ${AWL_GENERATED}/fractional-scale-v1-protocol.c

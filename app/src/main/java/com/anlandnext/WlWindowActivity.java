@@ -93,6 +93,13 @@ public class WlWindowActivity extends Activity {
                                                   composited by the daemon renderer on
                                                   top of the window, or NULL = invisible)
                                                   → hide the Android pointer; 0 = restore */
+    private static final int C_KEEPON = 9;     /* (on:i32) zwp_idle_inhibit_manager_v1
+                                                  aggregate flipped (inhibitor created/
+                                                  destroyed on a surface of this window):
+                                                  1 → FLAG_KEEP_SCREEN_ON (only honored
+                                                  while the window is visible = the
+                                                  protocol's visible-surface semantics),
+                                                  0 → clear; re-sent on re-attach */
     private static final int STATE_RESET = 0x1;   /* v1 reset → clear composing state + restartInput */
     private static final int CAPTURE_NONE = 0;
     private static final int CAPTURE_CONFINE = 1;
@@ -213,6 +220,11 @@ public class WlWindowActivity extends Activity {
             if (code == C_CURSOR) {
                 final boolean hidden = data.readInt() != 0;
                 runOnUiThread(() -> setPointerHidden(hidden));
+                return true;
+            }
+            if (code == C_KEEPON) {
+                final boolean on = data.readInt() != 0;
+                runOnUiThread(() -> applyKeepOn(on));
                 return true;
             }
             return super.onTransact(code, data, reply, flags);
@@ -1105,6 +1117,26 @@ public class WlWindowActivity extends Activity {
         if (sv != null) sv.setPointerIcon(icon);
         if (root != null) root.setPointerIcon(icon);
         Log.i(TAG, "win " + id + ": android pointer " + (hidden ? "hidden (client cursor)" : "restored"));
+    }
+
+    /* ---- Idle inhibitor (zwp_idle_inhibit_manager_v1, C_KEEPON) ----
+     * daemon-owned state (pure mirror sync, same model as pointer capture):
+     * keep the screen on while a wl client holds an idle inhibitor on a
+     * surface of this window. The window flag is the whole implementation
+     * here: the system honors it only while the window is visible
+     * (minimized = window gone = flag inert; occluded = not adopted) —
+     * exactly the protocol's "inhibitor honored on a visible surface"
+     * semantics, so there is no visibility bookkeeping on this side. No
+     * permission needed (unlike PowerManager.WakeLock) and the flag dies
+     * with the window automatically; a fresh Activity instance gets the
+     * state re-pushed by the daemon on re-attach. */
+    private void applyKeepOn(boolean on) {
+        if (isFinishing()) return;
+        if (on) getWindow().addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        Log.i(TAG, "win " + id + ": keep-screen-on " + (on ? "on (idle inhibitor)" : "off"));
     }
 
     private static final int BTN_LEFT = 0x110, BTN_RIGHT = 0x111,

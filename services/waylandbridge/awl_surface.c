@@ -227,6 +227,9 @@ static void surface_destroy_impl(struct wl_resource* res) {
     /* constraints on this surface / its root die with it: unlock + release
      * the Activity capture after the lock (same notify-after-unlock shape) */
     uint64_t constr_win = awl_input_constr_surface_gone(s);
+    /* idle inhibitors on this surface / its root die with it: C_KEEPON off
+     * after the lock, when the window's aggregate flipped to zero */
+    uint64_t idle_win = awl_idle_surface_gone(s);
 
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
@@ -293,6 +296,7 @@ static void surface_destroy_impl(struct wl_resource* res) {
         g_srv.cbs.window_dirty(g_srv.cbs.user, sub_root_id);
     awl_input_cursor_gone_notify(cursor_win);   /* redraw without the cursor + restore the Android pointer */
     awl_input_constr_gone_notify(constr_win);   /* C_CAPTURE none: the Activity releases the capture */
+    awl_idle_gone_notify(idle_win);             /* C_KEEPON off: the Activity clears FLAG_KEEP_SCREEN_ON */
     wl_resource_set_user_data(res, NULL);
 }
 

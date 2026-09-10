@@ -282,6 +282,7 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     awl_ime_setup();          /* zwp_text_input v1+v3 (Android IME bridge) */
     awl_viewport_setup();     /* wp_viewporter + fractional-scale (#31 zoom) */
     awl_xwayland_setup();     /* xwayland_shell_v1 (Xwayland rootless, #32) */
+    awl_idle_setup();         /* zwp_idle_inhibit_manager_v1 (keep-screen-on, C_KEEPON) */
 
     g_srv.g_output = wl_global_create(g_srv.display, &wl_output_interface, 3,
                                       NULL, output_bind);

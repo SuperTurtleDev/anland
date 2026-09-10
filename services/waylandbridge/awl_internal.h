@@ -360,6 +360,20 @@ void awl_input_cursor_commit(struct awl_surface* s, int32_t off_x, int32_t off_y
 uint64_t awl_input_constr_surface_gone(struct awl_surface* s);
 void awl_input_constr_gone_notify(uint64_t win);
 
+/* awl_idle.c — zwp_idle_inhibit_manager_v1 (inhibitor state under
+ * g_inhib_lock — pure state sync like the constraints above; the Activity
+ * sets FLAG_KEEP_SCREEN_ON per C_KEEPON, window visibility governs whether
+ * it is honored):
+ *  - idle_surface_gone: caller holds rwl.wr (awl_surface.c destroy path).
+ *    Inhibitors on this surface / its root die (the objects stay until the
+ *    client destroys them). Returns the root window whose aggregate flipped
+ *    to zero live inhibitors (0 = none) — pass it to awl_idle_gone_notify
+ *    AFTER releasing rwl (the C_KEEPON callback must not run under the
+ *    topology write lock). */
+void awl_idle_setup(void);
+uint64_t awl_idle_surface_gone(struct awl_surface* s);
+void awl_idle_gone_notify(uint64_t win);
+
 /* awl_data_device.c — wl_data_device_manager v3 (full selection + DnD state
  * machine, semantics aligned with kwin-6.6.5; see the file-header lock note).
  * Input hooks must not be entered holding rwl (they take it internally; motion

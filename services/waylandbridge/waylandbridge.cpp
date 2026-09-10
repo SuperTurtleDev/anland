@@ -137,6 +137,12 @@ enum {
                                  renderer on top of the window, or NULL = invisible)
                                  → Activity hides the Android pointer
                                  (setPointerIcon TYPE_NULL); 0 = restore it */
+#define AWL_C_KEEPON 9        /* (on:i32) zwp_idle_inhibit_manager_v1 aggregate
+                                 flipped: 1 → Activity sets
+                                 FLAG_KEEP_SCREEN_ON (the window flag is only
+                                 honored while the window is visible = the
+                                 protocol's visible-surface semantics), 0 →
+                                 clears it */
 #define AWL_CTRL_DESC "anland.ICtrl"
 
 /* ---------------- window state table ---------------- */
@@ -164,6 +170,11 @@ struct awl_win_state {
      * C_CAPTURE so the new Activity instance captures again. */
     int capture_mode = 0;   /* AWL_CAPTURE_* (0 = none) */
     int32_t cap_rect[4] = {0, 0, 0, 0};   /* confine region, view pixels */
+
+    /* Idle inhibitor (mirror of the logic-layer zwp_idle_inhibit aggregate;
+     * kept alive across detach like the capture mirror): on re-attach the
+     * new Activity instance has no window flag yet → re-send C_KEEPON. */
+    bool keep_on = false;
 };
 
 static std::mutex g_state_lock;
@@ -659,6 +670,46 @@ static void capture_reopen_on_attach(uint64_t id) {
          (unsigned long long)id, mode);
 }
 
+/* Idle inhibitor state (zwp_idle_inhibit aggregate flip): tell the matching
+ * Activity to set/clear FLAG_KEEP_SCREEN_ON. Mirror updated FIRST, with or
+ * without a live ctrl (an unattached window keeps the state so a later
+ * attach re-pushes it — same shape as cb_pointer_lock). */
+static void cb_idle_inhibit(void* user, uint64_t id, int on) {
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        auto it = g_wins.find(id);
+        if (it == g_wins.end()) return;
+        it->second.keep_on = on != 0;
+    }
+    AIBinder* ctrl = ctrl_of(id);
+    if (!ctrl) return;   /* no Activity attached: mirror only (re-sent on attach) */
+    int32_t args[1] = { on ? 1 : 0 };
+    ctrl_send_ints(ctrl, AWL_C_KEEPON, args, 1);
+    AIBinder_decStrong(ctrl);
+    LOGI("window %llu keep-screen-on %s (idle inhibitor)",
+         (unsigned long long)id, on ? "on" : "off");
+}
+
+/* Re-attach: an inhibitor outlived the detach (the client kept the object,
+ * e.g. a paused player) → re-send C_KEEPON; the fresh Activity instance has
+ * no window flag yet. Called at the end of SURFACE handling (ctrl already
+ * registered). */
+static void keep_on_reopen_on_attach(uint64_t id) {
+    AIBinder* ctrl = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        auto it = g_wins.find(id);
+        if (it == g_wins.end() || !it->second.keep_on || !it->second.ctrl)
+            return;
+        ctrl = it->second.ctrl;
+        AIBinder_incStrong(ctrl);
+    }
+    int32_t args[1] = { 1 };
+    ctrl_send_ints(ctrl, AWL_C_KEEPON, args, 1);
+    AIBinder_decStrong(ctrl);
+    LOGI("window %llu: keep-screen-on re-pushed on attach", (unsigned long long)id);
+}
+
 /* Client cursor (wl_pointer.set_cursor): hidden=1 → the renderer now draws
  * the client's cursor image (or the client wants an invisible pointer) →
  * the Activity hides the Android pointer for this window; 0 → restore. Only
@@ -722,6 +773,7 @@ static awl_window_callbacks_t k_cbs = {
     .ime_state = cb_ime_state,
     .clipboard_text = cb_clipboard_text,
     .pointer_cursor = cb_pointer_cursor,
+    .idle_inhibit = cb_idle_inhibit,
 };
 
 /* ---------------- daemon config (config.json, #31) ----------------
@@ -1046,6 +1098,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         }
         ime_reopen_on_attach(id);            /* input state kept alive: enabled during detach → reopen */
         capture_reopen_on_attach(id);        /* constraint still active (persistent) → re-capture */
+        keep_on_reopen_on_attach(id);        /* idle inhibitor alive → re-set FLAG_KEEP_SCREEN_ON */
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
         awl_renderer_request_render(id);     /* render a first frame */

@@ -102,6 +102,17 @@ typedef struct awl_window_callbacks {
      * transitions are reported. Invoked on the client's protocol dispatch
      * thread (set_cursor, surface death) or the input thread (leave/enter). */
     void (*pointer_cursor)(void* user, uint64_t id, int hidden);
+
+    /* ---- Idle inhibitor (zwp_idle_inhibit_manager_v1, awl_idle.c) ----
+     * Aggregate inhibitor state of the window flipped (first inhibitor
+     * created on one of its surfaces ↔ last one gone, incl. surface
+     * death) — pure state sync on the client's dispatch thread, only
+     * transitions are reported → the adaptation layer tells the Activity
+     * over C_KEEPON to set/clear FLAG_KEEP_SCREEN_ON. The window flag's
+     * native Android semantics (honored only while the window is visible)
+     * already matches the protocol's "inhibitor honored on a visible
+     * surface" requirement, so no daemon-side visibility state exists. */
+    void (*idle_inhibit)(void* user, uint64_t id, int on);
 } awl_window_callbacks_t;
 
 typedef struct awl_display_info {
