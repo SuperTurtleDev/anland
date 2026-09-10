@@ -22,10 +22,27 @@
 static void schedule_render(struct awl_surface* s) {
     s->dirty = 1;
     pthread_rwlock_rdlock(&g_srv.rwl);
-    struct awl_surface* root = awl_subsurface_root(s);
-    uint64_t root_id = root->id;
+    uint64_t root_id;
+    if (s->role == AWL_ROLE_CURSOR) {
+        /* cursor image (wl_pointer.set_cursor): no window of its own — redraw
+         * the window currently compositing it (0 = not shown anywhere) */
+        root_id = awl_input_cursor_window(s);
+        if (!root_id) {
+            /* nothing will present it → the deferred release queue would never
+             * drain: hand replaced buffers back now (cursor themes animate by
+             * committing new frames while the pointer may be elsewhere) */
+            pthread_mutex_lock(&s->ev_lock);
+            for (int i = 0; i < s->release_q_n; i++)
+                wl_buffer_send_release(s->release_q[i]);
+            s->release_q_n = 0;
+            wl_client_flush(wl_resource_get_client(s->resource));
+            pthread_mutex_unlock(&s->ev_lock);
+        }
+    } else {
+        root_id = awl_subsurface_root(s)->id;
+    }
     pthread_rwlock_unlock(&g_srv.rwl);
-    if (g_srv.cbs.window_dirty)
+    if (root_id && g_srv.cbs.window_dirty)
         g_srv.cbs.window_dirty(g_srv.cbs.user, root_id);
 }
 
@@ -138,8 +155,10 @@ static void surface_destroy_impl(struct wl_resource* res) {
 
     /* renderer detach (joins the render thread) first — its
      * get_buffer/presented hold rd; only once they finish naturally can
-     * the wrlock be acquired → nothing in flight, teardown is safe */
-    if (s->mapped && g_srv.cbs.window_destroyed)
+     * the wrlock be acquired → nothing in flight, teardown is safe.
+     * A cursor-role surface never owned a window (it may carry mapped=1 from
+     * a buffer committed before set_cursor). */
+    if (s->mapped && s->role != AWL_ROLE_CURSOR && g_srv.cbs.window_destroyed)
         g_srv.cbs.window_destroyed(g_srv.cbs.user, s->id);
 
     pthread_rwlock_wrlock(&g_srv.rwl);
@@ -148,6 +167,10 @@ static void surface_destroy_impl(struct wl_resource* res) {
      * dd_lock reading the pointer for one last decision */
     awl_datadev_surface_gone(s);
     awl_ime_surface_gone(s);   /* text_input associations to this surface */
+    /* pointer focus layer / its window / the cursor image died → the client
+     * cursor is dropped; the window is redrawn without it and its Android
+     * pointer restored after the lock (callbacks never run under rwl.wr) */
+    uint64_t cursor_win = awl_input_surface_gone(s);
 
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
@@ -212,6 +235,7 @@ static void surface_destroy_impl(struct wl_resource* res) {
         wl_buffer_send_release(latched_drop);
     if (sub_dirty && g_srv.cbs.window_dirty)   /* child layer gone → root window redraw */
         g_srv.cbs.window_dirty(g_srv.cbs.user, sub_root_id);
+    awl_input_cursor_gone_notify(cursor_win);   /* redraw without the cursor + restore the Android pointer */
     wl_resource_set_user_data(res, NULL);
 }
 
@@ -366,10 +390,15 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         s->pend_vps = 0;
     }
     struct wl_resource* old = s->current_buffer_res;
+    int attached = s->pending_attached;
+    int32_t off_x = 0, off_y = 0;   /* attach dx,dy of this cycle (cursor role: moves the hotspot) */
     if (s->pending_attached) {
         s->current_buffer_res = s->pending_buffer_res;
         s->pending_buffer_res = NULL;
         s->pending_attached = 0;
+        off_x = s->pending_offset_x;
+        off_y = s->pending_offset_y;
+        s->pending_offset_x = s->pending_offset_y = 0;   /* consumed with the attach */
     }
     /* Extract the first-map window size inside the lock: window_created
      * below is a callback outside the lock, during which shm_buffer_gone
@@ -391,6 +420,12 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         awl_surface_release_defer(s, old);
     pthread_mutex_unlock(&s->ev_lock);
 
+    /* cursor image committed with an attach offset → hotspot follows (kwin
+     * SurfaceCursorSource::refresh: hotspot -= offset); outside ev_lock
+     * (order g_cursor_lock → ev_lock) */
+    if (s->role == AWL_ROLE_CURSOR && attached && (off_x || off_y))
+        awl_input_cursor_commit(s, off_x, off_y);
+
         /* State application → child layer double-buffered positions take
      * effect + sync-latch cascade applies (KWin merge). Must come before
      * the empty-commit early return: the empty commit is precisely the
@@ -401,8 +436,10 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
     int children_applied = awl_subsurface_parent_applied(s);
 
     if (!s->current_buffer_res) {   /* empty commit (e.g. requesting configure / sync flush) */
-        if (children_applied)
-            schedule_render(s);   /* child state changed → root window redraw (walk-up inside) */
+        /* child state changed → root window redraw (walk-up inside); a cursor
+         * image detached (attach NULL) → the compositing window drops the layer */
+        if (children_applied || (s->role == AWL_ROLE_CURSOR && attached))
+            schedule_render(s);
         return;
     }
 
@@ -412,7 +449,7 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
      * get_popup already linked into the tree, schedule_render already
      * dirtied the root), frame callbacks are issued by the render side
      * per layer presented. */
-    if (!s->mapped && s->role != AWL_ROLE_SUBSURFACE) {
+    if (!s->mapped && s->role != AWL_ROLE_SUBSURFACE && s->role != AWL_ROLE_CURSOR) {
         s->mapped = 1;
         LOGI("surface %llu mapped (role=%d)",
                 (unsigned long long)s->id, s->role);

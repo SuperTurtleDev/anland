@@ -351,6 +351,9 @@ void awl_subsurface_setup(void) {
 }
 
 /* ---- Render layer snapshot (awl.h public API, called by render/input threads) ----
+ * The wl_pointer.set_cursor image is NOT part of this stack (it never
+ * hit-tests): the renderer appends it on top via awl_pointer_cursor_layer
+ * (awl_input.c).
  * #31 scaling: coordinates/sizes are always logical px (viewport dst | source |
  * buffer/scale; see awl_viewport.c awl_surface_logical_size). The render side
  * scales by the window-physical / root-logical ratio; input hit-testing uses the
@@ -375,28 +378,8 @@ static void layers_collect(struct awl_surface* parent, float bx, float by,
         }
         float w = 0, h = 0;
         awl_surface_logical_size(ch, &w, &h);
-        /* Sample region (source rect; absent = whole buffer) → normalized uv
-         * transform. shader uv is already Y-flipped (top-down); source is
-         * top-down too, so just divide. */
-        uint32_t bw = 0, bh = 0;
-        if (ch->current_buffer_res) {
-            struct wl_shm_buffer* shm = wl_shm_buffer_get(ch->current_buffer_res);
-            if (shm) {
-                bw = (uint32_t)wl_shm_buffer_get_width(shm);
-                bh = (uint32_t)wl_shm_buffer_get_height(shm);
-            } else {
-                struct awl_buffer* b =
-                        wl_resource_get_user_data(ch->current_buffer_res);
-                if (b) { bw = b->width; bh = b->height; }
-            }
-        }
-        float u0 = 0, v0 = 0, su = 1, sv = 1;
-        if (ch->vp_has_src && bw && bh) {
-            u0 = ch->vp_sx / (float)bw;
-            v0 = ch->vp_sy / (float)bh;
-            su = ch->vp_sw / (float)bw;
-            sv = ch->vp_sh / (float)bh;
-        }
+        float u0, v0, su, sv;   /* sample region (viewport source) → normalized uv, awl_viewport.c */
+        awl_surface_layer_uv(ch, &u0, &v0, &su, &sv);
         pthread_mutex_unlock(&ch->ev_lock);
         out[*n].surface_id = ch->id;
         out[*n].x = x;
@@ -429,26 +412,7 @@ int awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max) {
         pthread_mutex_lock(&root->ev_lock);
         float w = 0, h = 0;
         awl_surface_logical_size(root, &w, &h);
-        uint32_t bw = 0, bh = 0;
-        if (root->current_buffer_res) {
-            struct wl_shm_buffer* shm = wl_shm_buffer_get(root->current_buffer_res);
-            if (shm) {
-                bw = (uint32_t)wl_shm_buffer_get_width(shm);
-                bh = (uint32_t)wl_shm_buffer_get_height(shm);
-            } else {
-                struct awl_buffer* b =
-                        wl_resource_get_user_data(root->current_buffer_res);
-                if (b) { bw = b->width; bh = b->height; }
-            }
-        }
-        out[0].u0 = out[0].v0 = 0.0f;
-        out[0].su = out[0].sv = 1.0f;
-        if (root->vp_has_src && bw && bh) {
-            out[0].u0 = root->vp_sx / (float)bw;
-            out[0].v0 = root->vp_sy / (float)bh;
-            out[0].su = root->vp_sw / (float)bw;
-            out[0].sv = root->vp_sh / (float)bh;
-        }
+        awl_surface_layer_uv(root, &out[0].u0, &out[0].v0, &out[0].su, &out[0].sv);
         out[0].w = w;
         out[0].h = h;
         pthread_mutex_unlock(&root->ev_lock);

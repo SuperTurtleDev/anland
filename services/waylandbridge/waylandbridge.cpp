@@ -130,6 +130,11 @@ enum {
 #define AWL_C_CAPTURE 7       /* (on:i32) pointer lock state (pointer-constraints
                                  lock_pointer create/destroy) → requestPointerCapture,
                                  captured-state motion is literally translated as AWL_IN_PTR_REL (#21) */
+#define AWL_C_CURSOR 8        /* (hidden:i32) client took over the cursor via
+                                 wl_pointer.set_cursor (image composited by the
+                                 renderer on top of the window, or NULL = invisible)
+                                 → Activity hides the Android pointer
+                                 (setPointerIcon TYPE_NULL); 0 = restore it */
 #define AWL_CTRL_DESC "anland.ICtrl"
 
 /* ---------------- window state table ---------------- */
@@ -579,6 +584,22 @@ static void cb_pointer_lock(void* user, uint64_t id, int locked) {
          locked ? "locked (Activity capture)" : "unlocked");
 }
 
+/* Client cursor (wl_pointer.set_cursor): hidden=1 → the renderer now draws
+ * the client's cursor image (or the client wants an invisible pointer) →
+ * the Activity hides the Android pointer for this window; 0 → restore. Only
+ * transitions arrive. No Activity attached: drop — a fresh Activity starts
+ * with the system pointer visible and the client re-sets its cursor on the
+ * next enter. */
+static void cb_pointer_cursor(void* user, uint64_t id, int hidden) {
+    AIBinder* ctrl = ctrl_of(id);
+    if (!ctrl) return;
+    int32_t args[1] = { hidden ? 1 : 0 };
+    ctrl_send_ints(ctrl, AWL_C_CURSOR, args, 1);
+    AIBinder_decStrong(ctrl);
+    LOGI("window %llu android pointer %s", (unsigned long long)id,
+         hidden ? "hidden (client cursor)" : "restored");
+}
+
 static void cb_window_dirty(void* user, uint64_t id) {
     /* on detach (incl. pause) there is no render entry → no-op: send no
      * frame_done; the client naturally parks in eglSwapBuffers waiting —
@@ -625,6 +646,7 @@ static awl_window_callbacks_t k_cbs = {
     .ime_hide = cb_ime_hide,
     .ime_state = cb_ime_state,
     .clipboard_text = cb_clipboard_text,
+    .pointer_cursor = cb_pointer_cursor,
 };
 
 /* ---------------- daemon config (config.json, #31) ----------------

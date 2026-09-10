@@ -18,6 +18,13 @@
  * consistency).
  *
  * keymap: embedded evdev+qwerty xkb (third_party/keymap_evdev.h, memfd transfer).
+ *
+ * Cursor (wl_pointer.set_cursor, section at the end of this file): the
+ * client's cursor image is composited by the renderer as the topmost layer
+ * of the window the pointer is in (awl_pointer_cursor_layer) while the
+ * adaptation layer hides the Android system pointer (cbs.pointer_cursor).
+ * Android is the position authority: every enter/motion stores the pointer
+ * position in one atomic word, the render thread reads it lock-free.
  */
 #define _GNU_SOURCE   /* bionic: memfd_create */
 #include "awl_internal.h"
@@ -83,13 +90,10 @@ static void view_to_surface(struct awl_surface* s, float* x, float* y) {
 
 /* ---------------- wl_pointer / wl_keyboard / wl_touch client-side interface ---- */
 
+/* wl_pointer.set_cursor — see the cursor section at the end of this file */
 static void pointer_set_cursor(struct wl_client* c, struct wl_resource* res,
                                uint32_t serial, struct wl_resource* surface,
-                               int32_t hot_x, int32_t hot_y) {
-    /* cursor surface composited rendering (todo #22); during capture the client sends NULL — just recorded for now */
-    LOGD("set_cursor serial=%u surface=%p hot=%d,%d", serial,
-            (void*)surface, hot_x, hot_y);
-}
+                               int32_t hot_x, int32_t hot_y);
 static void input_obj_release(struct wl_client* c, struct wl_resource* res) {
     wl_resource_destroy(res);
 }
@@ -270,6 +274,8 @@ static void relmgr_bind(struct wl_client* client, void* data,
     wl_resource_set_implementation(res, &relmgr_iface, NULL, NULL);
 }
 
+static void cursor_reset_state(void);   /* cursor section */
+
 void awl_input_setup(void) {
     wl_list_init(&g_ptrs);
     wl_list_init(&g_kbds);
@@ -277,6 +283,7 @@ void awl_input_setup(void) {
     wl_list_init(&g_relptrs);
     g_mods_depressed = g_mods_locked = 0;
     memset(g_keys_down, 0, sizeof(g_keys_down));
+    cursor_reset_state();
     g_srv.g_seat = wl_global_create(g_srv.display, &wl_seat_interface, 5,
                                     NULL, seat_bind);
     if (!g_srv.g_seat) LOGE("wl_seat global create failed");
@@ -310,7 +317,8 @@ static struct wl_resource* resolve(struct wl_list* list, uint64_t win,
 /* Pointer focus layer + button bitmap (nonzero = grab: protocol pointer
  * focus pinned until release); g_ptr_grabbed = presses consumed by a popup
  * grab (the matching release is not delivered either) */
-static uint64_t g_ptr_focus;
+static _Atomic uint64_t g_ptr_focus;         /* written on the input thread; set_cursor (dispatch thread) reads it */
+static _Atomic uint32_t g_ptr_enter_serial;  /* serial of the enter that set g_ptr_focus (kwin focusedSerial: set_cursor must echo it) */
 static uint32_t g_ptr_buttons;
 static uint32_t g_ptr_grabbed;
 
@@ -320,14 +328,27 @@ static struct { int32_t tid; uint64_t sid; } g_touches[16];
 /* Window view coordinates → event target layer + layer-local buffer
  * coordinates (caller holds rwl.rd).
  * prefer>0: force that layer during a grab (coordinate translation only;
- * falls back to a hit automatically if the layer disappears). */
+ * falls back to a hit automatically if the layer disappears).
+ * rx/ry (optional): the root logical coordinates before the layer hit —
+ * the basis of the cursor image position (same space as the layer stack). */
 static struct awl_surface* input_target(struct awl_surface* root, uint64_t prefer,
-                                        float* x, float* y) {
+                                        float* x, float* y, float* rx, float* ry) {
     pthread_mutex_lock(&root->ev_lock);
     view_to_surface(root, x, y);
     pthread_mutex_unlock(&root->ev_lock);
+    if (rx) *rx = *x;
+    if (ry) *ry = *y;
     return awl_subsurface_hit(root, *x, *y, prefer, 0, x, y);
 }
+
+/* Cursor hooks (section at the end of the file). Return values = window
+ * whose Android pointer must be restored / redrawn once rwl is released
+ * (0 = nothing); callbacks never run under a logic-layer lock. */
+static uint64_t cursor_pointer_entered(uint64_t win, float rx, float ry);
+static uint64_t cursor_pointer_moved(uint64_t win, float rx, float ry);
+static uint64_t cursor_pointer_left(void);
+static void cursor_restore(uint64_t win);
+static void cursor_dirty(uint64_t win);
 
 /* Drag-phase motion resolution (caller holds no rwl): view → root buffer →
  * layer hit (excluding the icon layer, no prefer — the DnD target is
@@ -366,29 +387,44 @@ static void ptr_leave_focus(void) {
     g_ptr_focus = 0;
 }
 
+/* Send enter to `hit` and make it the pointer focus (caller holds rwl.rd);
+ * the enter serial is what a following set_cursor must echo. */
+static void ptr_enter_focus(struct wl_resource* ptr, struct awl_surface* hit,
+                            float x, float y) {
+    pthread_mutex_lock(&hit->ev_lock);
+    uint32_t serial = wl_display_next_serial(g_srv.display);
+    wl_pointer_send_enter(ptr, serial, hit->resource,
+                          wl_fixed_from_double(x), wl_fixed_from_double(y));
+    wl_client_flush(wl_resource_get_client(ptr));
+    pthread_mutex_unlock(&hit->ev_lock);
+    g_ptr_enter_serial = serial;
+    g_ptr_focus = hit->id;
+}
+
 static void tr_ptr_enter(uint64_t win, float x, float y) {
     if (awl_datadev_drag_active()) return;   /* drag-phase hover belongs to the drag machine */
+    uint64_t restore = 0;
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s;
     struct wl_resource* ptr = resolve(&g_ptrs, win, &s);
     if (ptr && s) {
-        struct awl_surface* hit = input_target(s, 0, &x, &y);
-        pthread_mutex_lock(&hit->ev_lock);
-        wl_pointer_send_enter(ptr, wl_display_next_serial(g_srv.display),
-                              hit->resource, wl_fixed_from_double(x),
-                              wl_fixed_from_double(y));
-        wl_client_flush(wl_resource_get_client(ptr));
-        pthread_mutex_unlock(&hit->ev_lock);
-        g_ptr_focus = hit->id;
+        float rx, ry;
+        struct awl_surface* hit = input_target(s, 0, &x, &y, &rx, &ry);
+        if (g_ptr_focus) ptr_leave_focus();   /* a focus still held = its leave got lost (Activity died): pair it (protocol: one enter per focus) */
+        ptr_enter_focus(ptr, hit, x, y);
+        restore = cursor_pointer_entered(win, rx, ry);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
+    cursor_restore(restore);
 }
 
 static void tr_ptr_leave(uint64_t win) {
     if (awl_datadev_drag_active()) return;
     pthread_rwlock_rdlock(&g_srv.rwl);
     ptr_leave_focus();
+    uint64_t restore = cursor_pointer_left();
     pthread_rwlock_unlock(&g_srv.rwl);
+    cursor_restore(restore);
 }
 
 static void tr_ptr_motion(uint64_t win, float x, float y) {
@@ -396,21 +432,21 @@ static void tr_ptr_motion(uint64_t win, float x, float y) {
         drag_deliver_motion(win, x, y);
         return;
     }
+    uint64_t dirty = 0;
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s;
     struct wl_resource* ptr = resolve(&g_ptrs, win, &s);
     if (ptr && s) {
         uint64_t prefer = g_ptr_buttons ? g_ptr_focus : 0;
-        struct awl_surface* hit = input_target(s, prefer, &x, &y);
+        float rx, ry;
+        struct awl_surface* hit = input_target(s, prefer, &x, &y, &rx, &ry);
         if (!g_ptr_buttons && hit->id != g_ptr_focus) {
-            ptr_leave_focus();   /* cross-layer switch: old-layer leave paired with the new enter */
-            pthread_mutex_lock(&hit->ev_lock);
-            wl_pointer_send_enter(ptr, wl_display_next_serial(g_srv.display),
-                                  hit->resource, wl_fixed_from_double(x),
-                                  wl_fixed_from_double(y));
-            wl_client_flush(wl_resource_get_client(ptr));
-            pthread_mutex_unlock(&hit->ev_lock);
-            g_ptr_focus = hit->id;
+            /* cross-layer switch: old-layer leave paired with the new enter
+             * (the client cursor persists across it — kwin keeps the server
+             * cursor over focusedSurfaceChanged; the client re-sets it with
+             * the new serial) */
+            ptr_leave_focus();
+            ptr_enter_focus(ptr, hit, x, y);
         }
         pthread_mutex_lock(&hit->ev_lock);
         wl_pointer_send_motion(ptr, awl_now_ms(),
@@ -418,8 +454,10 @@ static void tr_ptr_motion(uint64_t win, float x, float y) {
                                wl_fixed_from_double(y));
         wl_client_flush(wl_resource_get_client(ptr));
         pthread_mutex_unlock(&hit->ev_lock);
+        dirty = cursor_pointer_moved(win, rx, ry);   /* position → atomic; redraw if a cursor image is shown */
     }
     pthread_rwlock_unlock(&g_srv.rwl);
+    cursor_dirty(dirty);
 }
 
 /* Relative motion (x/y = computed APK-side without capture: AXIS_RELATIVE_X/Y
@@ -542,7 +580,7 @@ static void tr_ptr_axis(uint64_t win, float v, float h, uint32_t finger,
         if ((px != 0 || py != 0)) {
             lx = px; ly = py;
             struct awl_surface* lay =
-                    input_target(s, g_ptr_buttons ? g_ptr_focus : 0, &lx, &ly);
+                    input_target(s, g_ptr_buttons ? g_ptr_focus : 0, &lx, &ly, NULL, NULL);
             if (lay) hit = lay;   /* the coordinates are already that layer's local system (same source as tr_ptr_motion) */
         }
         if (hit) {
@@ -769,7 +807,7 @@ static void tr_touch(uint64_t win, const awl_input_ev_t* ev) {
     if (t && s) {
         float x = ev->x, y = ev->y;
         int32_t tid = (int32_t)ev->code;
-        struct awl_surface* hit = input_target(s, touch_target(tid), &x, &y);
+        struct awl_surface* hit = input_target(s, touch_target(tid), &x, &y, NULL, NULL);
         if (ev->type == AWL_IN_TOUCH_DOWN && awl_popup_input_grab(hit)) {
             pthread_rwlock_unlock(&g_srv.rwl);
             return;   /* popup grab: the press is consumed (menu closed), not delivered */
@@ -831,4 +869,222 @@ void awl_input_dispatch(const awl_input_ev_t* ev) {
         LOGE("input ev type=%u?", ev->type);
         break;
     }
+}
+
+/* ---------------- Cursor: wl_pointer.set_cursor ----------------
+ * Protocol side isomorphic to kwin-6.6.5 PointerInterfacePrivate::
+ * pointer_set_cursor (src/wayland/pointer.cpp): accepted only from the
+ * pointer-focused client with the serial of the enter that set the focus,
+ * anything else silently ignored; the surface takes the "cursor" role (any
+ * other role → wl_pointer.error.role); NULL = invisible pointer; a commit
+ * with an attach offset moves the hotspot (SurfaceCursorSource::refresh).
+ *
+ * awl model (Android owns pointer position and the system pointer):
+ *   - position: the Activity reports every enter/motion; the input thread
+ *     stores the root-logical position in ONE atomic word (x:y packed as
+ *     two wl_fixed_t) and the render thread reads it lock-free — no
+ *     position state machine; image = position − hotspot;
+ *   - "set" = the client called set_cursor since the pointer entered the
+ *     window → the Android pointer of that window is hidden
+ *     (cbs.pointer_cursor 1) and the renderer draws the cursor surface on
+ *     top of the window (awl_pointer_cursor_layer; never hit-tested). Not
+ *     set → the Android pointer stays visible (the fallback cursor);
+ *   - cleared (pointer restored, cbs.pointer_cursor 0) when the pointer
+ *     leaves the window, when the pointer (re)enters a window while a stale
+ *     set is pending (the previous window's leave got lost — its Activity
+ *     died), when the focus layer / the window / the cursor surface dies
+ *     (kwin turns a dead cursor surface into an invisible one; here the
+ *     system pointer is the better fallback, the client did not ask to hide
+ *     it). A same-window layer switch (subsurface/popup) keeps it.
+ * g_cursor is written by the input thread and by client dispatch threads
+ * (set_cursor / commit / surface death under rwl.wr), read by render threads
+ * → g_cursor_lock. Order: rwl → g_cursor_lock → ev_lock. */
+static struct {
+    int set;                      /* client took over the cursor since the pointer entered → Android pointer hidden */
+    uint64_t win;                 /* window the pointer is in (= where the cursor image renders); 0 = outside */
+    struct awl_surface* surface;  /* cursor image (NULL while set = invisible pointer); valid under rwl */
+    int32_t hot_x, hot_y;         /* hotspot, cursor-surface logical coordinates */
+} g_cursor;
+static pthread_mutex_t g_cursor_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_cursor_pos;   /* pointer position, root logical: (wl_fixed x << 32) | wl_fixed y */
+
+static inline uint64_t pos_pack(float x, float y) {
+    return ((uint64_t)(uint32_t)wl_fixed_from_double(x) << 32) |
+           (uint32_t)wl_fixed_from_double(y);
+}
+
+static void cursor_reset_state(void) {
+    pthread_mutex_lock(&g_cursor_lock);
+    memset(&g_cursor, 0, sizeof(g_cursor));
+    pthread_mutex_unlock(&g_cursor_lock);
+    atomic_store(&g_cursor_pos, 0);
+}
+
+static void cursor_dirty(uint64_t win) {
+    if (win && g_srv.cbs.window_dirty)
+        g_srv.cbs.window_dirty(g_srv.cbs.user, win);
+}
+
+/* The client cursor of `win` ended → redraw without the cursor layer + give
+ * the Android pointer back (no lock held) */
+static void cursor_restore(uint64_t win) {
+    if (!win) return;
+    cursor_dirty(win);
+    if (g_srv.cbs.pointer_cursor)
+        g_srv.cbs.pointer_cursor(g_srv.cbs.user, win, 0);
+    LOGI("window %llu: client cursor ended → android pointer restored", (unsigned long long)win);
+}
+
+/* Drop the set state (caller holds g_cursor_lock); returns the window to restore */
+static uint64_t cursor_clear_locked(void) {
+    uint64_t restore = g_cursor.set ? g_cursor.win : 0;
+    g_cursor.set = 0;
+    g_cursor.surface = NULL;
+    return restore;
+}
+
+/* Android pointer entered `win` (rx,ry root logical): the cursor state
+ * starts fresh — a set still pending belongs to a window whose leave never
+ * arrived (its Activity died) → restore that one. */
+static uint64_t cursor_pointer_entered(uint64_t win, float rx, float ry) {
+    atomic_store(&g_cursor_pos, pos_pack(rx, ry));
+    pthread_mutex_lock(&g_cursor_lock);
+    uint64_t restore = cursor_clear_locked();
+    g_cursor.win = win;
+    pthread_mutex_unlock(&g_cursor_lock);
+    return restore;
+}
+
+/* Pointer moved inside `win`: store the position; redraw when a cursor image is shown there */
+static uint64_t cursor_pointer_moved(uint64_t win, float rx, float ry) {
+    atomic_store(&g_cursor_pos, pos_pack(rx, ry));
+    pthread_mutex_lock(&g_cursor_lock);
+    g_cursor.win = win;   /* tolerate a motion without enter */
+    uint64_t dirty = (g_cursor.set && g_cursor.surface) ? win : 0;
+    pthread_mutex_unlock(&g_cursor_lock);
+    return dirty;
+}
+
+static uint64_t cursor_pointer_left(void) {
+    pthread_mutex_lock(&g_cursor_lock);
+    uint64_t restore = cursor_clear_locked();
+    g_cursor.win = 0;
+    pthread_mutex_unlock(&g_cursor_lock);
+    return restore;
+}
+
+static void pointer_set_cursor(struct wl_client* c, struct wl_resource* res,
+                               uint32_t serial, struct wl_resource* surface_res,
+                               int32_t hot_x, int32_t hot_y) {
+    struct awl_surface* s = surface_res ? wl_resource_get_user_data(surface_res) : NULL;
+    if (surface_res && !s) return;   /* surface already torn down */
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    /* kwin: only the focused client, only with the focus enter's serial */
+    struct awl_surface* focus = awl_surface_by_id(g_ptr_focus);
+    if (!focus || !focus->resource || wl_resource_get_client(focus->resource) != c) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        LOGD("set_cursor from unfocused client ignored");
+        return;
+    }
+    if (serial != g_ptr_enter_serial) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        LOGD("set_cursor serial %u != enter serial %u ignored", serial, (uint32_t)g_ptr_enter_serial);
+        return;
+    }
+    if (s) {
+        pthread_mutex_lock(&s->ev_lock);
+        if ((s->role != AWL_ROLE_NONE && s->role != AWL_ROLE_CURSOR) || s->sub_parent) {
+            int role = s->role;
+            pthread_mutex_unlock(&s->ev_lock);
+            pthread_rwlock_unlock(&g_srv.rwl);
+            wl_resource_post_error(res, WL_POINTER_ERROR_ROLE,
+                                   "the wl_surface already has a role assigned (%d)", role);
+            return;
+        }
+        s->role = AWL_ROLE_CURSOR;   /* permanent: protocol roles are never reassigned */
+        pthread_mutex_unlock(&s->ev_lock);
+    }
+    pthread_mutex_lock(&g_cursor_lock);
+    int was_set = g_cursor.set;
+    uint64_t win = g_cursor.win;
+    g_cursor.set = 1;
+    g_cursor.surface = s;
+    g_cursor.hot_x = hot_x;
+    g_cursor.hot_y = hot_y;
+    pthread_mutex_unlock(&g_cursor_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    LOGD("set_cursor win=%llu surface=%llu hot=%d,%d", (unsigned long long)win,
+         (unsigned long long)(s ? s->id : 0), hot_x, hot_y);
+    if (!was_set) {
+        if (g_srv.cbs.pointer_cursor)
+            g_srv.cbs.pointer_cursor(g_srv.cbs.user, win, 1);
+        LOGI("window %llu: client cursor %s → android pointer hidden",
+             (unsigned long long)win, s ? "surface" : "NULL (invisible)");
+    }
+    cursor_dirty(win);   /* add / swap / remove the cursor layer */
+}
+
+/* ---- awl.h / awl_internal.h entry points ---- */
+
+int awl_pointer_cursor_layer(uint64_t root_id, awl_layer_info_t* out) {
+    int ok = 0;
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    pthread_mutex_lock(&g_cursor_lock);
+    struct awl_surface* cs = g_cursor.surface;   /* valid under rwl: cleared under rwl.wr before the surface is freed */
+    if (g_cursor.set && cs && g_cursor.win == root_id) {
+        pthread_mutex_lock(&cs->ev_lock);
+        float w = 0, h = 0;
+        awl_surface_logical_size(cs, &w, &h);   /* viewport dst | source | buffer/scale, logical px */
+        float u0, v0, su, sv;
+        awl_surface_layer_uv(cs, &u0, &v0, &su, &sv);
+        pthread_mutex_unlock(&cs->ev_lock);
+        if (w > 0.5f && h > 0.5f) {   /* no buffer yet → nothing to draw (the commit re-dirties) */
+            uint64_t pos = atomic_load(&g_cursor_pos);   /* one word: x and y from the same event */
+            memset(out, 0, sizeof(*out));
+            out->surface_id = cs->id;
+            out->x = (float)wl_fixed_to_double((wl_fixed_t)(uint32_t)(pos >> 32)) - (float)g_cursor.hot_x;
+            out->y = (float)wl_fixed_to_double((wl_fixed_t)(uint32_t)pos) - (float)g_cursor.hot_y;
+            out->w = w;
+            out->h = h;
+            out->u0 = u0; out->v0 = v0;
+            out->su = su; out->sv = sv;
+            ok = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_cursor_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    return ok;
+}
+
+uint64_t awl_input_cursor_window(struct awl_surface* s) {
+    pthread_mutex_lock(&g_cursor_lock);
+    uint64_t win = (g_cursor.set && g_cursor.surface == s) ? g_cursor.win : 0;
+    pthread_mutex_unlock(&g_cursor_lock);
+    return win;
+}
+
+void awl_input_cursor_commit(struct awl_surface* s, int32_t off_x, int32_t off_y) {
+    pthread_mutex_lock(&g_cursor_lock);
+    if (g_cursor.surface == s) {   /* kwin refresh(): m_hotspot -= m_surface->offset() */
+        g_cursor.hot_x -= off_x;
+        g_cursor.hot_y -= off_y;
+    }
+    pthread_mutex_unlock(&g_cursor_lock);
+}
+
+uint64_t awl_input_surface_gone(struct awl_surface* s) {
+    /* focus layer, its window, or the cursor image died → the client cursor
+     * ends (a dangling g_ptr_focus is re-entered by the next motion, as before) */
+    int is_focus = s->id == g_ptr_focus;
+    pthread_mutex_lock(&g_cursor_lock);
+    uint64_t win = 0;
+    if (is_focus || s->id == g_cursor.win || s == g_cursor.surface)
+        win = cursor_clear_locked();
+    if (s->id == g_cursor.win) g_cursor.win = 0;
+    pthread_mutex_unlock(&g_cursor_lock);
+    return win;
+}
+
+void awl_input_cursor_gone_notify(uint64_t win) {
+    cursor_restore(win);
 }

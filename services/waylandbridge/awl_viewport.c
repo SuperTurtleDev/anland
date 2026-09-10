@@ -84,6 +84,24 @@ void awl_surface_content_size(struct awl_surface* s, float* w, float* h) {
     awl_surface_logical_size(s, w, h);
 }
 
+/* Sample region (viewport source; absent = whole buffer) → normalized uv
+ * transform for the layer snapshot / cursor layer. The shader uv is already
+ * Y-flipped (top-down) and the source rectangle is top-down too, so a plain
+ * divide suffices. Caller holds ev_lock. */
+void awl_surface_layer_uv(struct awl_surface* s, float* u0, float* v0,
+                          float* su, float* sv) {
+    *u0 = *v0 = 0.0f;
+    *su = *sv = 1.0f;
+    if (!s->vp_has_src) return;
+    uint32_t bw = 0, bh = 0;
+    vp_buf_size(s, &bw, &bh);
+    if (!bw || !bh) return;
+    *u0 = s->vp_sx / (float)bw;
+    *v0 = s->vp_sy / (float)bh;
+    *su = s->vp_sw / (float)bw;
+    *sv = s->vp_sh / (float)bh;
+}
+
 /* ---------------- wp_viewport ---------------- */
 
 static void vp_destroy(struct wl_client* c, struct wl_resource* res) {

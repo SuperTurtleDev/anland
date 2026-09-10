@@ -14,6 +14,7 @@ import android.util.Log;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.PointerIcon;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -82,6 +83,11 @@ public class WlWindowActivity extends Activity {
                                                   daemon no longer sends it; the
                                                   handler stays only for old-
                                                   daemon compatibility (#21) */
+    private static final int C_CURSOR = 8;     /* (hidden:i32) wl client took over the
+                                                  cursor (wl_pointer.set_cursor: image
+                                                  composited by the daemon renderer on
+                                                  top of the window, or NULL = invisible)
+                                                  → hide the Android pointer; 0 = restore */
     private static final int STATE_RESET = 0x1;   /* v1 reset → clear composing state + restartInput */
 
     /** Unique Activity instance id (trailing host field of SURFACE/PAUSE: daemon eviction criterion) */
@@ -192,6 +198,11 @@ public class WlWindowActivity extends Activity {
             if (code == C_CAPTURE) {
                 final boolean on = data.readInt() != 0;
                 runOnUiThread(() -> setPointerCaptured(on));
+                return true;
+            }
+            if (code == C_CURSOR) {
+                final boolean hidden = data.readInt() != 0;
+                runOnUiThread(() -> setPointerHidden(hidden));
                 return true;
             }
             return super.onTransact(code, data, reply, flags);
@@ -1005,6 +1016,32 @@ public class WlWindowActivity extends Activity {
     public void onPointerCaptureChanged(boolean hasCapture) {
         super.onPointerCaptureChanged(hasCapture);
         ptrCaptured = hasCapture;   /* sync when the system side breaks in (the daemon-side suppression still applies) */
+    }
+
+    /* ---- Client cursor (wl_pointer.set_cursor) ----
+     * While the wl client drives the cursor the daemon composites the
+     * client's cursor image itself (topmost layer of this window, following
+     * the pointer) — or the client asked for an invisible pointer — so the
+     * Android system pointer must not be drawn on top of it. The icon is
+     * resolved by ViewRootImpl.updatePointerIcon through the view hierarchy
+     * on every mouse event (View.onResolvePointerIcon → mMousePointerIcon)
+     * and re-resolved on HOVER_ENTER/EXIT (mResolvedPointerIcon reset), so
+     * setting a persistent TYPE_NULL icon on the views under the pointer is
+     * enough; setPointerIcon also triggers refreshPointerIcon() at once.
+     * PointerIcon.TYPE_NULL = "Null icon. It has no bitmap" (PointerIcon.java)
+     * = the documented way to hide the mouse pointer. Restored (null =
+     * default arrow) when the daemon reports the client cursor gone (leave /
+     * client exit). Per Activity instance — a re-attached window starts
+     * visible and the client re-sets its cursor on the next enter. */
+    private boolean ptrHidden;
+
+    private void setPointerHidden(boolean hidden) {
+        if (ptrHidden == hidden) return;
+        ptrHidden = hidden;
+        PointerIcon icon = hidden ? PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL) : null;
+        if (sv != null) sv.setPointerIcon(icon);
+        if (root != null) root.setPointerIcon(icon);
+        Log.i(TAG, "win " + id + ": android pointer " + (hidden ? "hidden (client cursor)" : "restored"));
     }
 
     private static final int BTN_LEFT = 0x110, BTN_RIGHT = 0x111,

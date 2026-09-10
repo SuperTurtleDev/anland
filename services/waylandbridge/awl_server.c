@@ -120,7 +120,17 @@ static void client_gone_li(struct wl_listener* li, void* data) {
  * never touches ctx again (no double teardown). */
 static void* client_loop_thread(void* arg) {
     struct awl_client_ctx* ctx = arg;
-    while (!ctx->stop && wl_event_loop_dispatch(ctx->loop, -1) == 0) {}
+    while (!ctx->stop && wl_event_loop_dispatch(ctx->loop, -1) == 0) {
+        /* Mirror wl_display_run's flush: events libwayland itself queues
+         * during this dispatch (wl_callback.done of wl_display.sync,
+         * wl_display.delete_id) have no explicit wl_client_flush of their
+         * own, and wl_display_flush_clients on the main loop deliberately
+         * skips migrated clients — without this a client doing a roundtrip
+         * right after its first commit stalls until some direct-send path
+         * (render presented / input) happens to flush (surfaced by
+         * test/host/cursor_test, which has no renderer). */
+        if (!ctx->client_gone) wl_client_flush(ctx->client);
+    }
     if (!ctx->client_gone)
         wl_client_destroy(ctx->client);
     wl_event_source_remove(ctx->quit_src);
@@ -129,6 +139,25 @@ static void* client_loop_thread(void* arg) {
     wl_event_loop_destroy(ctx->loop);
     free(ctx);
     return NULL;
+}
+
+/* Idle source armed by a migration, runs on the main loop right before its
+ * next epoll (wl_display_run: flush_clients → dispatch → idle): the batch
+ * that carried the mapping commit usually also carries a wl_display.sync
+ * (client roundtrip) which is still dispatched on the main thread after the
+ * fd source moved — wl_display_flush_clients deliberately skips migrated
+ * clients (their event mask belongs to the sub loop), so the queued done /
+ * delete_id would never leave and the client would wait forever while the
+ * sub loop waits for input (test/host/cursor_test hang). Flushing does not
+ * touch the event mask (connection mutex only) → safe from this thread.
+ * ctx entries are unlinked under rwl.wr at the start of client destruction
+ * → every listed client is alive while we hold rd. */
+static void flush_migrated_idle(void* data) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_client_ctx* ctx;
+    wl_list_for_each(ctx, &g_srv.clients, link)
+        wl_client_flush(ctx->client);
+    pthread_rwlock_unlock(&g_srv.rwl);
 }
 
 /* Called on map (the dispatch thread at that moment = the old loop thread,
@@ -166,6 +195,7 @@ void awl_client_maybe_migrate(struct wl_client* client) {
         goto fail_thread;   /* already linked, just unlink */
 
     pthread_rwlock_unlock(&g_srv.rwl);
+    wl_event_loop_add_idle(g_srv.loop, flush_migrated_idle, NULL);   /* see flush_migrated_idle */
     LOGI("client migrated to dedicated loop (tid=%llu)",
             (unsigned long long)ctx->thread);
     return;

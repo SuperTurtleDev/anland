@@ -5,8 +5,9 @@
  *   dmabuf : eglCreateImageKHR(EGL_EXT_image_dma_buf_import) → zero-copy texture
  *   shm    : wl_shm_buffer → glTexSubImage2D upload (GPU, damage region)
  * Composite = multi-layer quads (root + wl_subsurface child layers, render
- * stack order bottom→top) sampled into dst rect → eglSwapBuffers →
- * BufferQueue/SurfaceFlinger present.
+ * stack order bottom→top, then the client's wl_pointer.set_cursor image on
+ * top) sampled into dst rect → eglSwapBuffers → BufferQueue/SurfaceFlinger
+ * present.
  * Per-layer texture state cached by surface id (wl_tex); reclaimed when the
  * layer disappears.
  * blend = premultiplied alpha (ONE, ONE_MINUS_SRC_ALPHA); first layer (root)
@@ -846,9 +847,15 @@ static void render_frame(wl_window* w) {
      * physical / root logical). After scaling, the view still aligns to the
      * geometry origin (chrome buffer carries 16/10px shadow margins, sharing
      * the same origin as input mapping). */
-    awl_layer_info_t lay[AWL_MAX_LAYERS];
+    awl_layer_info_t lay[AWL_MAX_LAYERS + 1];   /* +1: client cursor image appended on top */
     int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
     if (n <= 0) return;
+    /* wl_pointer.set_cursor image of the pointer-focused client: composited
+     * above every layer of this window (x,y = pointer − hotspot in the same
+     * root logical coordinates as the stack; never part of hit-testing).
+     * Drawn/presented like any layer → the cursor surface gets frame_done
+     * (animated cursors) and deferred buffer release. */
+    if (awl_pointer_cursor_layer(w->id, &lay[n])) n++;
     int32_t gox = 0, goy = 0;
     float gw = 0, gh = 0;
     awl_surface_get_origin(w->id, &gox, &goy, &gw, &gh);
@@ -879,7 +886,7 @@ static void render_frame(wl_window* w) {
     GLint swap_loc = glGetUniformLocation(w->program, "u_swap_rb");
     glActiveTexture(GL_TEXTURE0);
 
-    uint64_t seen[AWL_MAX_LAYERS];
+    uint64_t seen[AWL_MAX_LAYERS + 1];
     int nseen = 0;
     bool drew = false;
     for (int i = 0; i < n; i++) {

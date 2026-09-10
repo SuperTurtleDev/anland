@@ -80,6 +80,21 @@ typedef struct awl_window_callbacks {
      * ClipboardManager over the ctrl channel (background reads/writes are
      * restricted on Android 10+, the foreground Activity does it on behalf). */
     void (*clipboard_text)(void* user, uint64_t win_id, const char* utf8);
+
+    /* ---- Cursor (wl_pointer.set_cursor, semantics of kwin-6.6.5
+     *      PointerInterface::pointer_set_cursor + CursorImage) ----
+     * hidden=1: the pointer-focused client took over the cursor for that
+     * window (set_cursor with a cursor surface, or NULL = invisible pointer)
+     * → the adaptation layer must hide the Android system pointer for that
+     * window (View.setPointerIcon(TYPE_NULL)); the cursor image itself is
+     * composited by the renderer as the topmost layer of the window
+     * (awl_pointer_cursor_layer, positioned from the pointer position the
+     * Activity reports with every motion). hidden=0: pointer left the
+     * window / (re)entered a window / focus layer or cursor surface
+     * destroyed / client gone → restore the system pointer. Only state
+     * transitions are reported. Invoked on the client's protocol dispatch
+     * thread (set_cursor, surface death) or the input thread (leave/enter). */
+    void (*pointer_cursor)(void* user, uint64_t id, int hidden);
 } awl_window_callbacks_t;
 
 typedef struct awl_display_info {
@@ -229,6 +244,16 @@ typedef struct awl_layer_info {
  * nested sublayers follow their parent). No root / over the limit →
  * truncated (>0 is enough to render). */
 int  awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max);
+
+/* Client cursor layer of this window (wl_pointer.set_cursor surface; render
+ * thread). Returns 1 and fills *out when the pointer-focused client set a
+ * cursor surface for this window: the renderer composites it ABOVE every
+ * layer returned by awl_surface_get_layers (it is not part of that stack and
+ * never hit-tests). x,y = pointer position − hotspot (root logical
+ * coordinates, same basis as the layer stack), w,h = cursor surface logical
+ * size. 0 = nothing to draw (no cursor set, set_cursor(NULL) = invisible
+ * pointer, or the pointer is in another window). */
+int  awl_pointer_cursor_layer(uint64_t root_id, awl_layer_info_t* out);
 
 /* Root's xdg window geometry origin (buffer pixels; never set = 0,0).
  * Shared by the render dst and the input view→buffer mapping: view(0,0) ↔

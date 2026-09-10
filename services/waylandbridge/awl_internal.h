@@ -46,6 +46,11 @@ enum awl_role {
                               parent window for compositing */
     AWL_ROLE_XWAYLAND,     /* xwayland_surface_v1 (Xwayland rootless window,
                               no configure state machine, #32) */
+    AWL_ROLE_CURSOR,       /* wl_pointer.set_cursor cursor image (kwin
+                              "cursor" SurfaceRole): never maps a window, never
+                              enters the layer stack / hit-testing; composited
+                              by the renderer above all layers of the
+                              pointer-focused window (awl_input.c) */
 };
 
 /* wl_buffer wrapper for the dmabuf side (shm buffers are self-managed by
@@ -295,6 +300,22 @@ void awl_surface_release_defer(struct awl_surface* s, struct wl_resource* buf);
 /* awl_input.c — wl_seat input (per-event literal translation: Android is the
  * routing authority, events carry the window id; event types in awl.h) */
 void awl_input_setup(void);          /* creates the seat global (called by server_start) */
+/* Cursor hooks (set_cursor state lives in awl_input.c, own g_cursor_lock;
+ * order rwl → g_cursor_lock → ev_lock):
+ *  - surface_gone: caller holds rwl.wr (awl_surface.c destroy path). Drops
+ *    pointer focus / cursor references to s. Returns the window whose cursor
+ *    display changed (0 = none) — the caller must pass it to
+ *    awl_input_cursor_gone_notify AFTER releasing rwl (redraw + restore the
+ *    Android pointer; callbacks must not run under the topology write lock).
+ *  - cursor_window: window currently compositing s as its cursor (0 = s is
+ *    not the displayed cursor) — schedule_render of a CURSOR-role surface
+ *    dirties that window instead of "its own" (it has none).
+ *  - cursor_commit: a cursor surface committed with an attach offset —
+ *    hotspot -= offset (kwin SurfaceCursorSource::refresh). */
+uint64_t awl_input_surface_gone(struct awl_surface* s);
+void awl_input_cursor_gone_notify(uint64_t win);
+uint64_t awl_input_cursor_window(struct awl_surface* s);   /* caller holds rwl (rd/wr) */
+void awl_input_cursor_commit(struct awl_surface* s, int32_t off_x, int32_t off_y);
 
 /* awl_data_device.c — wl_data_device_manager v3 (full selection + DnD state
  * machine, semantics aligned with kwin-6.6.5; see the file-header lock note).
@@ -379,6 +400,10 @@ void awl_surface_logical_size(struct awl_surface* s, float* w, float* h);
  * IME cursor rectangle). Takes rwl.rd + root ev_lock internally; returns 1
  * when there is no window size. */
 void awl_surface_content_size(struct awl_surface* s, float* w, float* h);
+/* Sample-region uv transform of the current buffer (viewport source →
+ * normalized; whole buffer when unset/no buffer). Caller holds ev_lock. */
+void awl_surface_layer_uv(struct awl_surface* s, float* u0, float* v0,
+                          float* su, float* sv);
 
 /* awl_server.c — dedicated per-client event thread
  * Called at map (first buffer commit, on the dispatch thread that owns the
