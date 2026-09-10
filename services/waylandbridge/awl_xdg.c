@@ -89,12 +89,12 @@ static void toplevel_set_min_size(struct wl_client* c, struct wl_resource* res,
 static void toplevel_set_maximized(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
-    /* Fixed 800x600 placeholder (never use conf_w/h — stale after orientation
+    /* Placeholder from daemon config (never use conf_w/h — stale after orientation
      * switch, would crash; physical display values are meaningless in DeX-like
      * scenarios). The real size is only sent by awl_window_resize triggered by
      * Activity SURFACE changes. */
     uint32_t states[] = { XDG_TOPLEVEL_STATE_MAXIMIZED };
-    send_toplevel_configure(s, 800, 600, states, 1);
+    send_toplevel_configure(s, g_srv.init_conf_w, g_srv.init_conf_h, states, 1);
 }
 static void toplevel_unset_maximized(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
@@ -104,9 +104,9 @@ static void toplevel_set_fullscreen(struct wl_client* c, struct wl_resource* res
                                     struct wl_resource* output) {
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
-    /* Same as set_maximized: fixed placeholder, real size comes from SURFACE-triggered resize */
+    /* Same as set_maximized: config placeholder, real size comes from SURFACE-triggered resize */
     uint32_t states[] = { XDG_TOPLEVEL_STATE_FULLSCREEN };
-    send_toplevel_configure(s, 800, 600, states, 1);
+    send_toplevel_configure(s, g_srv.init_conf_w, g_srv.init_conf_h, states, 1);
 }
 static void toplevel_unset_fullscreen(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
@@ -429,12 +429,12 @@ static void xdg_surface_get_toplevel(struct wl_client* c,
     s->xdg_surface_res = res;
     s->title[0] = '\0';
 
-    /* Initial configure: fixed 800x600 placeholder (not the display's physical
-     * size — in external-screen scenarios like Samsung DeX the Activity is
-     * unrelated to the physical screen size, physical values would be wrong).
-     * Once the Activity surface is ready, surfaceChanged → awl_window_resize
-     * forces a configure with the exact window size. */
-    send_configure_locked(s, 800, 600, NULL, 0);
+    /* Initial configure: daemon-config placeholder init_w/init_h (#33, not the
+     * display's physical size — in external-screen scenarios like Samsung DeX
+     * the Activity is unrelated to the physical screen size, physical values
+     * would be wrong). Once the Activity surface is ready, surfaceChanged →
+     * awl_window_resize forces a configure with the exact window size. */
+    send_configure_locked(s, g_srv.init_conf_w, g_srv.init_conf_h, NULL, 0);
     pthread_mutex_unlock(&s->ev_lock);
 }
 
@@ -612,9 +612,28 @@ static void wm_base_bind(struct wl_client* client, void* data,
 }
 
 void awl_xdg_setup(void) {
+    g_srv.init_conf_w = 800;   /* #33 defaults; cfg_load_and_apply overrides at startup */
+    g_srv.init_conf_h = 600;
     g_srv.g_xdg_wm_base = wl_global_create(g_srv.display,
                                            &xdg_wm_base_interface,
                                            AWL_XDG_VERSION, NULL, wm_base_bind);
+}
+
+/* ---------------- initial-configure placeholder size (#33, daemon config) ----------------
+ * New windows only: the initial configure + maximized/fullscreen placeholders
+ * read these; mapped windows are resized by awl_window_resize (Android owns
+ * sizing entirely). Atomics → binder config thread writes, dispatch threads
+ * read, same shape as zoom_pct. */
+void awl_display_set_init_size(int32_t w, int32_t h) {
+    if (w < 100) w = 100;
+    if (h < 100) h = 100;
+    g_srv.init_conf_w = w;
+    g_srv.init_conf_h = h;
+}
+
+void awl_display_init_size(int32_t* w, int32_t* h) {
+    *w = g_srv.init_conf_w;
+    *h = g_srv.init_conf_h;
 }
 
 /* ---- Android → logical layer: window commands (sent directly from any

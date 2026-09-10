@@ -117,6 +117,107 @@ public class WlSettingsActivity extends Activity {
         }
         root.addView(presets);
 
+        /* ---- Initial window size (first-frame configure placeholder; #33,
+         *      daemon config init_w/init_h — new windows only) ---- */
+        android.widget.Space gap3 = new android.widget.Space(this);
+        gap3.setMinimumHeight(64);
+        root.addView(gap3);
+
+        TextView sizeTip = new TextView(this);
+        sizeTip.setText(R.string.init_size_tip);
+        root.addView(sizeTip);
+
+        final TextView sizeVal = new TextView(this);
+        sizeVal.setTextSize(20);
+        root.addView(sizeVal);
+
+        /* pickers bounded to the daemon's accepted domain (a set outside it
+         * is rejected — keep the UI from producing one) */
+        final android.widget.NumberPicker wp = new android.widget.NumberPicker(this);
+        final android.widget.NumberPicker hp = new android.widget.NumberPicker(this);
+        android.widget.LinearLayout pickers = new android.widget.LinearLayout(this);
+        pickers.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        TextView wl = new TextView(this);
+        wl.setText(R.string.init_size_w);
+        android.widget.LinearLayout.LayoutParams plp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        android.widget.LinearLayout.LayoutParams tlp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        pickers.addView(wl, tlp);
+        pickers.addView(wp, plp);
+        TextView hl = new TextView(this);
+        hl.setText(R.string.init_size_h);
+        pickers.addView(hl, tlp);
+        pickers.addView(hp, plp);
+        root.addView(pickers);
+
+        int gw = WlBinder.configGet("init_w");
+        int gh = WlBinder.configGet("init_h");
+        final int[] sz = {(gw >= 100 && gw <= 7680) ? gw : 800,   /* daemon down → defaults */
+                          (gh >= 100 && gh <= 4320) ? gh : 600};
+
+        /* debounce like zoom (a scroll fires many changes); presets apply
+         * immediately */
+        final Runnable[] pendSz = new Runnable[1];
+        final Runnable applySz = () -> {
+            WlBinder.configSet("init_w", sz[0]);
+            WlBinder.configSet("init_h", sz[1]);
+        };
+        final Runnable showSz = () -> sizeVal.setText(sz[0] + " × " + sz[1]);
+        final Runnable changedSz = () -> {
+            showSz.run();
+            if (pendSz[0] != null) h.removeCallbacks(pendSz[0]);
+            int w = sz[0], ht = sz[1];
+            pendSz[0] = () -> {
+                WlBinder.configSet("init_w", w);
+                WlBinder.configSet("init_h", ht);
+            };
+            h.postDelayed(pendSz[0], 300);
+        };
+        android.widget.NumberPicker.OnValueChangeListener ncl = (p, o, n) -> {
+            if (p == wp) sz[0] = n; else sz[1] = n;
+            changedSz.run();
+        };
+        wp.setMinValue(100);
+        wp.setMaxValue(7680);
+        wp.setWrapSelectorWheel(false);
+        wp.setValue(sz[0]);
+        wp.setOnValueChangedListener(ncl);
+        hp.setMinValue(100);
+        hp.setMaxValue(4320);
+        hp.setWrapSelectorWheel(false);
+        hp.setValue(sz[1]);
+        hp.setOnValueChangedListener(ncl);
+
+        android.widget.LinearLayout sizes = new android.widget.LinearLayout(this);
+        sizes.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        int[][] presets2 = {{800, 600}, {1024, 768}, {1280, 720}, {1920, 1080}};
+        for (int[] s : presets2) {
+            android.widget.Button btn = new android.widget.Button(this);
+            btn.setText(s[0] + "×" + s[1]);
+            btn.setOnClickListener(v -> {
+                if (pendSz[0] != null) h.removeCallbacks(pendSz[0]);
+                pendSz[0] = null;
+                sz[0] = s[0];
+                sz[1] = s[1];
+                wp.setValue(s[0]);
+                hp.setValue(s[1]);
+                showSz.run();
+                h.post(applySz);
+            });
+            sizes.addView(btn, lp1());
+        }
+        root.addView(sizes);
+        showSz.run();
+
         setContentView(root);
+    }
+
+    private static android.widget.LinearLayout.LayoutParams lp1() {
+        return new android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
     }
 }

@@ -289,6 +289,13 @@ struct awl_server {
      * wl_output.scale is always 1 — clients receive preferred_scale =
      * zoom_pct×120/100 via wp_fractional_scale_v1 (kwin round(z×120)). */
     atomic_int zoom_pct;   /* binder thread set_zoom ↔ protocol dispatch threads read, atomic */
+
+    /* Initial-configure placeholder size (#33, daemon config init_w/init_h):
+     * sent before the Android window exists (get_toplevel initial configure +
+     * set_maximized/fullscreen placeholders). Set from the binder config
+     * thread, read on client dispatch threads — atomics, no lock. Applies to
+     * NEW windows only; mapped windows are resized by awl_window_resize. */
+    atomic_int init_conf_w, init_conf_h;
     struct wl_global* g_viewporter;
     struct wl_global* g_frac_scale_mgr;
     struct wl_list frac_scales;      /* struct awl_frac_scale::link (awl_viewport.c) */

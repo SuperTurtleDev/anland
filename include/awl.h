@@ -134,6 +134,12 @@ int  awl_xwayland_window_serial(uint64_t id, uint64_t* serial);  /* Xwayland
 void awl_window_set_activated(uint64_t id, int activated);   /* ACTIVATED state */
 void awl_display_set_zoom(int pct);   /* zoom = 100×Z (50..300; dynamic, #31) */
 int awl_display_zoom(void);           /* current zoom pct (daemon config reads) */
+/* Initial-configure placeholder size (#33, daemon config init_w/init_h — the
+ * size sent before the Android window exists; the real size follows via
+ * awl_window_resize once the Activity surface is ready). Applies to new
+ * windows only. Any thread. */
+void awl_display_set_init_size(int32_t w, int32_t h);
+void awl_display_init_size(int32_t* w, int32_t* h);   /* current value (config reads) */
 
 /* ---- Input (Activity → binder → straight to the client, bypassing the
  *      event thread) ----

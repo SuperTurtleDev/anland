@@ -21,4 +21,7 @@
     <string name="ime_mode_inset">Inset (surface shrinks above the keyboard, client reflows)</string>
     <string name="ime_mode_overlay">Overlay (keyboard floats over the window, surface unchanged)</string>
     <string name="zoom_tip">Display zoom (whole wayland window, applies immediately):</string>
+    <string name="init_size_tip">Initial window size (first-frame placeholder before Android sizes the window, applies to new windows):</string>
+    <string name="init_size_w">Width</string>
+    <string name="init_size_h">Height</string>
 </resources>
