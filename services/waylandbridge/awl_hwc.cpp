@@ -106,6 +106,8 @@ struct sc_layer {
     AHardwareBuffer* sm_ahb[3] = {NULL, NULL, NULL};
     int sm_slot = 0;
     uint32_t sm_w = 0, sm_h = 0;
+    uint32_t sm_stride[3] = {0, 0, 0};   /* per-slot row pitch (px) — fixed at
+                                          * allocation, described once */
     int logged = 0;   /* first-present diagnostics */
 };
 
@@ -125,19 +127,15 @@ static void layer_free(sc_layer* l) {
 
 struct oncomplete_ctx {
     int n;
-    struct { uint64_t id; int precise; } e[AWL_MAX_LAYERS];
+    awl_frame_elem_t e[AWL_MAX_LAYERS];
 };
 
 static void on_complete(void* cctx_, ASurfaceTransactionStats* stats) {
     (void)stats;
     struct oncomplete_ctx* c = (struct oncomplete_ctx*)cctx_;
     if (!c) return;
-    for (int i = 0; i < c->n; i++) {
-        if (c->e[i].precise)
-            awl_surface_frame_done(c->e[i].id);      /* release handled per buffer */
-        else
-            awl_surface_presented(c->e[i].id);       /* + conservative release_q drain */
-    }
+    /* one batch — N layers of a client = one socket write, not N */
+    awl_surface_frame_batch(c->e, c->n);
     free(c);
 }
 
@@ -230,6 +228,7 @@ static AHardwareBuffer* shm_copy(sc_layer* l, const awl_buffer_info_t* b) {
         for (int k = 0; k < 3; k++) {
             if (l->sm_ahb[k]) AHardwareBuffer_release(l->sm_ahb[k]);
             l->sm_ahb[k] = NULL;
+            l->sm_stride[k] = 0;
         }
         l->sm_w = b->width;
         l->sm_h = b->height;
@@ -250,6 +249,10 @@ static AHardwareBuffer* shm_copy(sc_layer* l, const awl_buffer_info_t* b) {
             return NULL;
         }
         l->sm_ahb[slot] = ahb;
+        /* row pitch is fixed per allocation — describe once, not every copy */
+        AHardwareBuffer_Desc got;
+        AHardwareBuffer_describe(ahb, &got);
+        l->sm_stride[slot] = got.stride ? got.stride : b->width;
     }
     l->sm_slot = (slot + 1) % 3;
 
@@ -259,16 +262,20 @@ static AHardwareBuffer* shm_copy(sc_layer* l, const awl_buffer_info_t* b) {
         LOGE("shm AHB lock failed");
         return NULL;
     }
-    AHardwareBuffer_Desc got;
-    AHardwareBuffer_describe(ahb, &got);
     const void* src = wl_shm_buffer_get_data(b->shm);
     if (src) {
         wl_shm_buffer_begin_access(b->shm);
         uint32_t src_stride = (uint32_t)wl_shm_buffer_get_stride(b->shm);
-        for (uint32_t y = 0; y < b->height; y++)
-            memcpy((char*)va + (size_t)y * (size_t)got.stride * 4,
-                   (const char*)src + (size_t)y * (size_t)src_stride,
-                   (size_t)b->width * 4);
+        uint32_t dst_stride = l->sm_stride[slot] * 4;   /* px → bytes */
+        if (src_stride == dst_stride) {
+            /* tight rows both sides — one copy, no per-row loop */
+            memcpy(va, src, (size_t)src_stride * (size_t)b->height);
+        } else {
+            for (uint32_t y = 0; y < b->height; y++)
+                memcpy((char*)va + (size_t)y * (size_t)dst_stride,
+                       (const char*)src + (size_t)y * (size_t)src_stride,
+                       (size_t)b->width * 4);
+        }
         wl_shm_buffer_end_access(b->shm);
     }
     AHardwareBuffer_unlock(ahb, NULL);
@@ -515,11 +522,9 @@ void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
         ASurfaceTransaction_apply(txn);
     } else if (cctx) {
         /* steady state, nothing to submit — fire the frame callbacks at
-         * composite time like the GL path does after swap (no SF roundtrip) */
-        for (int i = 0; i < cctx->n; i++) {
-            if (cctx->e[i].precise) awl_surface_frame_done(cctx->e[i].id);
-            else awl_surface_presented(cctx->e[i].id);
-        }
+         * composite time like the GL path does after swap (no SF roundtrip);
+         * batched: one flush per client */
+        awl_surface_frame_batch(cctx->e, cctx->n);
         free(cctx);
     }
     /* buffers referenced by the applied transaction stay alive through SF's

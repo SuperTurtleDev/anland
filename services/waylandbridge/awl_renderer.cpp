@@ -114,6 +114,16 @@ struct wl_window {
     EGLContext context = EGL_NO_CONTEXT;
     GLuint program = 0;
     GLuint vbo = 0;
+    /* attribute/uniform locations — fixed at link time, resolved once in
+     * window_setup_gl (glGet*ALocation is a driver string lookup per call) */
+    GLint a_pos = -1, u_view = -1, u_dst = -1, u_uv = -1, u_xform = -1,
+          u_tex = -1;
+    int cur_vw = 0, cur_vh = 0;    /* ANativeWindow size cache — valid until
+                                    * the logic layer reports a resize
+                                    * (awl_window_resize → size_dirty;
+                                    * small-window ↔ fullscreen resizes the
+                                    * surface in place, no SURFACE re-attach) */
+    std::atomic<bool> size_dirty{true};   /* render_frame re-queries once */
     bool logged_frame = false;     /* first-frame log (diagnostics) */
     bool logged_dmg = false;       /* first partial-damage upload log (diagnostics) */
     wl_tex root_tex;               /* the root layer only — children are SC layers (awl_hwc) */
@@ -249,6 +259,12 @@ static bool window_setup_gl(wl_window* w) {
         LOGE("program link failed");
         return false;
     }
+    w->a_pos = glGetAttribLocation(w->program, "pos");
+    w->u_view = glGetUniformLocation(w->program, "u_view");
+    w->u_dst = glGetUniformLocation(w->program, "u_dst");
+    w->u_uv = glGetUniformLocation(w->program, "u_uv");
+    w->u_xform = glGetUniformLocation(w->program, "u_xform");
+    w->u_tex = glGetUniformLocation(w->program, "tex");
 
     static const float quad[] = {
         -1, -1,  1, -1,  -1, 1,
@@ -347,6 +363,8 @@ int awl_renderer_attach(uint64_t id, ANativeWindow* nw) {
             delete w;
             return -1;
         }
+        w->cur_vw = ANativeWindow_getWidth(nw);
+        w->cur_vh = ANativeWindow_getHeight(nw);
         w->hwc = awl_hwc_create(nw);    /* SC children of the window surface (not fatal on NULL) */
         if (!w->hwc)
             LOGE("window %llu: SC child layers unavailable (children will not display)",
@@ -762,9 +780,16 @@ static AHardwareBuffer* wrap_dmabuf_ahb(const awl_buffer_info_t* b,
 /* ---------------- per-surface dmabuf slot (public API) ---------------- */
 
 int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
-    struct stat st;
-    if (fstat(b->fd, &st) != 0) return -1;
-    if (s->ahb && s->ino == (uint64_t)st.st_ino &&
+    /* identity = the dmabuf inode, fstat'ed once at buffer creation
+     * (awl_buffer_info_t.ino) instead of per frame here; 0 = unknown there
+     * (broken fd at creation) → per-call fstat fallback */
+    uint64_t ino = b->ino;
+    if (!ino) {
+        struct stat st;
+        if (fstat(b->fd, &st) != 0) return -1;
+        ino = (uint64_t)st.st_ino;
+    }
+    if (s->ahb && s->ino == ino &&
         s->w == b->width && s->h == b->height && s->stride == b->stride)
         return 0;   /* same dma-buf: the AHB already wraps this memory */
 
@@ -779,7 +804,7 @@ int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
     if (!ahb) return -1;   /* old AHB kept — retry next frame */
     if (s->ahb) AHardwareBuffer_release(s->ahb);
     s->ahb = ahb;
-    s->ino = (uint64_t)st.st_ino;
+    s->ino = ino;
     s->w = b->width;
     s->h = b->height;
     s->stride = b->stride;
@@ -985,8 +1010,17 @@ static void render_frame(wl_window* w) {
     awl_view_xform_t xf;
     awl_surface_get_view_xform(w->id, &xf);
 
-    int vw = ANativeWindow_getWidth(w->nw);
-    int vh = ANativeWindow_getHeight(w->nw);
+    /* size cache — dropped when the logic layer reports a resize
+     * (awl_window_resize → awl_renderer_window_resized); re-query renders the
+     * frame at the fresh viewport/u_view = the original full-screen flush */
+    if (w->size_dirty.load(std::memory_order_relaxed) || w->cur_vw <= 0 ||
+        w->cur_vh <= 0) {
+        w->cur_vw = ANativeWindow_getWidth(w->nw);
+        w->cur_vh = ANativeWindow_getHeight(w->nw);
+        w->size_dirty.store(false, std::memory_order_relaxed);
+    }
+    int vw = w->cur_vw;
+    int vh = w->cur_vh;
 
     /* child layers first: single atomic transaction, z order = stack order */
     awl_hwc_frame(w->hwc, lay, n, xf.gox, xf.goy, xf.sx, xf.sy, xf.ox, xf.oy);
@@ -1037,11 +1071,10 @@ static void render_frame(wl_window* w) {
     glDisable(GL_BLEND);   /* root = bottom layer, nothing beneath it */
 
     glUseProgram(w->program);
-    GLint loc = glGetAttribLocation(w->program, "pos");
     glBindBuffer(GL_ARRAY_BUFFER, w->vbo);
-    glEnableVertexAttribArray((GLuint)loc);
-    glVertexAttribPointer((GLuint)loc, 2, GL_FLOAT, GL_FALSE, 0, 0);
-    glUniform2f(glGetUniformLocation(w->program, "u_view"), (float)vw, (float)vh);
+    glEnableVertexAttribArray((GLuint)w->a_pos);
+    glVertexAttribPointer((GLuint)w->a_pos, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glUniform2f(w->u_view, (float)vw, (float)vh);
     /* dmabuf textures are imported as their true channel order (HAL
      * BGRA_8888, see import_dmabuf_texture) and shm uploads convert on
      * GL_BGRA_EXT upload — both sample correct as-is, no swizzle. The
@@ -1054,16 +1087,16 @@ static void render_frame(wl_window* w) {
      * blur) even at scale 1. */
     double rsw, rsh;
     awl_layer_sampled(&lay[0], b.width, b.height, &rsw, &rsh);
-    glUniform4f(glGetUniformLocation(w->program, "u_dst"),
+    glUniform4f(w->u_dst,
                 (float)round(((double)lay[0].x - (double)xf.gox) * xf.sx + xf.ox),
                 (float)round(((double)lay[0].y - (double)xf.goy) * xf.sy + xf.oy),
                 (float)awl_snap_extent(lay[0].w, xf.sx, rsw),
                 (float)awl_snap_extent(lay[0].h, xf.sy, rsh));
-    glUniform4f(glGetUniformLocation(w->program, "u_uv"),
+    glUniform4f(w->u_uv,
                 lay[0].u0, lay[0].v0, lay[0].su, lay[0].sv);
-    glUniformMatrix3fv(glGetUniformLocation(w->program, "u_xform"), 1, GL_TRUE,
+    glUniformMatrix3fv(w->u_xform, 1, GL_TRUE,
                        k_root_xform[lay[0].transform & 7]);
-    glUniform1i(glGetUniformLocation(w->program, "tex"), 0);
+    glUniform1i(w->u_tex, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, t.texture);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1125,6 +1158,21 @@ void awl_renderer_request_render(uint64_t id) {
     auto it = g_windows.find(id);
     if (it == g_windows.end()) return;   /* Activity not ready yet; request re-issued after attach */
     wl_window* w = it->second;
+    std::lock_guard<std::mutex> lw(w->m);
+    w->render_req = true;
+    w->cv.notify_all();
+}
+
+/* Logic layer (awl_window_resize, any thread): the Android window resized in
+ * place — the cached ANativeWindow size is stale. Drop it and wake the render
+ * thread: the next frame re-queries and presents at the new size (the
+ * original full-screen resize path). Coalesced like a render request. */
+void awl_renderer_window_resized(uint64_t id) {
+    std::lock_guard<std::mutex> lk(g_map_lock);
+    auto it = g_windows.find(id);
+    if (it == g_windows.end()) return;
+    wl_window* w = it->second;
+    w->size_dirty.store(true, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lw(w->m);
     w->render_req = true;
     w->cv.notify_all();

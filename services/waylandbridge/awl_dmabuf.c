@@ -3,6 +3,7 @@
 #include "awl_internal.h"
 
 #include <string.h>
+#include <sys/stat.h>   /* fstat once at buffer creation: dma-buf inode */
 #include <unistd.h>
 
 /* v3 event flow: params.created(buffer); create_immed builds the buffer directly */
@@ -79,6 +80,10 @@ static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
     struct awl_buffer* b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->dmabuf_fd = fd;                 /* take over the fd */
+    struct stat st;                    /* identity once, here — the render side
+                                        * compares awl_buffer_info_t.ino with
+                                        * no per-frame fstat */
+    b->ino = fstat(fd, &st) == 0 ? (uint64_t)st.st_ino : 0;
     b->width = w;
     b->height = h;
     b->stride = stride;

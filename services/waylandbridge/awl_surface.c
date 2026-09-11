@@ -727,6 +727,7 @@ int awl_surface_get_buffer(uint64_t id, awl_buffer_info_t* out) {
         out->kind = AWL_BUFFER_DMABUF;
         out->token = buf_res;
         out->fd = fd;
+        out->ino = b->ino;
         out->width = b->width;
         out->height = b->height;
         out->stride = b->stride;
@@ -760,17 +761,13 @@ void awl_surface_get_view_xform(uint64_t id, awl_view_xform_t* out) {
     pthread_rwlock_unlock(&g_srv.rwl);
 }
 
-/* Render thread sends directly (no longer marshaled through the event
- * thread): rd resolution → send frame_done under ev_lock. cb resources
- * are destroyed inside the lock — ev_lock is recursive, listener
- * re-entry is safe. */
-void awl_surface_presented(uint64_t id) {
-    pthread_rwlock_rdlock(&g_srv.rwl);
-    struct awl_surface* s = awl_surface_by_id(id);
-    if (!s || !s->resource) {
-        pthread_rwlock_unlock(&g_srv.rwl);
-        return;
-    }
+/* Shared present core (caller holds rwl): send the surface's frame callbacks
+ * under ev_lock; drain = the conservative release_q drain (buffers the last
+ * composite stopped sampling). No client flush here — the single-surface
+ * callers flush right away, the batch caller flushes once per client at the
+ * end. cb resources are destroyed inside the lock — ev_lock is recursive,
+ * listener re-entry is safe. */
+static void surface_frames_send(struct awl_surface* s, int drain) {
     pthread_mutex_lock(&s->ev_lock);
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
@@ -780,12 +777,24 @@ void awl_surface_presented(uint64_t id) {
         wl_list_remove(&cb->link);
         wl_resource_destroy(cb->resource);   /* listener: detached → free */
     }
-    /* The frame that sampled this batch of buffers has swapped — the client may safely overwrite (deferred release) */
-    for (int i = 0; i < s->release_q_n; i++)
-        wl_buffer_send_release(s->release_q[i]);
-    s->release_q_n = 0;
-    wl_client_flush(wl_resource_get_client(s->resource));
+    if (drain) {
+        /* The frame that sampled this batch of buffers has swapped — the client may safely overwrite (deferred release) */
+        for (int i = 0; i < s->release_q_n; i++)
+            wl_buffer_send_release(s->release_q[i]);
+        s->release_q_n = 0;
+    }
     pthread_mutex_unlock(&s->ev_lock);
+}
+
+/* Render thread sends directly (no longer marshaled through the event
+ * thread): rd resolution → send frame_done + drain, one flush. */
+void awl_surface_presented(uint64_t id) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (s && s->resource) {
+        surface_frames_send(s, 1);
+        wl_client_flush(wl_resource_get_client(s->resource));
+    }
     pthread_rwlock_unlock(&g_srv.rwl);
 }
 
@@ -797,21 +806,39 @@ void awl_surface_presented(uint64_t id) {
 void awl_surface_frame_done(uint64_t id) {
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s = awl_surface_by_id(id);
-    if (!s || !s->resource) {
-        pthread_rwlock_unlock(&g_srv.rwl);
-        return;
+    if (s && s->resource) {
+        surface_frames_send(s, 0);
+        wl_client_flush(wl_resource_get_client(s->resource));
     }
-    pthread_mutex_lock(&s->ev_lock);
-    struct awl_frame_cb* cb;
-    struct awl_frame_cb* tmp;
-    wl_list_for_each_safe(cb, tmp, &s->frame_callbacks, link) {
-        wl_callback_send_done(cb->resource, awl_now_ms());
-        cb->detached = 1;
-        wl_list_remove(&cb->link);
-        wl_resource_destroy(cb->resource);   /* listener: detached → free */
+    pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+/* Batch (awl.h): a whole SC transaction's child layers in one pass — each
+ * surface sends under its ev_lock, then every involved client is flushed
+ * exactly once (N layers of one client: N socket writes per frame → 1).
+ * s->resource stays valid and the wl_client alive while rwl is held:
+ * destruction removes the surface from the map under rwl.wr before either is
+ * freed (same lifetime argument as the cursor-surface cache in awl_input.c),
+ * so reading resource/client outside ev_lock is safe. */
+void awl_surface_frame_batch(const awl_frame_elem_t* e, int n) {
+    if (!e || n <= 0) return;
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct wl_client* seen[AWL_MAX_LAYERS];   /* distinct clients (≤ layers) */
+    int nf = 0;
+    for (int i = 0; i < n; i++) {
+        struct awl_surface* s = awl_surface_by_id(e[i].id);
+        if (!s || !s->resource) continue;
+        surface_frames_send(s, !e[i].precise);
+        struct wl_client* c = wl_resource_get_client(s->resource);
+        int have = 0;
+        for (int k = 0; k < nf && !have; k++) have = (seen[k] == c);
+        if (have) continue;
+        if (nf < AWL_MAX_LAYERS)
+            seen[nf++] = c;
+        else
+            wl_client_flush(c);   /* >AWL_MAX_LAYERS distinct clients: flush now */
     }
-    wl_client_flush(wl_resource_get_client(s->resource));
-    pthread_mutex_unlock(&s->ev_lock);
+    for (int i = 0; i < nf; i++) wl_client_flush(seen[i]);
     pthread_rwlock_unlock(&g_srv.rwl);
 }
 

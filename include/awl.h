@@ -138,6 +138,11 @@ int  awl_server_is_running(void);
  * connection mutex + atomic serial): resolve→protocol send→flush all happen
  * inside the binder thread, bypassing the event thread. */
 void awl_window_resize(uint64_t id, int32_t w, int32_t h);   /* xdg configure */
+/* Android window resized → the renderer's cached ANativeWindow size for this
+ * window is stale: drop it, the next frame re-queries and renders at the new
+ * size (the original full-screen path). Called from awl_window_resize; any
+ * thread; unknown window = no-op. */
+void awl_renderer_window_resized(uint64_t id);
 void awl_window_close(uint64_t id);                          /* xdg close */
 int  awl_xwayland_window_serial(uint64_t id, uint64_t* serial);  /* Xwayland
     * window association serial (WL_SURFACE_SERIAL; 1 = an Xwayland window
@@ -289,6 +294,9 @@ typedef struct awl_buffer_info {
     /* DMABUF (fd is dup'ed by this call — stays valid even if the buffer is
      * destroyed meanwhile; the caller must close it when done) */
     int      fd;
+    uint64_t ino;            /* dma-buf identity, fstat'ed once at buffer
+                              * creation (no per-frame fstat on the render
+                              * path); 0 = unknown (caller fstat fallback) */
     uint64_t modifier;
     /* common */
     uint32_t width, height, stride;
@@ -384,6 +392,19 @@ void awl_surface_presented(uint64_t id);
  * (SurfaceControl setBufferWithRelease, awl_hwc.cpp). Any thread, same
  * locking as presented. */
 void awl_surface_frame_done(uint64_t id);
+
+/* Batched frame_done/presented for a whole SC transaction (awl_hwc.cpp):
+ * e[i].precise = 1 → frame callbacks only (release goes out per buffer via
+ * OnBufferRelease); 0 → presented semantics (callbacks + conservative
+ * release_q drain). Sends every surface's callbacks under its ev_lock, then
+ * flushes each involved client exactly once — N child layers of one client
+ * become a single socket write per frame instead of N. Any thread, same
+ * locking as presented. */
+typedef struct awl_frame_elem {
+    uint64_t id;      /* wl_surface id */
+    int precise;      /* release handled per buffer (OnBufferRelease) */
+} awl_frame_elem_t;
+void awl_surface_frame_batch(const awl_frame_elem_t* e, int n);
 
 /* Release exactly this buffer (wl_buffer identity = get_buffer's token) if it
  * still sits in the surface's deferred release queue: the display pipeline

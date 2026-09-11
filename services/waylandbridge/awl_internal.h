@@ -59,6 +59,10 @@ struct awl_buffer {
     struct wl_resource* resource;    /* wl_buffer (created by us) */
     struct wl_list link;             /* server.buffers */
     int dmabuf_fd;                   /* owned after dup */
+    uint64_t ino;                    /* dma-buf inode at creation — render-side
+                                      * identity without a per-frame fstat
+                                      * (0 = fstat failed here, consumers
+                                      * fall back to their own) */
     uint32_t width, height, stride;  /* stride: bytes */
     uint32_t drm_format;
     uint64_t modifier;

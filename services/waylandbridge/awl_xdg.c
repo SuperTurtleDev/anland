@@ -696,7 +696,13 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
      * ratio) → this root's cached confine rects (view px) are stale. Remap
      * takes rwl itself, so it must run after the release above; skipped on a
      * no-op resize to keep duplicate SURFACE/RESIZE traffic quiet. */
-    if (hit && changed) awl_input_constr_remap(id);
+    if (hit && changed) {
+        awl_input_constr_remap(id);
+        /* the surface resized in place — the renderer's cached ANativeWindow
+         * size is stale; drop it (next frame = full-screen flush at the new
+         * size, the original resize path) */
+        awl_renderer_window_resized(id);
+    }
 }
 
 /* Android foreground/focus change → xdg_toplevel ACTIVATED state (configure
