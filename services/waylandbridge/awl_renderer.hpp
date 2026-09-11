@@ -32,13 +32,26 @@ void awl_renderer_request_render(uint64_t id);
 
 void awl_renderer_shutdown(void);
 
-/* dmabuf → forged AHardwareBuffer (QCOM snapalloc donor scheme, see
- * awl_renderer.cpp). usage must include AHARDWAREBUFFER_USAGE_GPU_SAMPLED_
- * IMAGE (setBuffer requirement). Returns the registered AHB (caller owns,
- * AHardwareBuffer_release when done) plus the donor to keep alive until then;
- * NULL = import refused. Any thread (serialized internally). */
-AHardwareBuffer* awl_renderer_wrap_dmabuf_ahb(const awl_buffer_info_t* b,
-                                              uint64_t usage,
-                                              AHardwareBuffer** donor_out);
+/* Per-surface dmabuf slot: ONE AHardwareBuffer per surface, swapped per
+ * arriving buffer (awl_renderer.cpp for the snapalloc donor scheme). When the
+ * dmabuf changes the AHB is re-forged with a fresh identity (SF/kgsl bind the
+ * memory at import — an in-place fd swap would leave consumers sampling the
+ * old dmabuf); the re-forge uses the OLD AHB itself as the donor (its metadata
+ * blob already carries this geometry — no allocation), and the old AHB's
+ * release closes the swapped-out dmabuf fd. The blob stays alive through the
+ * relay: each forged AHB's handle holds its own fd dup. After a swap the
+ * consumer MUST re-import: setBuffer for SC layers, a new EGLImage for the GL
+ * root. Callers treat the slot as opaque apart from swap/destroy.
+ * Render-thread only per surface. */
+struct awl_ahb_slot {
+    AHardwareBuffer* ahb = NULL;   /* wraps the current dmabuf */
+    uint64_t ino = 0;              /* dma-buf identity (fstat inode) */
+    uint32_t w = 0, h = 0, stride = 0;
+};
+
+/* 1 = swapped (new memory — re-import required), 0 = same dmabuf (no-op),
+ * -1 = import refused (old AHB kept). */
+int  awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b);
+void awl_renderer_ahb_slot_destroy(awl_ahb_slot* s);
 
 #endif

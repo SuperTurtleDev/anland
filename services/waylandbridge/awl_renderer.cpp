@@ -30,6 +30,7 @@
 #include <unistd.h>               /* dup / getpid */
 #include <sys/socket.h>           /* socketpair / sendmsg / SCM_RIGHTS */
 #include <sys/mman.h>             /* donor blob patching */
+#include <sys/stat.h>             /* fstat: dma-buf inode identity */
 #include <fcntl.h>
 #include <errno.h>
 #include <wayland-server-core.h>   /* wl_shm_buffer_* */
@@ -95,19 +96,14 @@ static const float k_root_xform[8][9] = {
     /* 7 flipped_270 */ { 0, -1, 1, -1, 0, 1,   0, 0, 1 },
 };
 
-/* Root-layer texture state. dmabuf buffers are cached in a small token ring
- * (client buffer rings rotate wl_buffers; a re-import is a ms-scale gralloc
- * roundtrip — cache 4, FIFO-evict). The ring slots own the AHB/donor refs;
- * ahb/donor below alias the slot backing the current EGLImage. */
+/* Root-layer texture state. dmabuf: the surface's awl_ahb_slot (one AHB,
+ * swapped per arriving buffer) + the EGLImage currently importing it. */
 struct wl_tex {
     GLuint texture = 0;
     uint32_t tex_w = 0, tex_h = 0;
     bool tex_is_image = false;     /* external-memory texture (dmabuf) */
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
-    AHardwareBuffer* ahb = NULL;   /* alias into dmb[] (ref owned by the slot) */
-    AHardwareBuffer* donor = NULL; /* alias into dmb[] */
-    void* buf_token = NULL;        /* imported buffer identity (wayland resource value) */
-    int ndmb = 0;
+    awl_ahb_slot slot;
 };
 
 struct wl_window {
@@ -610,9 +606,8 @@ static bool donor_patch_blob(const struct ahb_calib* kc, int blob_fd,
     return true;
 }
 
-AHardwareBuffer* awl_renderer_wrap_dmabuf_ahb(const awl_buffer_info_t* b,
-                                              uint64_t usage,
-                                              AHardwareBuffer** donor_out) {
+static AHardwareBuffer* wrap_dmabuf_ahb(const awl_buffer_info_t* b,
+                                        uint64_t usage, AHardwareBuffer* tmpl) {
     /* k_calibs global table shared by multiple render threads (first import per
      * format triggers one calibration) — hold the lock throughout: calibration
      * + patching read consistently. import includes gralloc calls (ms-scale)
@@ -629,40 +624,60 @@ AHardwareBuffer* awl_renderer_wrap_dmabuf_ahb(const awl_buffer_info_t* b,
         return NULL;
     }
 
-    /* Small 4x4 donor: with all blob fields patched it serves any geometry
-     * (EXP-B verified on device). Format matches the target → fmt fields
-     * inside handle/blob are automatically correct, no patching needed */
-    AHardwareBuffer_Desc dd = {};
-    dd.width = 4; dd.height = 4;
-    dd.format = hal; dd.layers = 1;
-    dd.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
-    AHardwareBuffer* donor = NULL;
-    if (AHardwareBuffer_allocate(&dd, &donor) != 0) {
-        LOGE("donor allocation failed");
-        return NULL;
+    /* donor: the surface's CURRENT AHB when its geometry matches (steady
+     * state — blob already patched for this geometry, only the pixel fd
+     * changes, no allocation). Otherwise a transient 4x4 donor patched to the
+     * target geometry (first buffer / resize; EXP-B verified on device),
+     * released before returning — the forged AHB's own fd[1] dup keeps the
+     * blob alive. A live tmpl blob is never re-patched: SF/kgsl may still hold
+     * the era's AHBs. */
+    const native_handle* nd = NULL;
+    AHardwareBuffer* donor = NULL;   /* non-NULL = transient cold-path donor */
+    if (tmpl) {
+        AHardwareBuffer_Desc td = {};
+        AHardwareBuffer_describe(tmpl, &td);
+        const native_handle* tnh = AHardwareBuffer_getNativeHandle(tmpl);
+        if (tnh && tnh->numFds == 2 && tnh->numInts == kc->num_ints &&
+            td.width == b->width && td.height == b->height &&
+            td.stride == b->stride / 4 && td.format == hal)
+            nd = tnh;
     }
-    const native_handle* nd = AHardwareBuffer_getNativeHandle(donor);
-    if (!nd || nd->numFds != 2 || nd->numInts != kc->num_ints) {
-        LOGE("donor layout drift (numFds=%d numInts=%d/%d)",
-             nd ? nd->numFds : -1, nd ? nd->numInts : -1, kc->num_ints);
-        AHardwareBuffer_release(donor);
-        return NULL;
-    }
-    if (!donor_patch_blob(kc, nd->data[1], b->stride / 4, b->height,
-                          (long)b->stride * b->height)) {
-        AHardwareBuffer_release(donor);
-        return NULL;
+    if (!nd) {
+        AHardwareBuffer_Desc dd = {};
+        dd.width = 4; dd.height = 4;
+        dd.format = hal; dd.layers = 1;
+        dd.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+        if (AHardwareBuffer_allocate(&dd, &donor) != 0) {
+            LOGE("donor allocation failed");
+            return NULL;
+        }
+        nd = AHardwareBuffer_getNativeHandle(donor);
+        if (!nd || nd->numFds != 2 || nd->numInts != kc->num_ints) {
+            LOGE("donor layout drift (numFds=%d numInts=%d/%d)",
+                 nd ? nd->numFds : -1, nd ? nd->numInts : -1, kc->num_ints);
+            AHardwareBuffer_release(donor);
+            return NULL;
+        }
+        if (!donor_patch_blob(kc, nd->data[1], b->stride / 4, b->height,
+                              (long)b->stride * b->height)) {
+            AHardwareBuffer_release(donor);
+            return NULL;
+        }
     }
 
-    /* handle ints: donor template + target geometry */
+    /* handle ints: donor template + target geometry. tmpl path: the template
+     * already carries exactly this geometry — verbatim copy. Cold path: the
+     * fresh 4x4 donor's ints still describe 4x4 — patch to the target. */
     int ints[64];
     memcpy(ints, &nd->data[2], (size_t)kc->num_ints * 4);
-    ints[kc->idx_stride_px] = (int)(b->stride / 4);
-    for (int i = 0; i < kc->n_idx_height; i++)
-        ints[kc->idx_height[i]] = (int)b->height;
-    ints[kc->idx_width] = (int)b->width;
-    ints[kc->idx_size] = (int)((long)b->stride * b->height);
-    ints[kc->idx_stride_b] = (int)b->stride;
+    if (donor) {
+        ints[kc->idx_stride_px] = (int)(b->stride / 4);
+        for (int i = 0; i < kc->n_idx_height; i++)
+            ints[kc->idx_height[i]] = (int)b->height;
+        ints[kc->idx_width] = (int)b->width;
+        ints[kc->idx_size] = (int)((long)b->stride * b->height);
+        ints[kc->idx_stride_b] = (int)b->stride;
+    }
 
     /* GraphicBuffer::flatten wire (libs/ui/GraphicBuffer.cpp):
      * 13-int header + handle ints in the stream, numFds fds via SCM_RIGHTS */
@@ -734,28 +749,53 @@ AHardwareBuffer* awl_renderer_wrap_dmabuf_ahb(const awl_buffer_info_t* b,
         LOGE("recvHandleFromUnixSocket rc=%d — importBuffer refused "
              "(%ux%u stride=%u hal=%u)", rc, b->width, b->height, b->stride, hal);
         if (out) AHardwareBuffer_release(out);
-        AHardwareBuffer_release(donor);
+        if (donor) AHardwareBuffer_release(donor);
         return NULL;
     }
-    *donor_out = donor;                   /* blob referenced by out; stays alive until out is released */
+    /* transient cold-path donor: released now — the blob survives through the
+     * relay (out's handle holds its own fd dup) */
+    if (donor) AHardwareBuffer_release(donor);
     return out;
 }
 
+/* ---------------- per-surface dmabuf slot (public API) ---------------- */
+
+int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
+    struct stat st;
+    if (fstat(b->fd, &st) != 0) return -1;
+    if (s->ahb && s->ino == (uint64_t)st.st_ino &&
+        s->w == b->width && s->h == b->height && s->stride == b->stride)
+        return 0;   /* same dma-buf: the AHB already wraps this memory */
+
+    /* dmabuf changed → re-forge (the old AHB itself is the donor when its
+     * geometry matches — one gralloc import, zero allocations), then release
+     * it: the release closes the swapped-out dmabuf fd, and the new AHB's own
+     * blob-fd dup keeps the metadata alive. Consumers still displaying the
+     * old buffer hold their own refs (SF) / their own image ref (EGL) — valid
+     * until they re-import. */
+    AHardwareBuffer* ahb = wrap_dmabuf_ahb(
+        b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, s->ahb);
+    if (!ahb) return -1;   /* old AHB kept — retry next frame */
+    if (s->ahb) AHardwareBuffer_release(s->ahb);
+    s->ahb = ahb;
+    s->ino = (uint64_t)st.st_ino;
+    s->w = b->width;
+    s->h = b->height;
+    s->stride = b->stride;
+    return 1;
+}
+
+void awl_renderer_ahb_slot_destroy(awl_ahb_slot* s) {
+    if (s->ahb) AHardwareBuffer_release(s->ahb);
+    memset(s, 0, sizeof(*s));
+}
+
 static void destroy_dmabuf_texture(wl_tex* t) {
-    /* drop the current EGLImage; the ring slots keep their AHB/donor refs */
     if (t->image != EGL_NO_IMAGE_KHR) {
         g.eglDestroyImageKHR(g.display, t->image);
         t->image = EGL_NO_IMAGE_KHR;
     }
-    if (t->ahb) {
-        AHardwareBuffer_release(t->ahb);   /* releases the reference on the donor blob fd */
-        t->ahb = NULL;
-    }
-    if (t->donor) {
-        AHardwareBuffer_release(t->donor); /* blob reclaimable only after ahb release */
-        t->donor = NULL;
-    }
-    t->buf_token = NULL;
+    awl_renderer_ahb_slot_destroy(&t->slot);
 }
 
 /* HAL BGRA_8888 constant lives in awl_renderer.hpp (shared with awl_hwc.cpp) */
@@ -768,31 +808,26 @@ static void tex_params_default(void) {
 }
 
 static bool import_dmabuf_texture(wl_tex* t, const awl_buffer_info_t* b) {
-    /* Same buffer already imported (token = wayland resource identity; fd
-     * numbers get recycled, unusable as a key) — the texture IS that memory;
-     * client writes update it in place */
-    if (t->tex_is_image && t->buf_token == b->token &&
-        t->tex_w == b->width && t->tex_h == b->height)
-        return true;
-
-    destroy_dmabuf_texture(t);      /* destroy the EGLImage before any AHB release */
-
     /* HAL format: DRM AR24/XR24 memory order B,G,R,(A|X) → HAL BGRA_8888 — the
      * GPU samples the buffer's true channel order, the R/B fix lives in the
      * texture descriptor instead of the shader (no u_swap_rb). XR24 alpha = the
      * X byte: harmless for blend-off layer 0 (Xwayland root); XR24 as a blended
      * child layer is not a real client pattern (chrome subsurfaces are AR24).
      * Sampled-only usage (texture) — GPU_FRAMEBUFFER not declared */
-    uint64_t usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
-    AHardwareBuffer* donor = NULL;
-        AHardwareBuffer* ahb = awl_renderer_wrap_dmabuf_ahb(b, usage, &donor);
-    if (!ahb) return false;
+    int r = awl_renderer_ahb_swap(&t->slot, b);
+    if (r <= 0) return r == 0;   /* same dma-buf: the texture IS that memory */
+
+    /* dmabuf swapped → re-import: the old EGLImage pinned the old memory
+     * through the swap via its own ref; drop it and build on the new AHB */
+    if (t->image != EGL_NO_IMAGE_KHR) {
+        g.eglDestroyImageKHR(g.display, t->image);
+        t->image = EGL_NO_IMAGE_KHR;
+    }
 
     /* eglGetNativeClientBufferANDROID: AHB → EGLClientBuffer (the sanctioned path) */
-    EGLClientBuffer cb = g.eglGetNativeClientBuffer(ahb);
+    EGLClientBuffer cb = g.eglGetNativeClientBuffer(t->slot.ahb);
     if (!cb) {
         LOGE("eglGetNativeClientBuffer == NULL");
-        AHardwareBuffer_release(ahb);
         return false;
     }
     EGLImageKHR img = g.eglCreateImageKHR(g.display, EGL_NO_CONTEXT,
@@ -800,12 +835,8 @@ static bool import_dmabuf_texture(wl_tex* t, const awl_buffer_info_t* b) {
     if (img == EGL_NO_IMAGE_KHR) {
         LOGE("eglCreateImageKHR(native buffer): 0x%x (%ux%u stride=%u)",
              eglGetError(), b->width, b->height, b->stride);
-        AHardwareBuffer_release(ahb);
         return false;
     }
-    t->ahb = ahb;
-    t->donor = donor;
-    t->buf_token = b->token;
     LOGD("AHB import ok %ux%u stride=%u fd=%d",
          b->width, b->height, b->stride, b->fd);
 

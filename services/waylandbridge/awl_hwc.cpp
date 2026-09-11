@@ -4,8 +4,9 @@
  * One ASurfaceControl child per layer (wl_subsurface + xdg_popup riding the
  * same tree + the wl_pointer.set_cursor image), the buffer handed straight to
  * SF in a single atomic transaction:
- *   dmabuf : zero-copy — the forged AHB (awl_renderer_wrap_dmabuf_ahb) IS the
- *            client dmabuf; SF/HWC samples it directly
+ *   dmabuf : zero-copy — the forged AHB (awl_renderer_ahb_swap, one per layer,
+ *            swapped per arriving buffer) IS the client dmabuf; SF/HWC samples
+ *            it directly
  *   shm    : copied into a locally allocated AHB (wl_shm B,G,R,A/X byte order
  *            == HAL BGRA_8888, plain row memcpy), 3-slot ring so the slot SF
  *            latched this frame is never the one being memcpy'd into
@@ -35,7 +36,7 @@
  */
 #include "awl_hwc.hpp"
 
-#include "awl_renderer.hpp"   /* awl_renderer_wrap_dmabuf_ahb + fourccs */
+#include "awl_renderer.hpp"   /* awl_ahb_slot + fourccs */
 
 #include <android/hardware_buffer.h>
 #include <android/native_window.h>
@@ -95,11 +96,11 @@ struct sc_layer {
     int last_opaque = -1;
     ARect last_src = {-1, -1, -1, -1};
     ARect last_dst = {-1, -1, -1, -1};
-    /* dmabuf token → forged AHB ring (client buffer rings reuse tokens; a
-     * re-import is ms-scale). FIFO eviction — SF refs cover in-flight ones. */
-    struct dmb_slot { void* token; AHardwareBuffer* ahb; AHardwareBuffer* donor; };
-    dmb_slot dmb[4];
-    int ndmb = 0;
+    /* dmabuf: ONE AHB per layer, swapped per arriving buffer — the old AHB is
+     * the forge donor (no allocation) and its release closes the swapped-out
+     * dmabuf fd; a dmabuf change re-imports via a new setBuffer (fresh buffer
+     * identity — SF binds memory at import). See awl_renderer.hpp. */
+    awl_ahb_slot slot;
     /* shm local AHBs, rotated per setBuffer (never overwrite the slot SF just
      * latched; 3 slots = 2 frames of slack) */
     AHardwareBuffer* sm_ahb[3] = {NULL, NULL, NULL};
@@ -115,10 +116,7 @@ struct awl_hwc_window {
 
 static void layer_free(sc_layer* l) {
     if (l->sc) ASurfaceControl_release(l->sc);
-    for (int k = 0; k < l->ndmb; k++) {
-        AHardwareBuffer_release(l->dmb[k].ahb);
-        if (l->dmb[k].donor) AHardwareBuffer_release(l->dmb[k].donor);
-    }
+    awl_renderer_ahb_slot_destroy(&l->slot);
     for (int k = 0; k < 3; k++)
         if (l->sm_ahb[k]) AHardwareBuffer_release(l->sm_ahb[k]);
 }
@@ -223,30 +221,6 @@ static void on_buffer_release(void* rctx_, int release_fence_fd) {
 }
 
 /* ---------------- buffer materialization ---------------- */
-
-static AHardwareBuffer* dmb_lookup(sc_layer* l, void* token) {
-    for (int k = 0; k < l->ndmb; k++)
-        if (l->dmb[k].token == token) return l->dmb[k].ahb;
-    return NULL;
-}
-
-static void dmb_push(sc_layer* l, void* token, AHardwareBuffer* ahb,
-                     AHardwareBuffer* donor) {
-    if (l->ndmb < 4) {
-        l->dmb[l->ndmb].token = token;
-        l->dmb[l->ndmb].ahb = ahb;
-        l->dmb[l->ndmb].donor = donor;
-        l->ndmb++;
-        return;
-    }
-    /* ring full (client buffer ring > 4): drop the oldest import */
-    AHardwareBuffer_release(l->dmb[0].ahb);
-    if (l->dmb[0].donor) AHardwareBuffer_release(l->dmb[0].donor);
-    memmove(&l->dmb[0], &l->dmb[1], 3 * sizeof(l->dmb[0]));
-    l->dmb[3].token = token;
-    l->dmb[3].ahb = ahb;
-    l->dmb[3].donor = donor;
-}
 
 /* shm wl_buffer → the next ring slot of a local AHB (full copy — the wl_shm
  * mapping is only valid while our pinned refs live). Returns the AHB now set
@@ -399,23 +373,20 @@ void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
         bool precise = false;   /* release signalled per buffer (WithRelease) */
         bool buf_set;           /* setBuffer needed this pass */
         if (b.kind == AWL_BUFFER_DMABUF) {
-            ahb = dmb_lookup(l, b.token);
-            if (!ahb) {
-                AHardwareBuffer* donor = NULL;
-                ahb = awl_renderer_wrap_dmabuf_ahb(
-                    &b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, &donor);
-                if (ahb) dmb_push(l, b.token, ahb, donor);
-            }
-            close(b.fd);   /* wrap dup'ed its own reference */
-            if (!ahb) {
+            int r = awl_renderer_ahb_swap(&l->slot, &b);
+            close(b.fd);   /* swap dup'ed its own reference */
+            if (r < 0) {
                 LOGE("layer %llu dmabuf import refused — hidden this frame",
                      (unsigned long long)sid);
                 hide_layer(h, txn, sid, &any);
                 continue;
             }
-            /* same token: SF keeps latching this memory, in-place client
-             * writes show at the next latch — no setBuffer needed */
-            buf_set = (l->last_token != b.token);
+            ahb = l->slot.ahb;
+            /* r==1: new memory → setBuffer re-imports it (fresh identity).
+             * r==0 same memory but a distinct wl_buffer: SF keeps latching
+             * this AHB; re-setBuffer anyway so the new token gets its precise
+             * release callback */
+            buf_set = (r == 1) || (l->last_token != b.token);
             precise = (g_set_buf_release != NULL);
         } else {   /* shm */
             int32_t dx, dy, dw, dh;
