@@ -75,22 +75,18 @@ static struct wl_resource* res_for(struct wl_list* list, uint64_t win_id) {
 }
 
 /* Window view (Android physical pixels) → root logical coordinates
- * (#31 zoom, #34 scale_mode). The content base = the xdg geometry rectangle
- * (chrome-like clients' viewport dst includes shadow margins); it maps into
- * the view through the unified awl_view_map (view = logical×s + o —
- * stretch/fit/center per the daemon scale_mode config): here the inverse,
- * logical = geom origin + (view − o)/s. Degenerate size → identity map
- * (inside awl_view_map). The geometry origin is aligned with the mapping
- * base (shared with the rendering dst, both in logical coordinates).
- * Caller holds s->ev_lock. */
+ * (#31 zoom, #34 scale_mode): the inverse of the root's view mapping
+ * (awl_surface_view_map — view = (logical − geom origin) × s + o; s = Z,
+ * o = 0 for content following the configure, scale_mode placement
+ * otherwise), logical = geom origin + (view − o)/s. Degenerate size →
+ * identity map (inside the mapping). The geometry origin is the same anchor
+ * the render dst uses (chrome-like clients' viewport dst carries shadow
+ * margins around the geometry rectangle). Caller holds s->ev_lock. */
 static void view_to_surface(struct awl_surface* s, float* x, float* y) {
-    float lw = 0, lh = 0;
-    awl_surface_content_size(s, &lw, &lh);
-    float sx, sy, ox, oy;
-    awl_view_map(g_srv.scale_mode,
-                 (float)s->phys_w, (float)s->phys_h, lw, lh, &sx, &sy, &ox, &oy);
-    *x = (*x - ox) / sx;
-    *y = (*y - oy) / sy;
+    double sx, sy, ox, oy;
+    awl_surface_view_map(s, &sx, &sy, &ox, &oy);
+    *x = (float)(((double)*x - ox) / sx);
+    *y = (float)(((double)*y - oy) / sy);
     if (s->geom_valid) {
         *x += (float)s->geom_x;
         *y += (float)s->geom_y;
@@ -501,11 +497,8 @@ static void tr_ptr_rel(uint64_t win, double dx, double dy) {
     struct wl_resource* ptr = resolve(&g_ptrs, win, &s);
     if (ptr && s) {
         pthread_mutex_lock(&s->ev_lock);
-        float lw = 0, lh = 0;
-        awl_surface_content_size(s, &lw, &lh);
-        float sx, sy, ox, oy;
-        awl_view_map(g_srv.scale_mode,
-                     (float)s->phys_w, (float)s->phys_h, lw, lh, &sx, &sy, &ox, &oy);
+        double sx, sy, ox, oy;
+        awl_surface_view_map(s, &sx, &sy, &ox, &oy);
         pthread_mutex_unlock(&s->ev_lock);
         dx /= sx;   /* #34: same basis as view_to_surface — the translation term cancels in a delta */
         dy /= sy;
@@ -1158,8 +1151,9 @@ struct awl_constr {
 };
 
 /* Region (root-local logical) → Activity view px, the inverse of
- * view_to_surface: view = (rg − geometry origin) × s + o through the unified
- * awl_view_map (#34 scale_mode: fit/center letterbox offsets included).
+ * view_to_surface: view = (rg − geometry origin) × s + o through the root's
+ * view mapping (awl_surface_view_map: 1:1 at Z, or the scale_mode letterbox
+ * offsets for content ignoring the configure).
  * Caller holds rwl.rd + root ev_lock. No region / unknown window size →
  * the whole window (zeros are the APK's "whole window" convention). */
 static void constr_app_rect(struct awl_surface* root, int has_region,
@@ -1173,11 +1167,10 @@ static void constr_app_rect(struct awl_surface* root, int has_region,
         out[2] = root->phys_w; out[3] = root->phys_h;
         return;
     }
-    float sx, sy, ox, oy;
-    awl_view_map(g_srv.scale_mode,
-                 (float)root->phys_w, (float)root->phys_h, cw, ch, &sx, &sy, &ox, &oy);
-    float x = (float)rx, y = (float)ry, w = (float)rw, h = (float)rh;
-    if (root->geom_valid) { x -= (float)root->geom_x; y -= (float)root->geom_y; }
+    double sx, sy, ox, oy;
+    awl_surface_view_map(root, &sx, &sy, &ox, &oy);
+    double x = rx, y = ry, w = rw, h = rh;
+    if (root->geom_valid) { x -= root->geom_x; y -= root->geom_y; }
     x = x * sx + ox;
     y = y * sy + oy;
     w *= sx;

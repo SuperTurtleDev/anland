@@ -644,10 +644,15 @@ void awl_display_init_size(int32_t* w, int32_t* h) {
  * per fractional_scale). When the client does not respond (fixed-size buffer),
  * the render side scales the display by the window/root logical ratio. */
 
-/* phys → logical (round to nearest; integer zoom_pct avoids float drift) */
+/* phys → logical at the EFFECTIVE zoom Z = preferred_scale/120 (round to
+ * nearest, integer math). The client renders at exactly that quantized Z
+ * (kwin fractionalscale_v1: round(z×120)), so the buffer it commits is
+ * round(logical×Z) px; dividing by zoom_pct/100 instead (133% vs the
+ * client's 160/120) would make that buffer miss phys by a few px and the
+ * 1:1 view mapping (awl_surface_view_map) would have to resample it. */
 static int32_t phys_to_logical(int32_t v) {
-    int pct = g_srv.zoom_pct;
-    return (int32_t)(((int64_t)v * 100 + pct / 2) / pct);
+    int64_t pref = awl_zoom_preferred_scale();
+    return (int32_t)(((int64_t)v * 120 + pref / 2) / pref);
 }
 
 void awl_window_resize(uint64_t id, int32_t w, int32_t h) {

@@ -35,7 +35,7 @@ void awl_hwc_destroy(awl_hwc_window* h);
  * window's render thread only. */
 void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
                    int32_t gox, int32_t goy,
-                   float sx, float sy, float ox, float oy);
+                   double sx, double sy, double ox, double oy);
 
 #ifdef __cplusplus
 }

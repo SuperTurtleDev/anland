@@ -376,7 +376,7 @@ void awl_input_constr_gone_notify(uint64_t win);
  * this the APK clamp box sits over the black bars). root_id 0 = every root.
  * Takes rwl.rd itself: call with no logic-layer lock held; callbacks fire
  * after release (awl_xdg.c awl_window_resize tail / awl_viewport.c
- * set_scale_mode). */
+ * set_scale_mode + set_zoom). */
 void awl_input_constr_remap(uint64_t root_id);
 
 /* awl_idle.c — zwp_idle_inhibit_manager_v1 (inhibitor state under
@@ -472,10 +472,25 @@ void awl_viewport_setup(void);
  * no buffer). viewport dst | source | buffer/buf_scale — shared by the render
  * dst and input hit-testing. */
 void awl_surface_logical_size(struct awl_surface* s, float* w, float* h);
-/* Window view scale (logical px → window physical px; used to convert the
- * IME cursor rectangle). Takes rwl.rd + root ev_lock internally; returns 1
- * when there is no window size. */
+/* Content base size of a root (logical px; caller holds its ev_lock): the
+ * xdg geometry rectangle when valid (chrome-like clients' viewport dst
+ * carries shadow margins around it), else the surface logical size. Shared
+ * by the view mapping, render dst and input inverse. */
 void awl_surface_content_size(struct awl_surface* s, float* w, float* h);
+/* Root → window view mapping, view = (logical − geometry origin) × s + o —
+ * THE conversion shared by render dst / HWC child dst / input inverse /
+ * relative deltas / confine rects / IME cursor rect. Content following the
+ * configured size → exactly s = Z, o = 0 (kwin: scene at the output scale;
+ * the client's logical×Z buffer lands 1:1, nothing resampled, whatever
+ * scale_mode says). Otherwise → scale_mode placement (awl_view_map). Caller
+ * holds root ev_lock. */
+void awl_surface_view_map(struct awl_surface* root,
+                          double* sx, double* sy, double* ox, double* oy);
+/* zoom: preferred_scale (1/120 units, kwin round(z×120)) and the effective
+ * scale Z = preferred_scale/120 the client renders at — the only Z the
+ * compositor side may use (configure size, 1:1 mapping). Any thread. */
+uint32_t awl_zoom_preferred_scale(void);
+double awl_zoom_scale(void);
 /* Sample-region uv transform of the current buffer (viewport source →
  * normalized; whole buffer when unset/no buffer). Caller holds ev_lock. */
 void awl_surface_layer_uv(struct awl_surface* s, float* u0, float* v0,

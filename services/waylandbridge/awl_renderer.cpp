@@ -25,6 +25,7 @@
 #include <android/hardware_buffer.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <math.h>                 /* round: pixel-grid snap of the root dst */
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>               /* dup / getpid */
@@ -961,11 +962,12 @@ static void render_frame(wl_window* w) {
      * all-HWC: dmabuf zero-copy, shm copied once); only the root is drawn
      * here — the EGLSurface IS the window's BufferQueue layer, and SC children
      * stack above it (root at the bottom, Wayland order).
-     * #31 zoom: coordinates/sizes are root logical pixels. #34: dst goes
-     * through the unified awl_view_map (×s + centered offset o per
-     * scale_mode), keeping the geometry-origin alignment (chrome buffer
-     * carries 16/10px shadow margins, sharing the same origin as input
-     * mapping). */
+     * #31 zoom: coordinates/sizes are root logical pixels; dst = (logical −
+     * geometry origin) × s + o with the root's view transform (1:1 at Z for
+     * content following the configure, scale_mode placement otherwise),
+     * snapped to the pixel grid (kwin snapToPixelGrid). The geometry-origin
+     * alignment (chrome buffer carries 16/10px shadow margins) is shared
+     * with the input mapping. */
     awl_layer_info_t lay[AWL_MAX_LAYERS + 1];   /* +1: client cursor image appended on top */
     int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
     if (n <= 0) return;
@@ -975,27 +977,19 @@ static void render_frame(wl_window* w) {
      * Set/presented like any child layer → the cursor surface gets frame_done
      * (animated cursors) and per-buffer release. */
     if (awl_pointer_cursor_layer(w->id, &lay[n])) n++;
-    int32_t gox = 0, goy = 0;
-    float gw = 0, gh = 0;
-    awl_surface_get_origin(w->id, &gox, &goy, &gw, &gh);
+    /* Root view transform (logic layer, the same snapshot the input inverse
+     * uses): geometry origin + logical→view scale/offset. A root whose
+     * content has the configured size maps 1:1 at Z with no offset; only
+     * content that ignores the configure gets the scale_mode placement (its
+     * letterbox bars stay the clear color below). Degenerate → identity. */
+    awl_view_xform_t xf;
+    awl_surface_get_view_xform(w->id, &xf);
 
     int vw = ANativeWindow_getWidth(w->nw);
     int vh = ANativeWindow_getHeight(w->nw);
 
-    /* Content basis (geometry rectangle; chrome dst includes shadow margins →
-     * out-of-bounds clipped; fixed-size clients have no valid geometry →
-     * root logical size) → window view rect through the unified awl_view_map
-     * (#34 scale_mode): stretch fills each axis, fit/center scale uniformly
-     * with a centered offset — the bars around the content stay the clear
-     * color above. Degenerate basis → identity map. */
-    float bw = gw > 0.5f ? gw : (lay[0].w > 0.5f ? lay[0].w : 0.0f);
-    float bh = gh > 0.5f ? gh : (lay[0].h > 0.5f ? lay[0].h : 0.0f);
-    float rsx, rsy, rox, roy;
-    awl_view_map(awl_display_scale_mode(), (float)vw, (float)vh, bw, bh,
-                 &rsx, &rsy, &rox, &roy);
-
     /* child layers first: single atomic transaction, z order = stack order */
-    awl_hwc_frame(w->hwc, lay, n, gox, goy, rsx, rsy, rox, roy);
+    awl_hwc_frame(w->hwc, lay, n, xf.gox, xf.goy, xf.sx, xf.sy, xf.ox, xf.oy);
 
     /* ---- root quad (the window's own buffer) ---- */
     awl_buffer_info_t b;
@@ -1053,10 +1047,18 @@ static void render_frame(wl_window* w) {
      * GL_BGRA_EXT upload — both sample correct as-is, no swizzle. The
      * transform matrix maps the display quad uv through the wl buffer
      * transform (set_buffer_transform, whole-buffer inverse rotation). */
+    /* Pixel-grid snap (awl_snap_extent, awl_renderer.hpp): integer origin,
+     * size = the buffer's own pixel count when it is the Z-scaled rendition
+     * of the logical size — GL_LINEAR then samples texel centers: lossless.
+     * A fractional origin/size would resample the whole buffer (half-pixel
+     * blur) even at scale 1. */
+    double rsw, rsh;
+    awl_layer_sampled(&lay[0], b.width, b.height, &rsw, &rsh);
     glUniform4f(glGetUniformLocation(w->program, "u_dst"),
-                ((float)lay[0].x - (float)gox) * rsx + rox,
-                ((float)lay[0].y - (float)goy) * rsy + roy,
-                lay[0].w * rsx, lay[0].h * rsy);
+                (float)round(((double)lay[0].x - (double)xf.gox) * xf.sx + xf.ox),
+                (float)round(((double)lay[0].y - (double)xf.goy) * xf.sy + xf.oy),
+                (float)awl_snap_extent(lay[0].w, xf.sx, rsw),
+                (float)awl_snap_extent(lay[0].h, xf.sy, rsh));
     glUniform4f(glGetUniformLocation(w->program, "u_uv"),
                 lay[0].u0, lay[0].v0, lay[0].su, lay[0].sv);
     glUniformMatrix3fv(glGetUniformLocation(w->program, "u_xform"), 1, GL_TRUE,

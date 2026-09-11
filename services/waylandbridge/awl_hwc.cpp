@@ -338,7 +338,7 @@ static void hide_layer(awl_hwc_window* h, ASurfaceTransaction* txn,
 
 void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
                    int32_t gox, int32_t goy,
-                   float sx, float sy, float ox, float oy) {
+                   double sx, double sy, double ox, double oy) {
     if (!h) return;
     ASurfaceTransaction* txn = ASurfaceTransaction_create();
     if (!txn) return;
@@ -416,15 +416,21 @@ void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
         /* geometry: viewport crop (buffer px) + dst (view px, GL-path math) +
          * wl buffer transform; SF clips dst to the parent (window) itself */
         ARect src = layer_src_rect(&lay[i], &b);
-        float dxf = ((float)lay[i].x - (float)gox) * sx + ox;
-        float dyf = ((float)lay[i].y - (float)goy) * sy + oy;
+        double dxf = ((double)lay[i].x - (double)gox) * sx + ox;
+        double dyf = ((double)lay[i].y - (double)goy) * sy + oy;
+        /* Pixel-grid snap (awl_snap_extent): integer origin + a dst of
+         * exactly the child buffer's own size when it is the Z-scaled
+         * rendition of the logical size, so SF blits it 1:1 (no scaling
+         * pass, no blur). */
+        double ssw, ssh;
+        awl_layer_sampled(&lay[i], b.width, b.height, &ssw, &ssh);
+        int32_t dw = awl_snap_extent(lay[i].w, sx, ssw);
+        int32_t dh = awl_snap_extent(lay[i].h, sy, ssh);
         ARect dst;
-        dst.left = (int32_t)lroundf(dxf);
-        dst.top = (int32_t)lroundf(dyf);
-        dst.right = (int32_t)lroundf(dxf + lay[i].w * sx);
-        dst.bottom = (int32_t)lroundf(dyf + lay[i].h * sy);
-        if (dst.right <= dst.left) dst.right = dst.left + 1;
-        if (dst.bottom <= dst.top) dst.bottom = dst.top + 1;
+        dst.left = (int32_t)lround(dxf);
+        dst.top = (int32_t)lround(dyf);
+        dst.right = dst.left + (dw > 0 ? dw : 1);
+        dst.bottom = dst.top + (dh > 0 ? dh : 1);
         int32_t xf = k_wl_xform[lay[i].transform & 7];
         /* XR24/XRGB = opaque → SF can skip blending for the layer */
         int opaque = (b.drm_format == AWL_FOURCC_ARGB8888) ? 0 : 1;

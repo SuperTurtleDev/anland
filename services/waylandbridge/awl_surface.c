@@ -740,21 +740,21 @@ int awl_surface_get_buffer(uint64_t id, awl_buffer_info_t* out) {
     return -1;   /* unknown buffer type */
 }
 
-/* Root's geometry origin + content base size (shared by render/input:
- * view (0,0) ↔ geometry rectangle origin, rectangle size ↔ window size —
- * chrome dst shadow margins overflow the bounds and get clipped).
- * Any thread; rd resolution + ev_lock snapshot. */
-void awl_surface_get_origin(uint64_t id, int32_t* ox, int32_t* oy,
-                            float* cw, float* ch) {
-    *ox = *oy = 0;
-    if (cw) *cw = 0;
-    if (ch) *ch = 0;
+/* Root's view transform for the render thread: geometry origin (view (0,0)
+ * ↔ geometry rectangle origin; chrome dst shadow margins overflow the
+ * bounds and get clipped) + the logical→view mapping of awl_surface_view_map
+ * — one snapshot under ev_lock, the same numbers the input inverse reads.
+ * Unknown root → identity. Any thread; rd resolution + ev_lock snapshot. */
+void awl_surface_get_view_xform(uint64_t id, awl_view_xform_t* out) {
+    out->gox = out->goy = 0;
+    out->sx = out->sy = 1.0;
+    out->ox = out->oy = 0.0;
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s = awl_surface_by_id(id);
     if (s) {
         pthread_mutex_lock(&s->ev_lock);
-        if (s->geom_valid) { *ox = s->geom_x; *oy = s->geom_y; }
-        if (cw && ch) awl_surface_content_size(s, cw, ch);
+        if (s->geom_valid) { out->gox = s->geom_x; out->goy = s->geom_y; }
+        awl_surface_view_map(s, &out->sx, &out->sy, &out->ox, &out->oy);
         pthread_mutex_unlock(&s->ev_lock);
     }
     pthread_rwlock_unlock(&g_srv.rwl);

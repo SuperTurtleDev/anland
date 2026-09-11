@@ -31,6 +31,7 @@
 #include <viewporter-server-protocol.h>
 #include "fractional-scale-v1-server-protocol.h"
 
+#include <math.h>
 #include <string.h>
 
 /* ---------------- logical size (public helpers, awl_internal.h) ---------------- */
@@ -93,45 +94,119 @@ void awl_surface_content_size(struct awl_surface* s, float* w, float* h) {
     awl_surface_logical_size(s, w, h);
 }
 
-/* ---------------- unified view mapping (#34, daemon config scale_mode) ----------------
- * Content base (logical) rect → Android window view px: view = logical×s + o.
- * The ONE conversion shared by render dst, input inverse, relative deltas,
- * confine regions and the IME cursor rect — every site that used to compute
- * per-axis phys/content stretch now goes through here, so the scale_mode
- * geometry (uniform scale + letterbox offset) cannot drift between them.
- * Degenerate input = identity (pw/ph ≤ 0: toplevel before its first resize;
- * cw/ch ≤ 0.5: no buffer/geometry yet) — the caller needs no guard of its
- * own, and the inverse (division) can never hit s = 0. */
-void awl_view_map(int mode, float pw, float ph, float cw, float ch,
-                  float* sx, float* sy, float* ox, float* oy) {
-    if (pw <= 0.0f || ph <= 0.0f || cw <= 0.5f || ch <= 0.5f || mode < 0) {
-        *sx = *sy = 1.0f;
-        *ox = *oy = 0.0f;
+/* ---------------- view mapping ----------------
+ * Root content base (logical px) → Android window view px:
+ *   view = logical × s + o
+ * THE conversion shared by the render dst, HWC child dst, input inverse,
+ * relative deltas, confine rects and the IME cursor rect — every site reads
+ * the same numbers from awl_surface_view_map, so they cannot drift.
+ *
+ * Two regimes, decided per root by awl_surface_view_map:
+ *  1) content follows the configured size (kwin: the scene is drawn at the
+ *     output scale, vertices snapped to the pixel grid) → s = Z exactly,
+ *     o = 0. The client renders buffer = round(logical × Z) (fractional-
+ *     scale-v1: toplevel size rounded half away from zero) with viewport
+ *     dst = logical (Z = preferred_scale/120, the same quantized value on
+ *     both sides), the consumer snaps the dst rect to integer px
+ *     (awl_snap_extent, awl_renderer.hpp) → buffer px land 1:1 on view px.
+ *     No stretch, nothing resampled, no lost pixels — whatever scale_mode
+ *     says.
+ *  2) content does NOT follow the configure (fixed-size client ignoring
+ *     resize, X window the X side did not resize, the frames between a
+ *     configure and its ack) → daemon scale_mode placement (awl_view_map). */
+
+/* Buffer px per logical px of the root's current buffer, per axis — the
+ * client's effective scale (1 for a scale-1 client, Z for a scale-aware one
+ * rendering logical×Z into viewport dst = logical). Sampled region = viewport
+ * source when set (surface orientation, same convention as
+ * awl_surface_layer_uv), else the whole buffer (90/270 transform swaps its
+ * axes into surface orientation). 1 when undetermined. Caller holds ev_lock. */
+static void vp_buffer_ratio(struct awl_surface* s, double* rx, double* ry) {
+    *rx = *ry = 1.0;
+    float lw = 0, lh = 0;
+    awl_surface_logical_size(s, &lw, &lh);
+    if (lw <= 0.5f || lh <= 0.5f) return;
+    double bw, bh;
+    if (s->vp_has_src) {
+        bw = s->vp_sw;
+        bh = s->vp_sh;
+    } else {
+        uint32_t w = 0, h = 0;
+        vp_buf_size(s, &w, &h);
+        if (!w || !h) return;
+        bw = (double)w;
+        bh = (double)h;
+        if (s->buf_transform == 1 || s->buf_transform == 3) {
+            double t = bw;
+            bw = bh;
+            bh = t;
+        }
+    }
+    *rx = bw / (double)lw;
+    *ry = bh / (double)lh;
+}
+
+/* scale_mode placement (regime 2 above): pw/ph = window view px, cw/ch =
+ * content base (logical), rx/ry = buffer px per logical px (vp_buffer_ratio).
+ *   STRETCH  fill each axis independently (legacy)
+ *   FIT      uniform scale to fit inside, centered
+ *   CENTER   original size: s = rx/ry so 1 buffer px = 1 view px, centered —
+ *            the buffer is shown at its own pixel size, never resampled
+ *            (s = 1 here was the bug: at zoom≠100% a logical×Z buffer was
+ *            squeezed to 1/Z in the middle of the window)
+ * Degenerate input = identity (pw/ph ≤ 0: before the first resize; cw/ch ≤
+ * 0.5: no buffer/geometry yet) — the inverse (division) never hits s = 0.
+ * double throughout (kwin qreal), see awl_view_xform_t. */
+void awl_view_map(int mode, double pw, double ph, double cw, double ch,
+                  double rx, double ry,
+                  double* sx, double* sy, double* ox, double* oy) {
+    if (pw <= 0.0 || ph <= 0.0 || cw <= 0.5 || ch <= 0.5 || mode < 0) {
+        *sx = *sy = 1.0;
+        *ox = *oy = 0.0;
         return;
     }
-    float kx = pw / cw, ky = ph / ch;
-    float k, dx, dy;   /* uniform scale + centering distance */
     switch (mode) {
-    case AWL_SCALE_FIT:
-        k = kx < ky ? kx : ky;
-        dx = pw - cw * k;
-        dy = ph - ch * k;
+    case AWL_SCALE_FIT: {
+        double kx = pw / cw, ky = ph / ch;
+        *sx = *sy = kx < ky ? kx : ky;
         break;
+    }
     case AWL_SCALE_CENTER:
-        k = 1.0f;
-        dx = pw - cw;
-        dy = ph - ch;
+        *sx = rx > 0.0 ? rx : 1.0;
+        *sy = ry > 0.0 ? ry : 1.0;
         break;
     default:   /* AWL_SCALE_STRETCH (and any unknown value): legacy fill */
-        *sx = kx; *sy = ky;
-        *ox = *oy = 0.0f;
+        *sx = pw / cw;
+        *sy = ph / ch;
+        *ox = *oy = 0.0;
         return;
     }
-    *sx = *sy = k;
-    /* roundf: with zoom≠100% cw = round(phys×100/pct) is not an exact divisor,
-     * an unrounded offset leaves a half-sampled edge column/row that shimmers */
-    *ox = roundf(dx * 0.5f);
-    *oy = roundf(dy * 0.5f);
+    /* round: an unrounded centering offset leaves a half-sampled edge
+     * column/row that shimmers */
+    *ox = round((pw - cw * *sx) * 0.5);
+    *oy = round((ph - ch * *sy) * 0.5);
+}
+
+/* Per-root decision (regime 1 vs 2) — see the section comment. "Follows the
+ * configure" = the committed content base (geometry rectangle, else surface
+ * logical size) equals the last configure sent (conf_w/h); an X window has
+ * no configure and always takes regime 2, where a buffer that matches phys
+ * maps 1:1 in every mode anyway. Caller holds root ev_lock. */
+void awl_surface_view_map(struct awl_surface* root,
+                          double* sx, double* sy, double* ox, double* oy) {
+    float cw = 0, ch = 0;
+    awl_surface_content_size(root, &cw, &ch);
+    if (root->role == AWL_ROLE_TOPLEVEL && root->conf_w > 0 && root->conf_h > 0 &&
+        (int32_t)lroundf(cw) == root->conf_w &&
+        (int32_t)lroundf(ch) == root->conf_h) {
+        *sx = *sy = awl_zoom_scale();
+        *ox = *oy = 0.0;
+        return;
+    }
+    double rx, ry;
+    vp_buffer_ratio(root, &rx, &ry);
+    awl_view_map(g_srv.scale_mode, (double)root->phys_w, (double)root->phys_h,
+                 (double)cw, (double)ch, rx, ry, sx, sy, ox, oy);
 }
 
 /* Sample region (viewport source; absent = whole buffer) → normalized uv
@@ -279,6 +354,21 @@ static uint32_t zoom_preferred_scale(void) {
     return (uint32_t)((g_srv.zoom_pct * 120 + 50) / 100);
 }
 
+uint32_t awl_zoom_preferred_scale(void) {
+    return zoom_preferred_scale();
+}
+
+/* Effective display scale Z = preferred_scale/120 — the value the client
+ * actually applies (kwin fractionalscale_v1 sends round(z×120); a percent
+ * that is not a multiple of 1/120, e.g. 133% → 160/120 = 1.3333, is what the
+ * client renders at). Every compositor-side use of Z (configure size, the
+ * 1:1 view mapping) takes THIS number, never zoom_pct/100 — otherwise the
+ * client's buffer = round(logical×Z_client) and our logical×Z disagree by a
+ * few px and the buffer would have to be resampled. */
+double awl_zoom_scale(void) {
+    return (double)zoom_preferred_scale() / 120.0;
+}
+
 static void frac_destroy(struct wl_client* c, struct wl_resource* res) {
     wl_resource_destroy(res);
 }
@@ -379,7 +469,8 @@ void awl_display_set_zoom(int pct) {
     if (pct > 300) pct = 300;
     if (pct == g_srv.zoom_pct) return;
     g_srv.zoom_pct = pct;
-    LOGI("zoom → %d%% (preferred_scale=%u)", pct, zoom_preferred_scale());
+    LOGI("zoom → %d%% (preferred_scale=%u, effective Z=%.4f)", pct,
+         zoom_preferred_scale(), awl_zoom_scale());
 
     /* Broadcast preferred_scale (kwin: resend on change; sending under rwl.rd is safe) */
     pthread_rwlock_rdlock(&g_srv.rwl);
@@ -405,6 +496,10 @@ void awl_display_set_zoom(int pct) {
 
     for (int i = 0; i < nw; i++)
         awl_window_resize(wins[i].id, wins[i].w, wins[i].h);
+    /* the 1:1 view mapping is Z itself → every cached confine rect (view px)
+     * is stale right away, not only after the client acks the new size
+     * (awl_window_resize skips the remap: phys did not move) */
+    awl_input_constr_remap(0);
 }
 
 int awl_display_zoom(void) {

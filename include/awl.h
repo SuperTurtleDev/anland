@@ -165,16 +165,23 @@ enum {
     AWL_SCALE_CENTER = 2,    /* 1:1, centered (content larger than the window is cropped) */
 };
 
-/* Unified view mapping, the single source of truth shared by every
- * coordinate conversion between the client's content base (logical px) and
- * the Android window (view px):
- *   view = logical × s + o        (render dst, confine region, IME cursor rect)
- *   logical = (view − o) / s      (input, relative deltas)
+/* scale_mode placement math, view = logical × s + o, for a root whose
+ * content does NOT follow the configured size (fixed-size client ignoring
+ * resize, X window the X side did not resize, the frames between a
+ * configure and its ack). pw/ph = window view px, cw/ch = content base
+ * (logical px), rx/ry = buffer px per logical px of the root's buffer:
+ *   STRETCH  fill each axis
+ *   FIT      uniform scale to fit inside, centered
+ *   CENTER   original size: 1 buffer px = 1 view px (s = rx/ry), centered,
+ *            never resampled
+ * Content that follows the configure never comes here — it is drawn at
+ * exactly view = logical × Z (awl_surface_view_map, the per-root decision).
  * Degenerate input (pw/ph ≤ 0 — no resize recorded yet — or cw/ch ≤ 0.5)
  * yields the identity map; an unknown mode falls back to stretch. Pure math,
  * any thread, no locks. */
-void awl_view_map(int mode, float pw, float ph, float cw, float ch,
-                  float* sx, float* sy, float* ox, float* oy);
+void awl_view_map(int mode, double pw, double ph, double cw, double ch,
+                  double rx, double ry,
+                  double* sx, double* sy, double* ox, double* oy);
 void awl_display_set_scale_mode(int mode);   /* dynamic; invalid → ignored + LOGE */
 int awl_display_scale_mode(void);            /* current mode (daemon config reads) */
 /* Initial-configure placeholder size (#33, daemon config init_w/init_h — the
@@ -349,11 +356,24 @@ int  awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max);
  * pointer, or the pointer is in another window). */
 int  awl_pointer_cursor_layer(uint64_t root_id, awl_layer_info_t* out);
 
-/* Root's xdg window geometry origin (buffer pixels; never set = 0,0).
- * Shared by the render dst and the input view→buffer mapping: view(0,0) ↔
- * geometry rectangle origin. */
-void awl_surface_get_origin(uint64_t root_id, int32_t* ox, int32_t* oy,
-                            float* cw, float* ch);   /* geometry origin + content base size */
+/* Root view transform snapshot for the render thread: xdg geometry origin
+ * (logical px; never set = 0,0) + the logical→view mapping
+ * view = (logical − origin) × s + o, decided per root (1:1 at the zoom for
+ * content following the configure, scale_mode placement otherwise) — the
+ * same numbers the input inverse uses, so render and hit-test cannot drift.
+ * Consumers snap the resulting rects to the pixel grid (integer origin, size
+ * = round(logical × s)) so a buffer of round(logical × Z) px covers exactly
+ * its own pixel count. double like kwin's qreal: at an exact half-pixel tie
+ * (logical × preferred_scale ≡ 60 mod 120, e.g. 2265 × 124/120 = 2340.5) a
+ * float32 product lands just below .5 and rounds the other way than the
+ * client's arithmetic — a 1 px stretch on that axis. Unknown root →
+ * identity. Any thread. */
+typedef struct awl_view_xform {
+    int32_t gox, goy;      /* geometry origin (logical px) */
+    double sx, sy;         /* logical → view scale */
+    double ox, oy;         /* view offset (letterbox centering; 0 when 1:1) */
+} awl_view_xform_t;
+void awl_surface_get_view_xform(uint64_t root_id, awl_view_xform_t* out);
 
 /* This frame has been presented (rendering done; the render thread sends
  * the frame callbacks directly) */
