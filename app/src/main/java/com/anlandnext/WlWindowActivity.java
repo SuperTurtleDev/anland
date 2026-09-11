@@ -334,6 +334,14 @@ public class WlWindowActivity extends Activity {
 
         initHiddenInput();
 
+        /* 小窗 (ColorOS freeform) reports the bottom resize bar as a content inset;
+         * with decor-fits enabled the DecorView pads the content up and the bar
+         * strip exposes the black window background. Take over inset handling
+         * (same call as the legacy v5 consumer) so the surface draws under the
+         * bar and the bar stays translucent over the app content. */
+        if (android.os.Build.VERSION.SDK_INT >= 30)
+            getWindow().setDecorFitsSystemWindows(false);
+
         root = new FrameLayout(this);
         root.setFitsSystemWindows(false);
         root.addView(sv, new FrameLayout.LayoutParams(
