@@ -31,6 +31,7 @@
 #include <unistd.h>               /* dup / getpid */
 #include <sys/socket.h>           /* socketpair / sendmsg / SCM_RIGHTS */
 #include <sys/mman.h>             /* donor blob patching */
+#include <poll.h>                 /* first-paint probe fence wait (debug) */
 #include <sys/stat.h>             /* fstat: dma-buf inode identity */
 #include <fcntl.h>
 #include <errno.h>
@@ -789,6 +790,54 @@ int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
         if (fstat(b->fd, &st) != 0) return -1;
         ino = (uint64_t)st.st_ino;
     }
+
+#ifdef AWL_LOG_DEBUG
+    /* First-paint probe telemetry (kept from the resize-black-screen hunt):
+     * freshly allocated client buffers read as zeros at commit and are
+     * painted milliseconds later — the fence wait below is the fix, this
+     * just records what it accomplished. */
+    int nz_before = -1;
+    {
+        size_t off = (size_t)b->stride * (b->height / 2) & ~0xfffu;
+        void* m = mmap(NULL, 0x1000, PROT_READ, MAP_SHARED, b->fd, off);
+        if (m != MAP_FAILED) {
+            uint32_t* p = (uint32_t*)m;
+            nz_before = 0;
+            for (int i = 0; i < 1024; i++) nz_before += (p[i] != 0);
+            munmap(m, 0x1000);
+        }
+    }
+#endif
+    /* Write-fence gate before ANY sample of this memory — both consumers
+     * (root GL texture import below, HWC child setBuffer via awl_hwc) go
+     * through here. The client's GPU paint can still be in flight at commit:
+     * resize ack frames commit ~µs after buffer creation (verified: the
+     * pages read zero at import, painted ms later — the resize black screen
+     * latched the zero pages as a static client's final frame), and
+     * in-place repaints of a recycled buffer race the same way. Wait for
+     * the dma-buf's exclusive (write) fence: poll(POLLIN) is event-driven —
+     * returns the instant the writer's kernel fence signals (an already-idle
+     * buffer returns immediately, so this is one syscall on the steady
+     * path); unfenced writers return immediately, bounded by the timeout.
+     * Waiting BEFORE handing the buffer onward also covers the HWC overlay
+     * path, whose DPU contract waits only on explicit acquire fences (we
+     * pass -1), not on the resv. */
+    {
+        struct pollfd pfd = { b->fd, POLLIN, 0 };
+        int pr = poll(&pfd, 1, 100);
+        if (pr == 0)   /* safety net actually hit — the writer's fence never
+                        * signalled: not fatal (we present whatever is in
+                        * memory) but it means the write-race is back */
+            LOGE("dmabuf fence wait timed out: %ux%u ino=%llu "
+                 "(client write fence did not signal in 100ms)",
+                 b->width, b->height, (unsigned long long)ino);
+#ifdef AWL_LOG_DEBUG
+        if (nz_before == 0)
+            LOGD("firstpaint: %ux%u ino=%llu was zero at commit, poll=%d",
+                 b->width, b->height, (unsigned long long)ino, pr);
+#endif
+    }
+
     if (s->ahb && s->ino == ino &&
         s->w == b->width && s->h == b->height && s->stride == b->stride)
         return 0;   /* same dma-buf: the AHB already wraps this memory */
@@ -1021,6 +1070,10 @@ static void render_frame(wl_window* w) {
     }
     int vw = w->cur_vw;
     int vh = w->cur_vh;
+    LOGD("win %llu render: view=%dx%d n=%d root=%llu xf(s=%.3f,%.3f o=%.1f,%.1f go=%d,%d)",
+         (unsigned long long)w->id, vw, vh, n,
+         (unsigned long long)lay[0].surface_id,
+         xf.sx, xf.sy, xf.ox, xf.oy, xf.gox, xf.goy);
 
     /* child layers first: single atomic transaction, z order = stack order */
     awl_hwc_frame(w->hwc, lay, n, xf.gox, xf.goy, xf.sx, xf.sy, xf.ox, xf.oy);
@@ -1041,6 +1094,8 @@ static void render_frame(wl_window* w) {
             LOGI("window %llu: empty root, background frame %dx%d",
                  (unsigned long long)w->id, vw, vh);
         }
+        LOGD("win %llu empty root return (view=%dx%d bg=%dx%d)",
+             (unsigned long long)w->id, vw, vh, w->last_bg_w, w->last_bg_h);
         return;
     }
     bool is_dmabuf = b.kind == AWL_BUFFER_DMABUF;
@@ -1087,11 +1142,16 @@ static void render_frame(wl_window* w) {
      * blur) even at scale 1. */
     double rsw, rsh;
     awl_layer_sampled(&lay[0], b.width, b.height, &rsw, &rsh);
-    glUniform4f(w->u_dst,
-                (float)round(((double)lay[0].x - (double)xf.gox) * xf.sx + xf.ox),
-                (float)round(((double)lay[0].y - (double)xf.goy) * xf.sy + xf.oy),
-                (float)awl_snap_extent(lay[0].w, xf.sx, rsw),
-                (float)awl_snap_extent(lay[0].h, xf.sy, rsh));
+    float qdx = (float)round(((double)lay[0].x - (double)xf.gox) * xf.sx + xf.ox);
+    float qdy = (float)round(((double)lay[0].y - (double)xf.goy) * xf.sy + xf.oy);
+    float qdw = (float)awl_snap_extent(lay[0].w, xf.sx, rsw);
+    float qdh = (float)awl_snap_extent(lay[0].h, xf.sy, rsh);
+    LOGD("win %llu quad: %s %ux%u tok=%p dst=%.0f,%.0f %.0fx%.0f "
+         "lay=(%.0f,%.0f %.0fx%.0f)",
+         (unsigned long long)w->id, is_dmabuf ? "dmabuf" : "shm",
+         b.width, b.height, b.token, qdx, qdy, qdw, qdh,
+         lay[0].x, lay[0].y, lay[0].w, lay[0].h);
+    glUniform4f(w->u_dst, qdx, qdy, qdw, qdh);
     glUniform4f(w->u_uv,
                 lay[0].u0, lay[0].v0, lay[0].su, lay[0].sv);
     glUniformMatrix3fv(w->u_xform, 1, GL_TRUE,
@@ -1124,6 +1184,15 @@ static void render_frame(wl_window* w) {
         LOGE("eglSwapBuffers: 0x%x", eglGetError());
         return;
     }
+#ifdef AWL_LOG_DEBUG   /* two driver queries per swap — debug builds only (LOGD args alone would not evaluate them) */
+    {
+        EGLint sw = 0, sh = 0;
+        eglQuerySurface(g.display, w->surface, EGL_WIDTH, &sw);
+        eglQuerySurface(g.display, w->surface, EGL_HEIGHT, &sh);
+        LOGD("win %llu swapped: egl surface %dx%d (view %dx%d)",
+             (unsigned long long)w->id, sw, sh, vw, vh);
+    }
+#endif
 
     /* root frame callbacks + deferred buffer release; child layers get theirs
      * from the SC transaction callbacks (awl_hwc.cpp) */

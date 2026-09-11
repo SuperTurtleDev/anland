@@ -341,6 +341,7 @@ static void hide_layer(awl_hwc_window* h, ASurfaceTransaction* txn,
                                           ASURFACE_TRANSACTION_VISIBILITY_HIDE);
     it->second.visible = 0;
     *any = true;
+    LOGD("hwc hide layer %llu", (unsigned long long)sid);
 }
 
 void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
@@ -446,6 +447,14 @@ void awl_hwc_frame(awl_hwc_window* h, const awl_layer_info_t* lay, int n,
                        l->last_xform != xf || l->last_opaque != opaque ||
                        memcmp(&l->last_src, &src, sizeof(src)) != 0 ||
                        memcmp(&l->last_dst, &dst, sizeof(dst)) != 0;
+        LOGD("hwc layer %llu: %s %ux%u src=%d,%d %dx%d dst=%d,%d %dx%d "
+             "buf_set=%d changed=%d vis=%d",
+             (unsigned long long)sid,
+             b.kind == AWL_BUFFER_DMABUF ? "dmabuf" : "shm",
+             b.width, b.height,
+             src.left, src.top, src.right - src.left, src.bottom - src.top,
+             dst.left, dst.top, dst.right - dst.left, dst.bottom - dst.top,
+             buf_set, changed, l->visible);
         if (changed) {
             ASurfaceTransaction_setZOrder(txn, l->sc, i);
             ASurfaceTransaction_setGeometry(txn, l->sc, src, dst, xf);

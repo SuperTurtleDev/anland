@@ -1013,7 +1013,10 @@ static void host_on_destroy(void* userData) {}
  * binder in SURFACE. uid is the only reliable identity visible to the NDK:
  * assigned by the binder driver (not spoofable), valid for oneway calls too
  * (getCallingPid returns 0 there; no getCallingSid in libbinder_ndk).
- * Allow: root(0)/self + AWL_PKG's uid. The uid is looked up FRESH on every
+ * Allow: root(0)/self + AWL_PKG's uid. SURFACE carries one extra auth pass
+ * for everyone else: per-window uid ownership — the attach passes only when
+ * the window's wayland client runs under the caller's own uid (see
+ * caller_ok / the SURFACE handler). The uid is looked up FRESH on every
  * call from /data/system/packages.list (plain text, "pkg uid flag dataDir
  * …", ~70KB — PackageManager's own dump; packages.xml is ABX binary since
  * Android 16): no cache means a reinstall with a new uid is picked up by
@@ -1044,17 +1047,30 @@ static int lookup_app_uid(void) {
     return uid;
 }
 
-/* Entry gate for host_on_transact. Denials log one line per uid (an abusive
- * caller must not flood the log). */
-static bool caller_ok(void) {
+/* Standing allowlist: root(0) / self / AWL_PKG's uid (any user). SURFACE
+ * callers on this list host windows of wayland clients they did not spawn
+ * (root container clients) — the per-window uid pass in the SURFACE handler
+ * does not apply to them. */
+static bool caller_allowlisted(void) {
     uid_t u = AIBinder_getCallingUid();
     if (u == 0 || u == (uid_t)getuid()) return true;   /* root / self */
 
     int app_uid = lookup_app_uid();
-    if (app_uid > 10000 &&
-        (u == (uid_t)app_uid || u % 100000 == (uid_t)(app_uid % 100000)))
-        return true;
+    return app_uid > 10000 &&
+        (u == (uid_t)app_uid || u % 100000 == (uid_t)(app_uid % 100000));
+}
 
+/* Entry gate for host_on_transact. Denials log one line per uid (an abusive
+ * caller must not flood the log). SURFACE from a non-allowlisted uid is NOT
+ * dropped here: the handler applies the per-window auth pass — the window of
+ * a wayland client may only be attached by an app running under that same
+ * uid (wayland socket credentials == binder uid). Every other code keeps
+ * the allowlist-only behavior. */
+static bool caller_ok(transaction_code_t code) {
+    if (caller_allowlisted()) return true;
+    if (code == AWL_T_SURFACE) return true;   /* decided per-window in the handler */
+
+    uid_t u = AIBinder_getCallingUid();
     static std::mutex rej_lock;
     static std::vector<uid_t> rej_seen;
     {
@@ -1070,7 +1086,7 @@ static bool caller_ok(void) {
 
 static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t code,
                                         const AParcel* in, AParcel* out) {
-    if (!caller_ok()) return STATUS_PERMISSION_DENIED;
+    if (!caller_ok(code)) return STATUS_PERMISSION_DENIED;
     switch (code) {
     case AWL_T_SURFACE: {
         int64_t id64; int32_t w, h;
@@ -1088,6 +1104,21 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
                 AParcel_writeInt32(out, -1);
                 return STATUS_OK;
             }
+        }
+
+        /* Auth pass (SURFACE only, per window): a caller outside the
+         * allowlist may attach only the window of a wayland client running
+         * under its own uid — the binder-assigned caller uid (not spoofable)
+         * vs the credentials libwayland cached from the wayland socket at
+         * connect. Deny → rc -1: the caller kills itself, same contract as
+         * a missing window. Allowlisted callers skip this (see
+         * caller_allowlisted). */
+        if (!caller_allowlisted() &&
+            awl_window_client_uid(id) != AIBinder_getCallingUid()) {
+            LOGE("SURFACE %llu: uid=%u rejected (not the wayland client's uid)",
+                 (unsigned long long)id, AIBinder_getCallingUid());
+            AParcel_writeInt32(out, -1);
+            return STATUS_OK;
         }
 
         ANativeWindow* anw = nullptr;
@@ -1229,12 +1260,34 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         return STATUS_OK;
     }
     case AWL_T_LIST: {
-        std::lock_guard<std::mutex> lk(g_state_lock);
-        AParcel_writeInt32(out, (int32_t)g_wins.size());
-        for (auto& [id, ws] : g_wins) {
-            AParcel_writeInt64(out, (int64_t)id);
-            AParcel_writeInt32(out, ws.attached ? 1 : 0);
-            AParcel_writeString(out, ws.title, strlen(ws.title));
+        /* snapshot (id, attached, title) under the lock — entries can die the
+         * moment it drops; the uid filter runs outside it because
+         * awl_window_client_uid takes the logic layer's rwl, which must not
+         * nest inside g_state_lock */
+        struct Row { uint64_t id; bool attached; std::string title; };
+        std::vector<Row> rows;
+        {
+            std::lock_guard<std::mutex> lk(g_state_lock);
+            rows.reserve(g_wins.size());
+            for (auto& [id, ws] : g_wins)
+                rows.push_back({id, ws.attached, ws.title});
+        }
+        /* normal (non-allowlisted) app: only its own windows — the same uid
+         * ownership rule as the SURFACE auth pass (the window's wayland
+         * client must run under the caller's uid; allowlisted callers keep
+         * the full table) */
+        if (!caller_allowlisted()) {
+            uid_t cu = AIBinder_getCallingUid();
+            std::vector<Row> own;
+            for (Row& r : rows)
+                if (awl_window_client_uid(r.id) == cu) own.push_back(std::move(r));
+            rows = std::move(own);
+        }
+        AParcel_writeInt32(out, (int32_t)rows.size());
+        for (Row& r : rows) {
+            AParcel_writeInt64(out, (int64_t)r.id);
+            AParcel_writeInt32(out, r.attached ? 1 : 0);
+            AParcel_writeString(out, r.title.data(), r.title.size());
         }
         return STATUS_OK;
     }

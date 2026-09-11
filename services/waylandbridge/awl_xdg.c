@@ -663,6 +663,9 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
         hit = 1;
         pthread_mutex_lock(&s->ev_lock);
         changed = s->phys_w != w || s->phys_h != h;
+        LOGD("window %llu resize %dx%d (was %dx%d conf=%dx%d mapped=%d changed=%d)",
+             (unsigned long long)s->id, w, h, s->phys_w, s->phys_h,
+             s->conf_w, s->conf_h, s->mapped, changed);
         s->phys_w = w;   /* Android window size (for view→logical conversion / render ratio) */
         s->phys_h = h;
         if (s->role == AWL_ROLE_XWAYLAND) {

@@ -76,6 +76,21 @@ pid_t awl_window_client_pid(uint64_t id) {
     return pid > 0 ? pid : 0;
 }
 
+/* Window id → wayland client uid, same credential source and locking as
+ * awl_window_client_pid (binder SURFACE auth pass: the attaching app's uid
+ * must equal the uid of the client that owns the window). (uid_t)-1 =
+ * unknown/destroyed — never equals a real binder uid, so an unresolvable
+ * window denies unlisted callers by itself. */
+uid_t awl_window_client_uid(uint64_t id) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    struct wl_client* c = (s && s->resource) ? wl_resource_get_client(s->resource) : NULL;
+    uid_t uid = (uid_t)-1;
+    if (c) wl_client_get_credentials(c, NULL, &uid, NULL);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    return uid;
+}
+
 /* Enqueue a deferred release (caller holds this surface's ev_lock).
  * Full queue = rendering stalled: release the head immediately so the
  * client does not starve (old timing, better than deadlock). */
@@ -551,6 +566,8 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
     int children_applied = awl_subsurface_parent_applied(s);
 
     if (!s->current_buffer_res) {   /* empty commit (e.g. requesting configure / sync flush) */
+        LOGD("surface %llu empty commit (children_applied=%d)",
+             (unsigned long long)s->id, children_applied);
         /* child state changed → root window redraw (walk-up inside); a cursor
          * image detached (attach NULL) → the compositing window drops the layer */
         if (children_applied || (s->role == AWL_ROLE_CURSOR && attached))
@@ -584,6 +601,8 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         }
     }
 
+    LOGD("surface %llu commit buf=%p",
+         (unsigned long long)s->id, (void*)s->current_buffer_res);
     schedule_render(s);
 }
 
