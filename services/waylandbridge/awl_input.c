@@ -1065,6 +1065,7 @@ int awl_pointer_cursor_layer(uint64_t root_id, awl_layer_info_t* out) {
         awl_surface_logical_size(cs, &w, &h);   /* viewport dst | source | buffer/scale, logical px */
         float u0, v0, su, sv;
         awl_surface_layer_uv(cs, &u0, &v0, &su, &sv);
+        int32_t xform = cs->buf_transform;
         pthread_mutex_unlock(&cs->ev_lock);
         if (w > 0.5f && h > 0.5f) {   /* no buffer yet → nothing to draw (the commit re-dirties) */
             uint64_t pos = atomic_load(&g_cursor_pos);   /* one word: x and y from the same event */
@@ -1076,6 +1077,7 @@ int awl_pointer_cursor_layer(uint64_t root_id, awl_layer_info_t* out) {
             out->h = h;
             out->u0 = u0; out->v0 = v0;
             out->su = su; out->sv = sv;
+            out->transform = xform;
             ok = 1;
         }
     }

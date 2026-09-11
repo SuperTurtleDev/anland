@@ -66,6 +66,15 @@ void awl_surface_logical_size(struct awl_surface* s, float* w, float* h) {
     float sc = s->buf_scale > 0 ? (float)s->buf_scale : 1.0f;
     *w = (float)bw / sc;
     *h = (float)bh / sc;
+    /* set_buffer_transform 90/270: the logical size swaps while the buffer
+     * stays as-is (dst/src branches above are untouched — viewport source is
+     * buffer-coordinate space, dst explicitly overrides size, kwin surfaceSize
+     * shape). */
+    if (s->buf_transform == 1 || s->buf_transform == 3) {
+        float t = *w;
+        *w = *h;
+        *h = t;
+    }
 }
 
 /* View mapping base size (#31 chrome shadow-margin findings: viewport dst =

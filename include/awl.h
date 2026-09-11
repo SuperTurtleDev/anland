@@ -330,6 +330,8 @@ typedef struct awl_layer_info {
     float x, y;            /* root logical coordinates (Y down; root=(0,0)) */
     float w, h;            /* layer logical size (input hit-testing; 0 = no buffer on this layer) */
     float u0, v0, su, sv;  /* normalized uv transform of the sample region (viewport source; default = whole image) */
+    int32_t transform;     /* wl_surface.set_buffer_transform (wl_output.transform 0..7,
+                            * applied on commit; 90/270 swap the logical size) */
 } awl_layer_info_t;
 
 /* Returns the layer count (root first, sublayers in stack order bottom→top;
@@ -356,6 +358,18 @@ void awl_surface_get_origin(uint64_t root_id, int32_t* ox, int32_t* oy,
 /* This frame has been presented (rendering done; the render thread sends
  * the frame callbacks directly) */
 void awl_surface_presented(uint64_t id);
+
+/* Frame callbacks only (presented minus the release_q drain) — for layers
+ * whose wl_buffer.release is signalled precisely per buffer instead
+ * (SurfaceControl setBufferWithRelease, awl_hwc.cpp). Any thread, same
+ * locking as presented. */
+void awl_surface_frame_done(uint64_t id);
+
+/* Release exactly this buffer (wl_buffer identity = get_buffer's token) if it
+ * still sits in the surface's deferred release queue: the display pipeline
+ * stopped sampling it (SurfaceControl OnBufferRelease). No-op when the
+ * buffer is unknown/already released. Any thread, same locking as presented. */
+void awl_surface_release_token(uint64_t id, void* token);
 
 #ifdef __cplusplus
 }

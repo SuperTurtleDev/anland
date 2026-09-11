@@ -397,7 +397,21 @@ static void surface_set_opaque_region(struct wl_client* c, struct wl_resource* r
 static void surface_set_input_region(struct wl_client* c, struct wl_resource* r,
                                      struct wl_resource* region) {}
 static void surface_set_buffer_transform(struct wl_client* c, struct wl_resource* r,
-                                         int32_t transform) {}
+                                         int32_t transform) {
+    /* Wayland: buffer transform, one of wl_output.transform (0..7), applied on
+     * commit (double-buffered like viewport state); invalid value = protocol
+     * error. 90/270 swap the surface logical size (awl_viewport.c). */
+    if (transform < 0 || transform > 7) {
+        wl_resource_post_error(r, WL_SURFACE_ERROR_INVALID_TRANSFORM,
+                               "invalid transform %d", transform);
+        return;
+    }
+    struct awl_surface* s = wl_resource_get_user_data(r);
+    if (!s) return;
+    pthread_mutex_lock(&s->ev_lock);
+    s->pend_buf_transform = transform;
+    pthread_mutex_unlock(&s->ev_lock);
+}
 static void surface_set_buffer_scale(struct wl_client* c, struct wl_resource* r,
                                      int32_t scale) {
     /* #31: record integer buffer scale (logical size = buffer/scale; when
@@ -482,6 +496,10 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         s->vp_sw = s->pend_vps_w; s->vp_sh = s->pend_vps_h;
         s->vp_has_src = s->vp_sw > 0 && s->vp_sh > 0;
         s->pend_vps = 0;
+    }
+    if (s->pend_buf_transform >= 0) {   /* set_buffer_transform (double-buffered) */
+        s->buf_transform = s->pend_buf_transform;
+        s->pend_buf_transform = -1;
     }
     struct wl_resource* old = s->current_buffer_res;
     int attached = s->pending_attached;
@@ -595,6 +613,8 @@ static void compositor_create_surface(struct wl_client* client,
     s->id = g_srv.next_surface_id++;   /* event thread is the sole writer, no lock */
     s->role = AWL_ROLE_NONE;
     s->buf_scale = 1;   /* #31: wl_surface.set_buffer_scale defaults to 1 */
+    s->buf_transform = 0;   /* set_buffer_transform default = wl_output.transform.normal */
+    s->pend_buf_transform = -1;   /* -1 = nothing pending */
     s->pending_damage_empty = 1;   /* damage accumulator starts empty (calloc 0 = "has rect") */
     {
         pthread_mutexattr_t attr;
@@ -764,6 +784,60 @@ void awl_surface_presented(uint64_t id) {
     for (int i = 0; i < s->release_q_n; i++)
         wl_buffer_send_release(s->release_q[i]);
     s->release_q_n = 0;
+    wl_client_flush(wl_resource_get_client(s->resource));
+    pthread_mutex_unlock(&s->ev_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+/* presented minus the release drain — frame callbacks only. For layers whose
+ * wl_buffer.release is signalled precisely per buffer instead
+ * (SurfaceControl OnBufferRelease, awl_hwc.cpp): draining release_q here would
+ * release buffers SurfaceFlinger is still sampling. Same locking/threads as
+ * presented. */
+void awl_surface_frame_done(uint64_t id) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (!s || !s->resource) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    struct awl_frame_cb* cb;
+    struct awl_frame_cb* tmp;
+    wl_list_for_each_safe(cb, tmp, &s->frame_callbacks, link) {
+        wl_callback_send_done(cb->resource, awl_now_ms());
+        cb->detached = 1;
+        wl_list_remove(&cb->link);
+        wl_resource_destroy(cb->resource);   /* listener: detached → free */
+    }
+    wl_client_flush(wl_resource_get_client(s->resource));
+    pthread_mutex_unlock(&s->ev_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+/* Release exactly this buffer (identity = the wl_buffer resource value the
+ * render side got as get_buffer's token) if it still sits in the deferred
+ * release queue — the display pipeline stopped sampling it (SurfaceControl
+ * OnBufferRelease fired with the buffer's release fence signalled). Buffers
+ * not found (already released / destroyed / never queued) are a no-op. The
+ * OnBufferRelease callback runs on a SurfaceFlinger binder thread — same
+ * locking as presented. */
+void awl_surface_release_token(uint64_t id, void* token) {
+    if (!token) return;
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (!s || !s->resource) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    for (int i = 0; i < s->release_q_n; i++) {
+        if ((void*)s->release_q[i] == token) {
+            wl_buffer_send_release(s->release_q[i]);
+            s->release_q[i] = s->release_q[--s->release_q_n];
+            break;
+        }
+    }
     wl_client_flush(wl_resource_get_client(s->resource));
     pthread_mutex_unlock(&s->ev_lock);
     pthread_rwlock_unlock(&g_srv.rwl);

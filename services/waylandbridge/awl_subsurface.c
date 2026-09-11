@@ -382,6 +382,7 @@ static void layers_collect(struct awl_surface* parent, float bx, float by,
         awl_surface_logical_size(ch, &w, &h);
         float u0, v0, su, sv;   /* sample region (viewport source) → normalized uv, awl_viewport.c */
         awl_surface_layer_uv(ch, &u0, &v0, &su, &sv);
+        int32_t xform = ch->buf_transform;
         pthread_mutex_unlock(&ch->ev_lock);
         out[*n].surface_id = ch->id;
         out[*n].x = x;
@@ -392,6 +393,7 @@ static void layers_collect(struct awl_surface* parent, float bx, float by,
         out[*n].v0 = v0;
         out[*n].su = su;
         out[*n].sv = sv;
+        out[*n].transform = xform;
         (*n)++;
         layers_collect(ch, x, y, out, n, max, depth + 1);
     }
@@ -417,6 +419,7 @@ int awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max) {
         awl_surface_layer_uv(root, &out[0].u0, &out[0].v0, &out[0].su, &out[0].sv);
         out[0].w = w;
         out[0].h = h;
+        out[0].transform = root->buf_transform;
         pthread_mutex_unlock(&root->ev_lock);
         n = 1;
         layers_collect(root, 0, 0, out, &n, max, 1);

@@ -116,6 +116,10 @@ struct awl_surface {
      * as the buffer (kwin pending→current). */
     int32_t phys_w, phys_h;          /* Android window size (recorded by awl_window_resize; 0=unknown) */
     int32_t buf_scale;               /* wl_surface.set_buffer_scale (default 1; bookkeeping only) */
+    int32_t buf_transform;           /* wl_surface.set_buffer_transform, current (wl_output.transform
+                                      * 0..7; 90/270 swap the logical size). Applied on commit like
+                                      * viewport state — the render side reads it per frame. */
+    int32_t pend_buf_transform;      /* -1 = nothing pending */
     struct wl_resource* viewport_res;/* wp_viewport (at most 1 per surface; NULL=none) */
     struct wl_resource* frac_res;    /* zwp_fractional_scale_v1 (at most 1 per surface) */
     int32_t vp_dst_w, vp_dst_h;      /* viewport dst logical size (0=unset) */
