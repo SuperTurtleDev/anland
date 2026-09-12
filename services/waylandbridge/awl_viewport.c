@@ -97,8 +97,8 @@ void awl_surface_content_size(struct awl_surface* s, float* w, float* h) {
 /* ---------------- view mapping ----------------
  * Root content base (logical px) → Android window view px:
  *   view = logical × s + o
- * THE conversion shared by the render dst, HWC child dst, input inverse,
- * relative deltas, confine rects and the IME cursor rect — every site reads
+ * THE conversion shared by the render dst, input inverse, relative deltas,
+ * confine rects and the IME cursor rect — every site reads
  * the same numbers from awl_surface_view_map, so they cannot drift.
  *
  * Two regimes, decided per root by awl_surface_view_map:

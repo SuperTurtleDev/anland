@@ -259,7 +259,6 @@ add_executable(waylandbridge
   ${AWL_GENERATED}/text-input-unstable-v3-server-protocol.h
   # adaptation layer
   awl_renderer.cpp
-  awl_hwc.cpp
   waylandbridge.cpp
 )
 target_include_directories(waylandbridge PRIVATE

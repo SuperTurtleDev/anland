@@ -482,8 +482,8 @@ void awl_surface_logical_size(struct awl_surface* s, float* w, float* h);
  * by the view mapping, render dst and input inverse. */
 void awl_surface_content_size(struct awl_surface* s, float* w, float* h);
 /* Root → window view mapping, view = (logical − geometry origin) × s + o —
- * THE conversion shared by render dst / HWC child dst / input inverse /
- * relative deltas / confine rects / IME cursor rect. Content following the
+ * THE conversion shared by render dst / input inverse / relative deltas /
+ * confine rects / IME cursor rect. Content following the
  * configured size → exactly s = Z, o = 0 (kwin: scene at the output scale;
  * the client's logical×Z buffer lands 1:1, nothing resampled, whatever
  * scale_mode says). Otherwise → scale_mode placement (awl_view_map). Caller

@@ -1,22 +1,24 @@
-/* awl_renderer.cpp — per-window GPU rendering (root layer only) + dmabuf→AHB
- * wrap machinery
+/* awl_renderer.cpp — per-window GPU rendering (v3 multi-layer, no CPU
+ * per-pixel compositing) + dmabuf→AHB wrap machinery
  *
- * wayland buffer → window root buffer:
+ * wayland buffer → window:
  *   dmabuf : eglCreateImageKHR(EGL_EXT_image_dma_buf_import) → zero-copy texture
  *   shm    : wl_shm_buffer → glTexSubImage2D upload (GPU, damage region)
- * Child layers (wl_subsurface / xdg_popup / client cursor image) are NOT drawn
- * here — each is an ASurfaceControl child handed straight to
- * SurfaceFlinger/HWC (awl_hwc.cpp, all-HWC); the root quad below is the
- * window's own BufferQueue layer, the SC children stack above it.
- * wl_surface.set_buffer_transform of the root is applied via the u_xform
- * sample matrix (children get it through setGeometry's transform).
+ * Composite = multi-layer quads (root + wl_subsurface child layers, render
+ * stack order bottom→top, then the client's wl_pointer.set_cursor image on
+ * top) sampled into dst rect → eglSwapBuffers → BufferQueue/SurfaceFlinger
+ * present.
+ * Per-layer texture state cached by surface id (wl_tex); reclaimed when the
+ * layer disappears.
+ * wl_surface.set_buffer_transform is applied per layer via the u_xform
+ * sample matrix.
+ * blend = premultiplied alpha (ONE, ONE_MINUS_SRC_ALPHA); first layer (root)
+ * blend off.
  *
  * All rendering happens on the window's dedicated render thread
  * (render_thread_loop).
  */
 #include "awl_renderer.hpp"
-
-#include "awl_hwc.hpp"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -82,8 +84,8 @@ static const char* k_frag_src =
     "  color = texture(tex, uv);\n"   /* channel order comes from the texture format (dmabuf = BGRA_8888) */
     "}\n";
 
-/* wl buffer transform (wl_output.transform 0..7) → sample-uv affine for the
- * root quad: rows u = a·qx + b·qy + c, v = d·qx + e·qy + f (q = top-down
+/* wl buffer transform (wl_output.transform 0..7) → sample-uv affine for a
+ * layer quad: rows u = a·qx + b·qy + c, v = d·qx + e·qy + f (q = top-down
  * display uv; the buffer holds the content rotated by T, we sample the
  * inverse). Uploaded row-major with transpose=GL_TRUE. On-device check:
  * weston-transformed (a direction error = swap the 90/270 pair). */
@@ -98,7 +100,23 @@ static const float k_root_xform[8][9] = {
     /* 7 flipped_270 */ { 0, -1, 1, -1, 0, 1,   0, 0, 1 },
 };
 
-/* Root-layer texture state. dmabuf: the surface's awl_ahb_slot (one AHB,
+/* Per-surface dmabuf slot: ONE AHardwareBuffer per surface, swapped per
+ * arriving buffer (snapalloc donor scheme, see wrap_dmabuf_ahb). When the
+ * dmabuf changes the AHB is re-forged with a fresh identity (kgsl binds the
+ * memory at import — an in-place fd swap would leave the GPU sampling the
+ * old dmabuf); the re-forge uses the OLD AHB itself as the donor (its
+ * metadata blob already carries this geometry — no allocation), and the old
+ * AHB's release closes the swapped-out dmabuf fd. The blob stays alive
+ * through the relay: each forged AHB's handle holds its own fd dup. After a
+ * swap the consumer MUST re-import: a new EGLImage for the texture.
+ * Render-thread only per surface. */
+struct awl_ahb_slot {
+    AHardwareBuffer* ahb = NULL;   /* wraps the current dmabuf */
+    uint64_t ino = 0;              /* dma-buf identity (fstat inode) */
+    uint32_t w = 0, h = 0, stride = 0;
+};
+
+/* Per-layer texture state. dmabuf: the surface's awl_ahb_slot (one AHB,
  * swapped per arriving buffer) + the EGLImage currently importing it. */
 struct wl_tex {
     GLuint texture = 0;
@@ -127,9 +145,7 @@ struct wl_window {
     std::atomic<bool> size_dirty{true};   /* render_frame re-queries once */
     bool logged_frame = false;     /* first-frame log (diagnostics) */
     bool logged_dmg = false;       /* first partial-damage upload log (diagnostics) */
-    wl_tex root_tex;               /* the root layer only — children are SC layers (awl_hwc) */
-    awl_hwc_window* hwc = NULL;    /* SC child-layer state (NULL = no children display) */
-    int last_bg_w = 0, last_bg_h = 0;   /* size the last empty-root background frame went out at */
+    std::map<uint64_t, wl_tex> layers;   /* layer id → texture (includes root's own id) */
 
     /* dedicated render thread: context bound 1:1 to the thread, requests coalesced via condvar */
     std::thread th;
@@ -300,8 +316,11 @@ static void window_teardown_gl(wl_window* w) {
         eglMakeCurrent(g.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (w->program) glDeleteProgram(w->program);
         if (w->vbo) glDeleteBuffers(1, &w->vbo);
-        destroy_dmabuf_texture(&w->root_tex);
-        if (w->root_tex.texture) glDeleteTextures(1, &w->root_tex.texture);
+        for (auto& kv : w->layers) {
+            destroy_dmabuf_texture(&kv.second);
+            if (kv.second.texture) glDeleteTextures(1, &kv.second.texture);
+        }
+        w->layers.clear();
         if (w->surface != EGL_NO_SURFACE) eglDestroySurface(g.display, w->surface);
         eglDestroyContext(g.display, w->context);
         w->context = EGL_NO_CONTEXT;
@@ -334,7 +353,6 @@ static bool renderer_teardown_locked_out(uint64_t id) {
     }
     if (w->th.joinable()) w->th.join();
     window_teardown_gl(w);
-    awl_hwc_destroy(w->hwc);   /* after join: render thread stopped, no frame in flight */
     ANativeWindow_release(w->nw);
     delete w;
     return true;
@@ -366,10 +384,6 @@ int awl_renderer_attach(uint64_t id, ANativeWindow* nw) {
         }
         w->cur_vw = ANativeWindow_getWidth(nw);
         w->cur_vh = ANativeWindow_getHeight(nw);
-        w->hwc = awl_hwc_create(nw);    /* SC children of the window surface (not fatal on NULL) */
-        if (!w->hwc)
-            LOGE("window %llu: SC child layers unavailable (children will not display)",
-                 (unsigned long long)id);
         w->th = std::thread(render_thread_loop, w);   /* dedicated render thread */
         std::lock_guard<std::mutex> lk(g_map_lock);
         g_windows[id] = w;
@@ -700,9 +714,14 @@ static AHardwareBuffer* wrap_dmabuf_ahb(const awl_buffer_info_t* b,
     }
 
     /* GraphicBuffer::flatten wire (libs/ui/GraphicBuffer.cpp):
-     * 13-int header + handle ints in the stream, numFds fds via SCM_RIGHTS */
+     * 13-int header + handle ints in the stream, numFds fds via SCM_RIGHTS.
+     * Independent high-bit id namespace (bit 63): AOSP-allocated GraphicBuffer
+     * ids occupy (pid << 32) | seq in this process — a same-format forged id
+     * colliding with a real one made SF's buffer cache hit different layers'
+     * buffers as one entry (HWC era). Bit 63 keeps the spaces disjoint. */
     static std::atomic<uint32_t> counter{0};
-    uint64_t id = ((uint64_t)getpid() << 32) | (counter++ & 0xffffffffu);
+    uint64_t id = ((uint64_t)getpid() << 32) | (counter++ & 0xffffffffu)
+                | (1ull << 63);
     int32_t head[13];
     head[0] = 0x47423031;                 /* 'GB01' */
     head[1] = (int32_t)b->width;
@@ -780,7 +799,7 @@ static AHardwareBuffer* wrap_dmabuf_ahb(const awl_buffer_info_t* b,
 
 /* ---------------- per-surface dmabuf slot (public API) ---------------- */
 
-int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
+static int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
     /* identity = the dmabuf inode, fstat'ed once at buffer creation
      * (awl_buffer_info_t.ino) instead of per frame here; 0 = unknown there
      * (broken fd at creation) → per-call fstat fallback */
@@ -808,9 +827,9 @@ int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
         }
     }
 #endif
-    /* Write-fence gate before ANY sample of this memory — both consumers
-     * (root GL texture import below, HWC child setBuffer via awl_hwc) go
-     * through here. The client's GPU paint can still be in flight at commit:
+    /* Write-fence gate before ANY sample of this memory — the GL texture
+     * import below samples it right after. The client's GPU paint can still
+     * be in flight at commit:
      * resize ack frames commit ~µs after buffer creation (verified: the
      * pages read zero at import, painted ms later — the resize black screen
      * latched the zero pages as a static client's final frame), and
@@ -818,10 +837,7 @@ int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
      * the dma-buf's exclusive (write) fence: poll(POLLIN) is event-driven —
      * returns the instant the writer's kernel fence signals (an already-idle
      * buffer returns immediately, so this is one syscall on the steady
-     * path); unfenced writers return immediately, bounded by the timeout.
-     * Waiting BEFORE handing the buffer onward also covers the HWC overlay
-     * path, whose DPU contract waits only on explicit acquire fences (we
-     * pass -1), not on the resv. */
+     * path); unfenced writers return immediately, bounded by the timeout. */
     {
         struct pollfd pfd = { b->fd, POLLIN, 0 };
         int pr = poll(&pfd, 1, 100);
@@ -860,7 +876,7 @@ int awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b) {
     return 1;
 }
 
-void awl_renderer_ahb_slot_destroy(awl_ahb_slot* s) {
+static void awl_renderer_ahb_slot_destroy(awl_ahb_slot* s) {
     if (s->ahb) AHardwareBuffer_release(s->ahb);
     memset(s, 0, sizeof(*s));
 }
@@ -873,7 +889,7 @@ static void destroy_dmabuf_texture(wl_tex* t) {
     awl_renderer_ahb_slot_destroy(&t->slot);
 }
 
-/* HAL BGRA_8888 constant lives in awl_renderer.hpp (shared with awl_hwc.cpp) */
+/* HAL BGRA_8888 constant lives in awl_renderer.hpp */
 
 static void tex_params_default(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1030,12 +1046,8 @@ static bool upload_shm_texture(wl_window* win, uint64_t sid, wl_tex* t,
  * parallelism */
 
 static void render_frame(wl_window* w) {
-    /* Layer snapshot (root first, child layers in render stack order bottom→top).
-     * Children (wl_subsurface / xdg_popup on the same tree / the client cursor
-     * image) go to SurfaceFlinger as ASurfaceControl layers (awl_hwc.cpp,
-     * all-HWC: dmabuf zero-copy, shm copied once); only the root is drawn
-     * here — the EGLSurface IS the window's BufferQueue layer, and SC children
-     * stack above it (root at the bottom, Wayland order).
+    /* Layer snapshot (root first, child layers in render stack order bottom→top);
+     * layers that fail to fetch / have no buffer are skipped.
      * #31 zoom: coordinates/sizes are root logical pixels; dst = (logical −
      * geometry origin) × s + o with the root's view transform (1:1 at Z for
      * content following the configure, scale_mode placement otherwise),
@@ -1048,8 +1060,8 @@ static void render_frame(wl_window* w) {
     /* wl_pointer.set_cursor image of the pointer-focused client: composited
      * above every layer of this window (x,y = pointer − hotspot in the same
      * root logical coordinates as the stack; never part of hit-testing).
-     * Set/presented like any child layer → the cursor surface gets frame_done
-     * (animated cursors) and per-buffer release. */
+     * Drawn/presented like any layer → the cursor surface gets frame_done
+     * (animated cursors) and deferred buffer release. */
     if (awl_pointer_cursor_layer(w->id, &lay[n])) n++;
     /* Root view transform (logic layer, the same snapshot the input inverse
      * uses): geometry origin + logical→view scale/offset. A root whose
@@ -1075,55 +1087,9 @@ static void render_frame(wl_window* w) {
          (unsigned long long)lay[0].surface_id,
          xf.sx, xf.sy, xf.ox, xf.oy, xf.gox, xf.goy);
 
-    /* child layers first: single atomic transaction, z order = stack order */
-    awl_hwc_frame(w->hwc, lay, n, xf.gox, xf.goy, xf.sx, xf.sy, xf.ox, xf.oy);
-
-    /* ---- root quad (the window's own buffer) ---- */
-    awl_buffer_info_t b;
-    if (awl_surface_get_buffer(lay[0].surface_id, &b) != 0) {
-        /* empty root (chrome primary-subsurface mode: content entirely on the
-         * sync child layer): the window buffer must still exist beneath the
-         * SC children — push one background frame per window-size change */
-        if (vw != w->last_bg_w || vh != w->last_bg_h) {
-            w->last_bg_w = vw;
-            w->last_bg_h = vh;
-            glViewport(0, 0, vw, vh);
-            glClearColor(0, 0, 0, 1);
-            glClear(GL_COLOR_BUFFER_BIT);
-            eglSwapBuffers(g.display, w->surface);
-            LOGI("window %llu: empty root, background frame %dx%d",
-                 (unsigned long long)w->id, vw, vh);
-        }
-        LOGD("win %llu empty root return (view=%dx%d bg=%dx%d)",
-             (unsigned long long)w->id, vw, vh, w->last_bg_w, w->last_bg_h);
-        return;
-    }
-    bool is_dmabuf = b.kind == AWL_BUFFER_DMABUF;
-    wl_tex& t = w->root_tex;
-    bool ok = false;
-    if (is_dmabuf) {
-        ok = import_dmabuf_texture(&t, &b);
-    } else {
-        shm_damage d;
-        d.state = awl_surface_get_damage(lay[0].surface_id,
-                                         &d.x, &d.y, &d.w, &d.h,
-                                         &d.token, &d.gen);
-        ok = upload_shm_texture(w, lay[0].surface_id, &t, &b, &d);
-    }
-    if (is_dmabuf) close(b.fd);   /* import holds its own reference internally; return the dup when done */
-    if (b.kind == AWL_BUFFER_SHM && b.shm) {
-        /* Return the pinned references (taken by get_buffer) — after return
-         * the shm/pool pointers are dead and must not be touched (safe even
-         * if the client destroys the buffer during upload, see awl.h) */
-        wl_shm_buffer_unref(b.shm);
-        wl_shm_pool_unref(b.pool);
-    }
-    if (!ok) return;
-
     glViewport(0, 0, vw, vh);
     glClearColor(0, 0, 0, 1);   /* letterbox bars for fit/center modes */
     glClear(GL_COLOR_BUFFER_BIT);
-    glDisable(GL_BLEND);   /* root = bottom layer, nothing beneath it */
 
     glUseProgram(w->program);
     glBindBuffer(GL_ARRAY_BUFFER, w->vbo);
@@ -1135,43 +1101,90 @@ static void render_frame(wl_window* w) {
      * GL_BGRA_EXT upload — both sample correct as-is, no swizzle. The
      * transform matrix maps the display quad uv through the wl buffer
      * transform (set_buffer_transform, whole-buffer inverse rotation). */
-    /* Pixel-grid snap (awl_snap_extent, awl_renderer.hpp): integer origin,
-     * size = the buffer's own pixel count when it is the Z-scaled rendition
-     * of the logical size — GL_LINEAR then samples texel centers: lossless.
-     * A fractional origin/size would resample the whole buffer (half-pixel
-     * blur) even at scale 1. */
-    double rsw, rsh;
-    awl_layer_sampled(&lay[0], b.width, b.height, &rsw, &rsh);
-    float qdx = (float)round(((double)lay[0].x - (double)xf.gox) * xf.sx + xf.ox);
-    float qdy = (float)round(((double)lay[0].y - (double)xf.goy) * xf.sy + xf.oy);
-    float qdw = (float)awl_snap_extent(lay[0].w, xf.sx, rsw);
-    float qdh = (float)awl_snap_extent(lay[0].h, xf.sy, rsh);
-    LOGD("win %llu quad: %s %ux%u tok=%p dst=%.0f,%.0f %.0fx%.0f "
-         "lay=(%.0f,%.0f %.0fx%.0f)",
-         (unsigned long long)w->id, is_dmabuf ? "dmabuf" : "shm",
-         b.width, b.height, b.token, qdx, qdy, qdw, qdh,
-         lay[0].x, lay[0].y, lay[0].w, lay[0].h);
-    glUniform4f(w->u_dst, qdx, qdy, qdw, qdh);
-    glUniform4f(w->u_uv,
-                lay[0].u0, lay[0].v0, lay[0].su, lay[0].sv);
-    glUniformMatrix3fv(w->u_xform, 1, GL_TRUE,
-                       k_root_xform[lay[0].transform & 7]);
     glUniform1i(w->u_tex, 0);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, t.texture);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    if (!w->logged_frame) {
-        w->logged_frame = true;
-        LOGI("window %llu frame: layers=%d root=%llu kind=%s %ux%u stride=%u "
-             "fmt=%c%c%c%c xform=%d (glerr=0x%x)",
-             (unsigned long long)w->id, n,
-             (unsigned long long)lay[0].surface_id,
-             is_dmabuf ? "dmabuf" : "shm",
-             b.width, b.height, b.stride,
-             (char)(b.drm_format & 0xff), (char)((b.drm_format >> 8) & 0xff),
-             (char)((b.drm_format >> 16) & 0xff), (char)((b.drm_format >> 24) & 0xff),
-             lay[0].transform, glGetError());
+    uint64_t seen[AWL_MAX_LAYERS + 1];
+    int nseen = 0;
+    bool drew = false;
+    for (int i = 0; i < n; i++) {
+        awl_buffer_info_t b;
+        if (awl_surface_get_buffer(lay[i].surface_id, &b) != 0) continue;
+        bool is_dmabuf = b.kind == AWL_BUFFER_DMABUF;
+        wl_tex& t = w->layers[lay[i].surface_id];   /* layers seen this frame */
+        seen[nseen++] = lay[i].surface_id;
+        bool ok = false;
+        if (is_dmabuf) {
+            ok = import_dmabuf_texture(&t, &b);
+        } else if (b.kind == AWL_BUFFER_SHM) {
+            shm_damage d;
+            d.state = awl_surface_get_damage(lay[i].surface_id,
+                                             &d.x, &d.y, &d.w, &d.h,
+                                             &d.token, &d.gen);
+            ok = upload_shm_texture(w, lay[i].surface_id, &t, &b, &d);
+        }
+        if (is_dmabuf) close(b.fd);   /* import holds its own reference internally; return the dup when done */
+        if (b.kind == AWL_BUFFER_SHM && b.shm) {
+            /* Return the pinned references (taken by get_buffer) — after return
+             * the shm/pool pointers are dead and must not be touched (safe even
+             * if the client destroys the buffer during upload, see awl.h) */
+            wl_shm_buffer_unref(b.shm);
+            wl_shm_pool_unref(b.pool);
+        }
+        if (!ok) continue;
+
+        /* first layer (root) writes directly with blend off; child layers stack on top with premultiplied alpha */
+        if (i == 0 || !drew) glDisable(GL_BLEND);
+        else {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        /* Pixel-grid snap (awl_snap_extent, awl_renderer.hpp): integer origin,
+         * size = the buffer's own pixel count when it is the Z-scaled rendition
+         * of the logical size — GL_LINEAR then samples texel centers: lossless.
+         * A fractional origin/size would resample the whole buffer (half-pixel
+         * blur) even at scale 1. */
+        double rsw, rsh;
+        awl_layer_sampled(&lay[i], b.width, b.height, &rsw, &rsh);
+        glUniform4f(w->u_dst,
+                    (float)round(((double)lay[i].x - (double)xf.gox) * xf.sx + xf.ox),
+                    (float)round(((double)lay[i].y - (double)xf.goy) * xf.sy + xf.oy),
+                    (float)awl_snap_extent(lay[i].w, xf.sx, rsw),
+                    (float)awl_snap_extent(lay[i].h, xf.sy, rsh));
+        glUniform4f(w->u_uv, lay[i].u0, lay[i].v0, lay[i].su, lay[i].sv);
+        glUniformMatrix3fv(w->u_xform, 1, GL_TRUE,
+                           k_root_xform[lay[i].transform & 7]);
+        glBindTexture(GL_TEXTURE_2D, t.texture);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        drew = true;
+
+        if (!w->logged_frame) {
+            w->logged_frame = true;
+            LOGI("window %llu frame: layers=%d [%d]=%llu kind=%s %ux%u stride=%u "
+                 "fmt=%c%c%c%c xform=%d (glerr=0x%x)",
+                 (unsigned long long)w->id, n, i,
+                 (unsigned long long)lay[i].surface_id,
+                 is_dmabuf ? "dmabuf" : "shm",
+                 b.width, b.height, b.stride,
+                 (char)(b.drm_format & 0xff), (char)((b.drm_format >> 8) & 0xff),
+                 (char)((b.drm_format >> 16) & 0xff), (char)((b.drm_format >> 24) & 0xff),
+                 lay[i].transform, glGetError());
+        }
+    }
+    if (!drew) return;   /* not even root has a usable buffer — don't spin on a swap */
+
+    /* vanished layers (bubble hidden/destroyed): reclaim texture and AHB references */
+    for (auto it = w->layers.begin(); it != w->layers.end();) {
+        bool found = false;
+        for (int k = 0; k < nseen && !found; k++)
+            found = (seen[k] == it->first);
+        if (!found) {
+            destroy_dmabuf_texture(&it->second);
+            if (it->second.texture) glDeleteTextures(1, &it->second.texture);
+            it = w->layers.erase(it);
+        } else {
+            ++it;
+        }
     }
 
     /* no glFinish: eglSwapBuffers submits with a native fence the driver attaches
@@ -1180,6 +1193,7 @@ static void render_frame(wl_window* w) {
      * (container Mesa write ↔ host kgsl read, same model v5 runs on). CPU stays
      * free — frame_done goes out at submit time so the client's next frame
      * overlaps this one's GPU composite. */
+    glDisable(GL_BLEND);
     if (!eglSwapBuffers(g.display, w->surface)) {
         LOGE("eglSwapBuffers: 0x%x", eglGetError());
         return;
@@ -1194,9 +1208,9 @@ static void render_frame(wl_window* w) {
     }
 #endif
 
-    /* root frame callbacks + deferred buffer release; child layers get theirs
-     * from the SC transaction callbacks (awl_hwc.cpp) */
-    awl_surface_presented(lay[0].surface_id);
+    /* frame_done for each layer (child layers piggyback on the parent window's presentation) */
+    for (int k = 0; k < nseen; k++)
+        awl_surface_presented(seen[k]);
 }
 
 static void render_thread_loop(wl_window* w) {
@@ -1262,7 +1276,6 @@ void awl_renderer_shutdown(void) {
         }
         if (w->th.joinable()) w->th.join();
         window_teardown_gl(w);
-        awl_hwc_destroy(w->hwc);
         ANativeWindow_release(w->nw);
         delete w;
     }

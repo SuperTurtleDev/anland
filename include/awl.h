@@ -390,31 +390,6 @@ void awl_surface_get_view_xform(uint64_t root_id, awl_view_xform_t* out);
  * the frame callbacks directly) */
 void awl_surface_presented(uint64_t id);
 
-/* Frame callbacks only (presented minus the release_q drain) — for layers
- * whose wl_buffer.release is signalled precisely per buffer instead
- * (SurfaceControl setBufferWithRelease, awl_hwc.cpp). Any thread, same
- * locking as presented. */
-void awl_surface_frame_done(uint64_t id);
-
-/* Batched frame_done/presented for a whole SC transaction (awl_hwc.cpp):
- * e[i].precise = 1 → frame callbacks only (release goes out per buffer via
- * OnBufferRelease); 0 → presented semantics (callbacks + conservative
- * release_q drain). Sends every surface's callbacks under its ev_lock, then
- * flushes each involved client exactly once — N child layers of one client
- * become a single socket write per frame instead of N. Any thread, same
- * locking as presented. */
-typedef struct awl_frame_elem {
-    uint64_t id;      /* wl_surface id */
-    int precise;      /* release handled per buffer (OnBufferRelease) */
-} awl_frame_elem_t;
-void awl_surface_frame_batch(const awl_frame_elem_t* e, int n);
-
-/* Release exactly this buffer (wl_buffer identity = get_buffer's token) if it
- * still sits in the surface's deferred release queue: the display pipeline
- * stopped sampling it (SurfaceControl OnBufferRelease). No-op when the
- * buffer is unknown/already released. Any thread, same locking as presented. */
-void awl_surface_release_token(uint64_t id, void* token);
-
 #ifdef __cplusplus
 }
 #endif

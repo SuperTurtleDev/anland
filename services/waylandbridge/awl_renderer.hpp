@@ -1,16 +1,14 @@
-/* awl_renderer.hpp — GPU renderer (per-window EGL root layer) + dmabuf→AHB
- * wrap export shared with awl_hwc.cpp */
+/* awl_renderer.hpp — GPU renderer (per-window EGL) */
 #ifndef AWL_RENDERER_HPP
 #define AWL_RENDERER_HPP
 
 #include "awl.h"
 
-#include <android/hardware_buffer.h>
 #include <android/native_window.h>
 #include <math.h>
 #include <stdint.h>
 
-/* ---- pixel-grid snap of a layer's dst extent (GL root + HWC children) ----
+/* ---- pixel-grid snap of a layer's dst extent (GL composite) ----
  * kwin snapToPixelGridF shape: the size is rounded on its own, never derived
  * from two independently rounded corners (off by one for half the positions).
  * One rule on top of kwin: when the layer's own sampled buffer extent
@@ -57,27 +55,5 @@ int  awl_renderer_attach(uint64_t id, ANativeWindow* nw);   /* NULL=detach */
 void awl_renderer_request_render(uint64_t id);
 
 void awl_renderer_shutdown(void);
-
-/* Per-surface dmabuf slot: ONE AHardwareBuffer per surface, swapped per
- * arriving buffer (awl_renderer.cpp for the snapalloc donor scheme). When the
- * dmabuf changes the AHB is re-forged with a fresh identity (SF/kgsl bind the
- * memory at import — an in-place fd swap would leave consumers sampling the
- * old dmabuf); the re-forge uses the OLD AHB itself as the donor (its metadata
- * blob already carries this geometry — no allocation), and the old AHB's
- * release closes the swapped-out dmabuf fd. The blob stays alive through the
- * relay: each forged AHB's handle holds its own fd dup. After a swap the
- * consumer MUST re-import: setBuffer for SC layers, a new EGLImage for the GL
- * root. Callers treat the slot as opaque apart from swap/destroy.
- * Render-thread only per surface. */
-struct awl_ahb_slot {
-    AHardwareBuffer* ahb = NULL;   /* wraps the current dmabuf */
-    uint64_t ino = 0;              /* dma-buf identity (fstat inode) */
-    uint32_t w = 0, h = 0, stride = 0;
-};
-
-/* 1 = swapped (new memory — re-import required), 0 = same dmabuf (no-op),
- * -1 = import refused (old AHB kept). */
-int  awl_renderer_ahb_swap(awl_ahb_slot* s, const awl_buffer_info_t* b);
-void awl_renderer_ahb_slot_destroy(awl_ahb_slot* s);
 
 #endif
