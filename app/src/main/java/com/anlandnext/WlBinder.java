@@ -19,6 +19,9 @@ import java.util.ArrayList;
  * daemon):
  *   SURFACE(id,w,h,SurfaceParcel,deathToken,host) / PAUSE(id,host) ONEWAY
  *   RESIZE(id,w,h) / LIST() → {id,attached,title}... / BRING(id) / CLOSE(id)
+ *   SUBSCRIBE(eventBinder) / UNSUBSCRIBE(eventBinder) — window lifecycle
+ *   events pushed to the binder (see WindowEvents; normal apps receive only
+ *   their own uid's windows)
  * host = Activity instance id (trailing field of SURFACE/PAUSE; the daemon
  * decides eviction from it).
  */
@@ -39,6 +42,14 @@ public final class WlBinder {
     public static final int T_CFG_SET = 13;   /* (key,val) → ok: apply + persist in daemon (#31) */
     public static final int T_CLOSE = 14;     /* (id) → ok: long-press "Close" in window list (the only close entry) */
     public static final int T_ICON = 15;      /* (id) → w:i32 h:i32 bytes[RGBA]: toplevel icon (xdg-toplevel-icon-v1) */
+    public static final int T_SUBSCRIBE = 16;   /* (eventBinder) → ok: window lifecycle events pushed to it (WindowEvents) */
+    public static final int T_UNSUBSCRIBE = 17; /* (eventBinder) → ok: stop events (onPause; daemon watchdog backstops) */
+
+    /* Event codes on the event binder (match the daemon's AWL_E_*) */
+    public static final int E_CREATED = 1;   /* (id:i64, title:string16) */
+    public static final int E_DESTROYED = 2; /* (id:i64) */
+    public static final int E_ATTACHED = 3;  /* (id:i64) */
+    public static final int E_DETACHED = 4;  /* (id:i64) */
 
     /* AWL_T_IME ops (match awl.h AWL_IME_*) */
     public static final int IME_COMMIT = 1;   /* text: commit */
@@ -353,6 +364,42 @@ public final class WlBinder {
             Log.e(TAG, "ICON failed", e);
             s = null;
             return null;
+        } finally {
+            d.recycle();
+            r.recycle();
+        }
+    }
+
+    /* ---- Window lifecycle events (daemon pushes AWL_E_* onto the binder
+     *      reported here; see WindowEvents. Field order matches daemon
+     *      AWL_T_SUBSCRIBE/UNSUBSCRIBE: binder only) ---- */
+
+    /** Subscribe the process event binder (idempotent server-side: the same
+     *  binder re-subscribed keeps the existing registration). 0 = subscribed. */
+    public static int subscribe(IBinder listener) {
+        return transactBinder(T_SUBSCRIBE, listener);
+    }
+
+    /** Stop events (Activity onPause; the daemon also disconnects paused
+     *  subscribers itself). 0 = unsubscribed (or nothing was registered). */
+    public static int unsubscribe(IBinder listener) {
+        return transactBinder(T_UNSUBSCRIBE, listener);
+    }
+
+    private static int transactBinder(int code, IBinder listener) {
+        IBinder b = get();
+        if (b == null) return -1;
+        Parcel d = Parcel.obtain();
+        Parcel r = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeStrongBinder(listener);
+            b.transact(code, d, r, 0);
+            return r.readInt();
+        } catch (Exception e) {
+            Log.e(TAG, "transact " + code + " failed", e);
+            s = null;
+            return -1;
         } finally {
             d.recycle();
             r.recycle();

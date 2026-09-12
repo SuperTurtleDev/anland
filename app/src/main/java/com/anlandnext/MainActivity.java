@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.Menu;
 import android.view.View;
@@ -20,7 +22,10 @@ import java.util.Locale;
 
 /**
  * Window list (launcher entry): shows the wayland windows the daemon holds
- * and their attach state.
+ * and their attach state — refreshed from daemon window events
+ * (create/destroy/attach/detach, WindowEvents) while resumed, plus a LIST pull
+ * on resume (events are live-edge only; whatever happened while paused is
+ * picked up by the snapshot).
  * Tap → BRING (bring-to-front for attached ones / re-attach for detached
  * ones). Long-press → dropdown menu (the long-press itself does nothing,
  * guarding against accidental triggers):
@@ -34,6 +39,18 @@ public class MainActivity extends Activity {
 
     private LinearLayout list;
     private TextView status;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable refresher = this::refresh;
+
+    /** daemon window events → one coalesced LIST pull (a re-attach bursts
+     *  detach+attach; a window going away bursts destroy+detach) */
+    private final WindowEvents.Listener events = new WindowEvents.Listener() {
+        @Override public void onWindowCreated(long id, String title) { scheduleRefresh(); }
+        @Override public void onWindowDestroyed(long id) { scheduleRefresh(); }
+        @Override public void onWindowAttached(long id) { scheduleRefresh(); }
+        @Override public void onWindowDetached(long id) { scheduleRefresh(); }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -66,7 +83,23 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        WindowEvents.addListener(events);
+        WindowEvents.acquire();   /* live list updates while resumed (daemon disconnects a paused subscriber) */
         refresh();
+    }
+
+    @Override
+    protected void onPause() {
+        handler.removeCallbacks(refresher);
+        WindowEvents.release();
+        WindowEvents.removeListener(events);
+        super.onPause();
+    }
+
+    /** event-burst coalescing: one LIST pull per burst */
+    private void scheduleRefresh() {
+        handler.removeCallbacks(refresher);
+        handler.postDelayed(refresher, 60);
     }
 
     private void refresh() {
@@ -76,6 +109,7 @@ public class MainActivity extends Activity {
             status.setText(R.string.status_daemon_unreachable);
             return;
         }
+        WindowEvents.ensure();   /* daemon restarted under us → re-subscribe the event stream */
         status.setText(getString(R.string.status_window_count, wins.size()));
         for (WlBinder.WinInfo w : wins) list.addView(row(w));
         if (wins.isEmpty()) {

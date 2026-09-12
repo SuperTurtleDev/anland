@@ -8,3 +8,95 @@ allow shell anland_host_service service_manager find
 # APP ↔ daemon binder calls (Surface transfer / linkToDeath)
 allow untrusted_app_29 ksu binder { call transfer }
 allow ksu untrusted_app_29 binder { call transfer }
+
+# ---- awl_daemon: waylandbridge 守护进程自有域（原先跑在 ksu 域里，规则越收越宽
+#      会污染 su 域；语法同上：ksud sepolicy —— 空格分隔、无冒号）----
+type awl_daemon domain
+type awl_daemon_exec exec_type
+permissive awl_daemon
+# service.sh（ksu 域）exec 模块二进制 → 自动迁移
+type_transition ksu awl_daemon_exec process awl_daemon
+allow ksu awl_daemon process { transition noatsecure rlimitinh siginh }
+allow ksu awl_daemon process2 nosuid_transition
+allow ksu awl_daemon_exec file { execute getattr map open read relabelfrom relabelto }
+allow awl_daemon awl_daemon_exec file { entrypoint execute getattr map open read }
+allow awl_daemon_exec labeledfs filesystem associate
+# servicemanager：注册 anland.host
+allow awl_daemon anland_host_service service_manager add
+allow awl_daemon servicemanager binder { call transfer }
+allow servicemanager awl_daemon binder { call transfer }
+allow servicemanager awl_daemon dir search
+allow servicemanager awl_daemon file { getattr open read }
+allow servicemanager awl_daemon process getattr
+# APK（targetSdk29 → untrusted_app_29）与普通 app 域 ↔ daemon：binder 调用 + Surface/dmabuf fd
+allow untrusted_app awl_daemon binder { call transfer }
+allow awl_daemon untrusted_app binder { call transfer }
+allow untrusted_app_29 awl_daemon binder { call transfer }
+allow awl_daemon untrusted_app_29 binder { call transfer }
+allow untrusted_app awl_daemon fd use
+allow untrusted_app_29 awl_daemon fd use
+allow awl_daemon untrusted_app fd use
+allow awl_daemon untrusted_app_29 fd use
+# wayland socket 客户端（app 域）↔ daemon
+allow untrusted_app awl_daemon unix_stream_socket { read write }
+allow untrusted_app_29 awl_daemon unix_stream_socket { read write }
+allow awl_daemon untrusted_app unix_stream_socket { read write getopt }
+allow awl_daemon untrusted_app_29 unix_stream_socket { read write getopt }
+# am start 子进程（留在本域）→ ActivityManager
+allow awl_daemon activity_service service_manager find
+allow awl_daemon system_server binder { call transfer }
+allow system_server awl_daemon binder { call transfer }
+allow system_server awl_daemon fd use
+# wayland socket 目录/日志文件（/data/local/tmp = shell_data_file）
+allow awl_daemon shell_data_file dir { search write add_name remove_name create rmdir }
+allow awl_daemon shell_data_file sock_file { create unlink setattr write read getattr }
+allow awl_daemon shell_data_file file { create open write read getattr unlink }
+allow awl_daemon self unix_stream_socket { create bind listen accept read write getattr setattr getopt setopt shutdown connect }
+allow awl_daemon self fifo_file { read write getattr }
+# packages.list 实时查询（SURFACE uid pass）
+allow awl_daemon packages_list_file file { read open getattr }
+# awl_sched：前台 cgroup 调整（/dev/cpuctl = cgroup，/sys/fs/cgroup = cgroup_v2）
+allow awl_daemon cgroup dir { search write add_name remove_name }
+allow awl_daemon cgroup file { write open read getattr }
+allow awl_daemon cgroup_v2 dir { search write add_name remove_name }
+allow awl_daemon cgroup_v2 file { write open read getattr }
+# 渲染：GPU + dmabuf 堆（snapalloc donor 走 qcom,system；显示堆备用）
+allow awl_daemon gpu_device chr_file { read write open getattr map ioctl }
+allow awl_daemon dmabuf_system_heap_device chr_file { read write open getattr ioctl }
+allow awl_daemon vendor_dmabuf_system_heap_device chr_file { read write open getattr ioctl }
+allow awl_daemon vendor_dmabuf_display_heap_device chr_file { read write open getattr ioctl }
+# am/wm 子进程（sh/app_process，execute_no_trans）+ GL vendor 库加载
+allow awl_daemon system_file dir { search getattr open read }
+allow awl_daemon system_file file { execute execute_no_trans getattr map open read }
+allow awl_daemon vendor_file dir { search getattr open read }
+allow awl_daemon vendor_file file { execute execute_no_trans getattr map open read }
+# logd 写日志
+allow awl_daemon logd unix_stream_socket connectto
+allow awl_daemon logd_socket sock_file write
+allow awl_daemon logdw_socket sock_file write
+allow awl_daemon binder_device chr_file { read write open getattr ioctl map }
+# ---- 帧缓冲 fd 跨域流转（合成的真正咽喉）----
+# daemon 产出的 GraphicBuffer 经 APK(BLAST consumer) → SurfaceFlinger 合成；
+# SELinux 对 fd 的 use 检查按"分配它的域"记账（原为 ksu，KernelSU 有宽授权）。
+# 注意：fd use 拒绝默认 dontaudit —— dmesg 完全不打印，SF 拿不到 buffer 时
+# 表现为"只出第一帧然后 consumer 卡死( acquiredCount 不释放 → producer 饿死 )"。
+allow surfaceflinger awl_daemon fd use
+allow system_server awl_daemon fd use
+allow hal_graphics_composer_default awl_daemon fd use
+# 客户端/调试域 ↔ daemon（Chrome 在 droidspacesd 域里，其 dmabuf 由 daemon 导入）
+allow droidspacesd awl_daemon fd use
+allow awl_daemon droidspacesd fd use
+allow shell awl_daemon fd use
+allow awl_daemon shell fd use
+# ---- bring-up 期间实测的 daemon 自身拒绝（enforcing 前置，逐条来自 avc 日志）----
+allow awl_daemon self process { fork getsched setsched sigkill signal stop }
+allow awl_daemon self unix_dgram_socket { create read write getattr getopt setopt connect sendto shutdown }
+# /proc/<pid>/cmdline 探测（awl_sched / uid 查询）：目标进程目录与 cmdline 按其域记账
+allow awl_daemon awl_daemon dir search
+allow awl_daemon awl_daemon file { getattr read open }
+allow awl_daemon droidspacesd dir search
+allow awl_daemon droidspacesd file { getattr read open }
+allow awl_daemon untrusted_app dir search
+allow awl_daemon untrusted_app file { getattr read open }
+allow awl_daemon untrusted_app_29 dir search
+allow awl_daemon untrusted_app_29 file { getattr read open }

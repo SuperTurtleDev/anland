@@ -28,6 +28,11 @@
  *     semantics, wayland window kept alive)
  *   - window_destroyed (client quit on its own) → ctrl/broadcast tells
  *     the Activity to finish
+ *   - window events (T_SUBSCRIBE): created/destroyed/attached/detached
+ *     pushed to subscriber apps over their own binder; unauthenticated
+ *     apps receive only their own uid's windows; a paused subscriber is
+ *     disconnected automatically (its own report, binder death, failed
+ *     send, or the oom_score_adj watchdog)
  */
 #include "awl.h"
 #include "awl_renderer.hpp"
@@ -117,6 +122,25 @@ enum {
                             client exit (xdg toplevel.close / X WM_DELETE_WINDOW) */
     AWL_T_ICON    = 15,  /* (id:i64) → w:i32 h:i32 bytes[RGBA] — current toplevel icon
                             (xdg-toplevel-icon-v1, best buffer, w=0 = none) */
+    AWL_T_SUBSCRIBE = 16, /* (listener binder) → ok:i32; window lifecycle events
+                            * (create/destroy/attach/detach) pushed to the listener
+                            * as anland.IEvents oneways. Normal apps receive only
+                            * the windows of their own uid (same ownership pass as
+                            * SURFACE); allowlisted callers receive everything */
+    AWL_T_UNSUBSCRIBE = 17, /* (listener binder) → ok:i32; stop the events (the
+                              * app reports its own pause; the daemon watchdog
+                              * backstops apps that never report) */
+};
+
+/* ---- window lifecycle events (daemon → subscriber apps, delivered over
+ *      the binder reported with SUBSCRIBE; field order matches what the
+ *      subscriber's onTransact reads) ---- */
+#define AWL_EVT_DESC "anland.IEvents"
+enum {
+    AWL_E_CREATED = 1,   /* (id:i64 title:string16) xdg map → new window */
+    AWL_E_DESTROYED = 2, /* (id:i64) client quit / T_CLOSE wrapped up */
+    AWL_E_ATTACHED = 3,  /* (id:i64) SURFACE accepted → Activity holds a surface */
+    AWL_E_DETACHED = 4,  /* (id:i64) full detach (pause / evict / app death) */
 };
 
 /* control channel (daemon → Activity, delivered over the binder object
@@ -203,6 +227,11 @@ static bool any_attached_locked(void) {
     return false;
 }
 
+/* window lifecycle events (defined with the event-subscription block below;
+ * owner = the window's wayland client uid, resolved by the caller because
+ * awl_window_client_uid must never run under g_state_lock) */
+static void evt_dispatch(uid_t owner, uint64_t id, transaction_code_t code, const char* title);
+
 /* Full detach (minimize semantics: wayland window kept alive, render
  * resources/control channel fully torn down).
  * pause / evict / process death / window destroy all take this path.
@@ -248,6 +277,9 @@ static void detach_window(uint64_t id) {
         ev.type = AWL_IN_KBD_LEAVE;
         awl_input_dispatch(&ev);
     }
+    /* lifecycle event (the window stays alive on every detach path, so its
+     * client uid still resolves; the read runs outside g_state_lock) */
+    evt_dispatch(awl_window_client_uid(id), id, AWL_E_DETACHED, nullptr);
     LOGI("window %llu detached (minimized, wayland window kept alive)", (unsigned long long)id);
 }
 
@@ -325,6 +357,153 @@ static bool ctrl_send_ints(AIBinder* ctrl, transaction_code_t code,
         return false;
     }
     return ctrl_transact(ctrl, code, &in);
+}
+
+/* ---------------- window event subscriptions (#35) ----------------
+ * Subscriber apps pass a binder ("anland.IEvents") over T_SUBSCRIBE; the
+ * daemon pushes oneway lifecycle events (AWL_E_*) to it. Scope: root(0)/
+ * self and AWL_PKG's uid (caller_allowlisted) receive every window; any
+ * other app only the windows whose wayland client runs under its own uid —
+ * the same ownership pass as SURFACE (binder-assigned uid vs the socket
+ * credentials libwayland cached at connect).
+ * Disconnect — all automatic, a subscription needs no daemon-side lifetime
+ * bookkeeping from the app:
+ *   T_UNSUBSCRIBE  the app reports its own pause (Activity onPause)
+ *   binder death   process gone (AIBinder_linkToDeath)
+ *   send failure   frozen/dead channel (ONEWAY transact failed — OEM
+ *                  freezers show up here first)
+ *   watchdog       daemon-detected pause: the subscriber's
+ *                  /proc/<pid>/oom_score_adj rose to cached level — an app
+ *                  that went background without reporting. Events are
+ *                  live-edge only (never replayed): on resume the app
+ *                  re-subscribes and re-pulls LIST. */
+
+static AIBinder_Class* k_evt_class = nullptr;
+static AIBinder_DeathRecipient* k_evt_death = nullptr;
+
+struct awl_sub {
+    AIBinder* listener;   /* subscriber's event binder (ref held for linkToDeath) */
+    uid_t uid;            /* binder-assigned uid at subscribe time (scope filter) */
+    pid_t pid;            /* binder-assigned pid at subscribe time (watchdog) */
+    bool all;             /* allowlisted caller: receives every window's events */
+};
+static std::vector<awl_sub*> g_subs;   /* guarded by g_state_lock */
+
+/* Remove one subscription. Idempotent on the pointer: a concurrent death
+ * callback / watchdog round may have removed (and freed) it already — the
+ * vector search under g_state_lock decides the sole owner of the free, the
+ * pointer value itself is only compared, never dereferenced. */
+static void evt_drop(awl_sub* s) {
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        auto it = std::find(g_subs.begin(), g_subs.end(), s);
+        if (it == g_subs.end()) return;
+        g_subs.erase(it);
+    }
+    /* unlink BEFORE releasing the ref: a death callback firing after the
+     * free would deref a dead cookie (unlink fails silently once the peer
+     * is already dead, which is fine) */
+    AIBinder_unlinkToDeath(s->listener, k_evt_death, s);
+    AIBinder_decStrong(s->listener);
+    delete s;
+}
+
+static void on_evt_died(void* cookie) {
+    /* the watchdog may have dropped (and freed) this subscription already
+     * (process gone → /proc read failed first) — evt_drop only compares the
+     * pointer value under the lock, never dereferences it; no field reads
+     * here either */
+    LOGI("event subscriber died (binder death) → disconnected");
+    evt_drop((awl_sub*)cookie);
+}
+
+/* One event send (oneway; same parcel rules as ctrl_send_ints). title is
+ * appended when non-null (AWL_E_CREATED carries the first title). */
+static bool evt_send(awl_sub* s, transaction_code_t code, uint64_t id, const char* title) {
+    if (!AIBinder_associateClass(s->listener, k_evt_class)) {
+        ctrl_fail(code, "associateClass", STATUS_INVALID_OPERATION);
+        return false;
+    }
+    AParcel* in = nullptr;
+    binder_status_t st = AIBinder_prepareTransaction(s->listener, &in);
+    if (st != STATUS_OK || !in) { ctrl_fail(code, "prepareTransaction", st); return false; }
+    if (AParcel_writeInt64(in, (int64_t)id) != STATUS_OK ||
+        (title && AParcel_writeString(in, title, (int32_t)strlen(title)) != STATUS_OK)) {
+        AParcel_delete(in);
+        return false;
+    }
+    return ctrl_transact(s->listener, code, &in);
+}
+
+/* Push one event to every matching subscriber. owner = the window's wayland
+ * client uid, resolved by the CALLER (awl_window_client_uid takes the logic
+ * layer's rwl and must never run under g_state_lock); (uid_t)-1 reaches
+ * allowlisted subscribers only (never equals a real binder uid). Snapshot +
+ * incStrong under the lock, sends outside it; a failed send (frozen/dead
+ * app) drops the subscription — self-healing. */
+static void evt_dispatch(uid_t owner, uint64_t id, transaction_code_t code, const char* title) {
+    struct target { awl_sub* s; AIBinder* l; uid_t u; };   /* copies: s may be freed mid-loop */
+    std::vector<target> targets;
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        targets.reserve(g_subs.size());
+        for (awl_sub* s : g_subs)
+            if (s->all || s->uid == owner) {
+                AIBinder_incStrong(s->listener);   /* pinned across the out-of-lock send */
+                targets.push_back({s, s->listener, s->uid});
+            }
+    }
+    for (target& t : targets) {
+        if (evt_send(t.s, code, id, title)) {
+            AIBinder_decStrong(t.l);   /* the pinned reference */
+            continue;
+        }
+        LOGE("event uid=%u: send failed (paused/frozen?) → disconnected", t.u);
+        evt_drop(t.s);          /* drops the subscription's own ref; ours below is last */
+        AIBinder_decStrong(t.l);
+    }
+}
+
+/* Paused-subscriber watchdog (own thread, started in main): every 2s read
+ * each subscriber's /proc/<pid>/oom_score_adj — an app whose activities are
+ * all paused and whose process fell to background sits at previous-app/
+ * cached level (700/900+; foreground 0, foreground-service ~300, visible
+ * ~100-200). ≥600 → treat as paused → disconnect; the app re-subscribes on
+ * resume. A vanished pid (process gone) drops too — the death callback
+ * covers it, this is the belt to those braces; other read failures (procfs
+ * hiccup) leave the subscription alone. */
+static void evt_watchdog_fn(void) {
+    struct item { awl_sub* s; pid_t pid; };   /* pid copied: s may be freed mid-scan */
+    for (;;) {
+        sleep(2);
+        std::vector<item> snap;
+        {
+            std::lock_guard<std::mutex> lk(g_state_lock);
+            snap.reserve(g_subs.size());
+            for (awl_sub* s : g_subs) snap.push_back({s, s->pid});
+        }
+        for (const item& it : snap) {
+            if (it.pid <= 0) continue;
+            char path[48];
+            snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", it.pid);
+            FILE* f = fopen(path, "re");
+            if (!f) {
+                if (errno == ESRCH || errno == ENOENT) {
+                    LOGI("event subscriber pid=%d gone → disconnected", it.pid);
+                    evt_drop(it.s);
+                }
+                continue;
+            }
+            int adj = 0;
+            int n = fscanf(f, "%d", &adj);
+            fclose(f);
+            if (n == 1 && adj >= 600) {
+                LOGI("event subscriber pid=%d paused (oom_score_adj=%d) → disconnected",
+                     it.pid, adj);
+                evt_drop(it.s);
+            }
+        }
+    }
 }
 
 static void on_token_died(void* cookie) {
@@ -469,6 +648,10 @@ static void cb_window_created(void* user, uint64_t id, int32_t pref_w, int32_t p
         snprintf(ws.title, sizeof(ws.title), "%s", title ? title : "");
         ws.attached = false;
     }
+    /* lifecycle event: subscribers learn the window immediately (own-uid
+     * scope for normal apps; the title rides along so a list UI can render
+     * the row without a follow-up LIST) */
+    evt_dispatch(awl_window_client_uid(id), id, AWL_E_CREATED, title ? title : "");
     /* auto-attach (config.json "auto_attach", default false): off = the window
      * waits for a binder SURFACE — the uid pass lets the wayland client app
      * itself attach its own windows */
@@ -486,6 +669,10 @@ static void cb_window_created(void* user, uint64_t id, int32_t pref_w, int32_t p
 
 static void cb_window_destroyed(void* user, uint64_t id) {
     LOGI("window %llu destroyed", (unsigned long long)id);
+    /* the window still resolves here (callback fires before the logic layer
+     * unlinks the surface) — snapshot the owner for the destroy event; a
+     * lookup after the erase below would read (uid_t)-1 */
+    uid_t owner = awl_window_client_uid(id);
     awl_renderer_attach(id, nullptr);
     AIBinder* ctrl = nullptr;
     bool sched_drop = false;      /* was attached → restore the client's cgroups */
@@ -524,6 +711,10 @@ static void cb_window_destroyed(void* user, uint64_t id) {
                AWL_PKG, (unsigned long long)id);
     else
         LOGI("window %llu: CLOSE sent via ctrl channel", (unsigned long long)id);
+    /* lifecycle event: subscribed list UIs (e.g. the APK's MainActivity)
+     * drop the row — the Activity side is finished by the ctrl/broadcast
+     * paths above, events never target WlWindowActivity itself */
+    evt_dispatch(owner, id, AWL_E_DESTROYED, nullptr);
 }
 
 static void cb_window_title(void* user, uint64_t id, const char* title) {
@@ -1118,14 +1309,21 @@ static bool caller_allowlisted(void) {
 }
 
 /* Entry gate for host_on_transact. Denials log one line per uid (an abusive
- * caller must not flood the log). SURFACE from a non-allowlisted uid is NOT
- * dropped here: the handler applies the per-window auth pass — the window of
- * a wayland client may only be attached by an app running under that same
- * uid (wayland socket credentials == binder uid). Every other code keeps
+ * caller must not flood the log). SURFACE / SUBSCRIBE / UNSUBSCRIBE / LIST
+ * from a non-allowlisted uid are NOT dropped here: the handlers scope them
+ * to the caller's own windows — SURFACE per window (the window of a wayland
+ * client may only be attached by an app running under that same uid:
+ * wayland socket credentials == binder uid), the events and the list per
+ * uid (a normal app only ever sees its own windows). Every other code keeps
  * the allowlist-only behavior. */
 static bool caller_ok(transaction_code_t code) {
     if (caller_allowlisted()) return true;
-    if (code == AWL_T_SURFACE) return true;   /* decided per-window in the handler */
+    /* per-caller-scope transactions: SURFACE (per-window uid pass in the
+     * handler) plus the subscription/list pair — normal apps see only their
+     * own uid's windows, the filters live in the handlers */
+    if (code == AWL_T_SURFACE || code == AWL_T_LIST ||
+        code == AWL_T_SUBSCRIBE || code == AWL_T_UNSUBSCRIBE)
+        return true;
 
     uid_t u = AIBinder_getCallingUid();
     static std::mutex rej_lock;
@@ -1266,6 +1464,9 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
                  (long long)host);
             ctrl_send(evicted, AWL_C_CLOSE);   /* old Activity kills itself (finish) */
             AIBinder_decStrong(evicted);
+            /* lifecycle event: the attach below flips it right back — a
+             * subscriber sees the detach/attach pair as one holder change */
+            evt_dispatch(awl_window_client_uid(id), id, AWL_E_DETACHED, nullptr);
         }
         if (gone) {
             awl_renderer_attach(id, nullptr);   /* rollback (outside the lock; join holds no lock) */
@@ -1290,6 +1491,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
         awl_renderer_request_render(id);     /* render a first frame */
+        evt_dispatch(awl_window_client_uid(id), id, AWL_E_ATTACHED, nullptr);
         LOGI("SURFACE %llu %dx%d → attached (host=%lld)",
              (unsigned long long)id, w, h, (long long)host);
         AParcel_writeInt32(out, 0);
@@ -1307,6 +1509,65 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             AParcel_writeByteArray(out, (const int8_t*)px, w * h * 4);
             free(px);
         }
+        return STATUS_OK;
+    }
+    case AWL_T_SUBSCRIBE: {   /* window lifecycle events (caller_ok already let normal apps
+                                * through — scope is decided per event by the uid filter) */
+        AIBinder* l = nullptr;
+        if (AParcel_readStrongBinder(in, &l) != STATUS_OK || !l)
+            return STATUS_BAD_VALUE;
+        if (!AIBinder_associateClass(l, k_evt_class)) {   /* descriptor check (same lesson as ICtrl) */
+            LOGE("SUBSCRIBE: listener is not %s", AWL_EVT_DESC);
+            AIBinder_decStrong(l);
+            AParcel_writeInt32(out, -1);
+            return STATUS_OK;
+        }
+        /* same listener re-subscribed (app re-acquiring after a daemon
+         * restart, or a double acquire): keep the existing registration —
+         * the freshly read reference is dropped, the stored one survives */
+        awl_sub* s = new awl_sub();
+        s->listener = l;   /* tentative: takes the read reference if stored */
+        s->uid = AIBinder_getCallingUid();
+        s->pid = AIBinder_getCallingPid();   /* valid: SUBSCRIBE is two-way */
+        s->all = caller_allowlisted();
+        bool dup = false;
+        {
+            std::lock_guard<std::mutex> lk(g_state_lock);
+            for (awl_sub* e : g_subs)
+                if (e->listener == l) { dup = true; break; }
+            if (!dup) g_subs.push_back(s);
+        }
+        if (dup) {
+            AIBinder_decStrong(l);
+            delete s;
+        } else {
+            /* log BEFORE the link: on an already-dead peer the death callback
+             * can free s inside AIBinder_linkToDeath */
+            LOGI("event subscriber uid=%u pid=%d scope=%s",
+                 s->uid, s->pid, s->all ? "all windows" : "own uid");
+            AIBinder_linkToDeath(l, k_evt_death, s);
+        }
+        AParcel_writeInt32(out, 0);
+        return STATUS_OK;
+    }
+    case AWL_T_UNSUBSCRIBE: {   /* the app reports its own pause (Activity onPause); the watchdog backstops */
+        AIBinder* l = nullptr;
+        if (AParcel_readStrongBinder(in, &l) != STATUS_OK || !l)
+            return STATUS_BAD_VALUE;
+        awl_sub* found = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_state_lock);
+            for (auto it = g_subs.begin(); it != g_subs.end(); ++it)
+                if ((*it)->listener == l) { found = *it; g_subs.erase(it); break; }
+        }
+        if (found) {
+            AIBinder_unlinkToDeath(found->listener, k_evt_death, found);
+            AIBinder_decStrong(found->listener);   /* the subscription's reference */
+            delete found;
+            LOGI("event subscriber unsubscribed (pause reported)");
+        }
+        AIBinder_decStrong(l);   /* the read reference */
+        AParcel_writeInt32(out, 0);
         return STATUS_OK;
     }
     case AWL_T_CLOSE: {   /* list long-press menu "close": daemon fully owns window close (graceful client exit) */
@@ -1596,6 +1857,13 @@ int main(int argc, char** argv) {
                                          ctrl_on_create, ctrl_on_destroy,
                                          ctrl_on_transact);
     if (!k_ctrl_class) { LOGE("AIBinder_Class_define(ctrl) failed"); return 1; }
+    k_evt_death = AIBinder_DeathRecipient_new(on_evt_died);
+    if (!k_evt_death) { LOGE("DeathRecipient(events) alloc failed"); return 1; }
+    k_evt_class = AIBinder_Class_define(AWL_EVT_DESC,
+                                        ctrl_on_create, ctrl_on_destroy,
+                                        ctrl_on_transact);   /* inert endpoint shape: the daemon accepts no subscriber-direction commands, the class exists for associateClass */
+    if (!k_evt_class) { LOGE("AIBinder_Class_define(events) failed"); return 1; }
+    std::thread(evt_watchdog_fn).detach();   /* paused-subscriber auto-disconnect */
     AIBinder* svc = AIBinder_new(k_binder_class, nullptr);
     binder_status_t st = g_addService(svc, AWL_BINDER_NAME);
     if (st != STATUS_OK) {
