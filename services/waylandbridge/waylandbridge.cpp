@@ -115,6 +115,8 @@ enum {
                            config.json (daemon is the single source of truth; APK only reads/writes values) */
     AWL_T_CLOSE   = 14,  /* (id:i64) → ok:i32; list long-press "close": request graceful
                             client exit (xdg toplevel.close / X WM_DELETE_WINDOW) */
+    AWL_T_ICON    = 15,  /* (id:i64) → w:i32 h:i32 bytes[RGBA] — current toplevel icon
+                            (xdg-toplevel-icon-v1, best buffer, w=0 = none) */
 };
 
 /* control channel (daemon → Activity, delivered over the binder object
@@ -145,6 +147,10 @@ enum {
                                  honored while the window is visible = the
                                  protocol's visible-surface semantics), 0 →
                                  clears it */
+#define AWL_C_ICON 10         /* (has:i32) xdg-toplevel-icon-v1 icon applied or
+                                 reset on this window's toplevel → the Activity
+                                 re-fetches the pixels (AWL_T_ICON) and re-applies
+                                 its task description */
 #define AWL_CTRL_DESC "anland.ICtrl"
 
 /* ---------------- window state table ---------------- */
@@ -524,6 +530,20 @@ static void cb_window_title(void* user, uint64_t id, const char* title) {
     }
 }
 
+/* window ctrl snapshot (definition below; used here before its block) */
+static AIBinder* ctrl_of(uint64_t id);
+
+/* toplevel icon applied/reset (xdg-toplevel-icon-v1, awl_icon.c): the Recents
+ * icon follows; pixels are pulled per change over AWL_T_ICON */
+static void cb_window_icon(void* user, uint64_t id) {
+    AIBinder* ctrl = ctrl_of(id);
+    if (!ctrl) return;   /* no Activity attached: the fresh instance re-fetches at attach */
+    int32_t args[1] = { 1 };
+    ctrl_send_ints(ctrl, AWL_C_ICON, args, 1);
+    AIBinder_decStrong(ctrl);
+    LOGI("window %llu: toplevel icon changed", (unsigned long long)id);
+}
+
 /* ---------------- IME bridge (text-input protocol ↔ Android IME, passthrough model) ---- */
 
 /* window ctrl snapshot (taken under g_state_lock, transacted outside the lock: incStrong keeps it alive) */
@@ -768,6 +788,7 @@ static awl_window_callbacks_t k_cbs = {
     .window_created = cb_window_created,
     .window_destroyed = cb_window_destroyed,
     .window_title = cb_window_title,
+    .window_icon = cb_window_icon,
     .pointer_lock = cb_pointer_lock,
     .window_dirty = cb_window_dirty,
     .ime_show = cb_ime_show,
@@ -1236,6 +1257,20 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         LOGI("SURFACE %llu %dx%d → attached (host=%lld)",
              (unsigned long long)id, w, h, (long long)host);
         AParcel_writeInt32(out, 0);
+        return STATUS_OK;
+    }
+    case AWL_T_ICON: {   /* current toplevel icon → RGBA bytes (Recents icon, xdg-toplevel-icon-v1) */
+        int64_t id64;
+        AParcel_readInt64(in, &id64);
+        void* px = nullptr;
+        int32_t w = 0, h = 0;
+        awl_window_get_icon((uint64_t)id64, &px, &w, &h);
+        AParcel_writeInt32(out, w);
+        AParcel_writeInt32(out, h);
+        if (px) {
+            AParcel_writeByteArray(out, (const int8_t*)px, w * h * 4);
+            free(px);
+        }
         return STATUS_OK;
     }
     case AWL_T_CLOSE: {   /* list long-press menu "close": daemon fully owns window close (graceful client exit) */

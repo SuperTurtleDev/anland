@@ -245,6 +245,8 @@ static void surface_destroy_impl(struct wl_resource* res) {
     /* idle inhibitors on this surface / its root die with it: C_KEEPON off
      * after the lock, when the window's aggregate flipped to zero */
     uint64_t idle_win = awl_idle_surface_gone(s);
+    /* the toplevel icon (pending + applied) dies with its surface */
+    awl_icon_surface_gone(s);
 
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
@@ -549,6 +551,10 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
     if (replaced)
         awl_surface_release_defer(s, old);
     pthread_mutex_unlock(&s->ev_lock);
+
+    /* xdg-toplevel-icon: pending icon state applies on every commit (empty
+     * included); awl_icon_commit fires its callback itself, outside ev_lock */
+    awl_icon_commit(s);
 
     /* cursor image committed with an attach offset → hotspot follows (kwin
      * SurfaceCursorSource::refresh: hotspot -= offset); outside ev_lock

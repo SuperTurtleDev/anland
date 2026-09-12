@@ -283,6 +283,7 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     awl_viewport_setup();     /* wp_viewporter + fractional-scale (#31 zoom) */
     awl_xwayland_setup();     /* xwayland_shell_v1 (Xwayland rootless, #32) */
     awl_idle_setup();         /* zwp_idle_inhibit_manager_v1 (keep-screen-on, C_KEEPON) */
+    awl_icon_setup();         /* xdg_toplevel_icon_manager_v1 (per-window icons, C_ICON) */
 
     g_srv.g_output = wl_global_create(g_srv.display, &wl_output_interface, 3,
                                       NULL, output_bind);

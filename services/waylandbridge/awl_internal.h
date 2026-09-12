@@ -397,6 +397,19 @@ void awl_idle_setup(void);
 uint64_t awl_idle_surface_gone(struct awl_surface* s);
 void awl_idle_gone_notify(uint64_t win);
 
+/* awl_icon.c — xdg_toplevel_icon_v1 (per-window Recents icons; pixels are
+ * copied at add_buffer, so the applied icon survives icon-object and buffer
+ * destruction like the spec's lifetime rules; entries under g_icon_lock,
+ * keyed by the toplevel's surface id):
+ *  - commit: called from surface_commit (no logic lock held; that surface's
+ *    ev_lock may be held — the C_ICON callback fires from awl_icon_commit
+ *    itself, outside ev_lock).
+ *  - surface_gone: caller holds rwl.wr (awl_surface.c destroy path); drops
+ *    the window's pending + applied icon with the surface. */
+void awl_icon_setup(void);
+void awl_icon_commit(struct awl_surface* s);
+void awl_icon_surface_gone(struct awl_surface* s);
+
 /* awl_data_device.c — wl_data_device_manager v3 (full selection + DnD state
  * machine, semantics aligned with kwin-6.6.5; see the file-header lock note).
  * Input hooks must not be entered holding rwl (they take it internally; motion

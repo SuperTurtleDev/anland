@@ -38,6 +38,7 @@ public final class WlBinder {
     public static final int T_CFG_GET = 12;   /* (key) → val: read a daemon config (#31) */
     public static final int T_CFG_SET = 13;   /* (key,val) → ok: apply + persist in daemon (#31) */
     public static final int T_CLOSE = 14;     /* (id) → ok: long-press "Close" in window list (the only close entry) */
+    public static final int T_ICON = 15;      /* (id) → w:i32 h:i32 bytes[RGBA]: toplevel icon (xdg-toplevel-icon-v1) */
 
     /* AWL_T_IME ops (match awl.h AWL_IME_*) */
     public static final int IME_COMMIT = 1;   /* text: commit */
@@ -321,6 +322,37 @@ public final class WlBinder {
             Log.e(TAG, "CFG_SET failed", e);
             s = null;
             return -1;
+        } finally {
+            d.recycle();
+            r.recycle();
+        }
+    }
+
+    /* ---- Toplevel icon fetch (xdg-toplevel-icon-v1: the daemon keeps the
+     *      pixels the client sent; field order matches daemon AWL_T_ICON:
+     *      id:i64 → w:i32 h:i32 bytes[RGBA]) ---- */
+
+    /** Current toplevel icon as RGBA bytes (Bitmap ARGB_8888 order);
+     *  outWH[0]/[1] receive the dimensions. Returns null when the window
+     *  has no icon (or the daemon is gone). */
+    public static byte[] icon(long id, int[] outWH) {
+        IBinder b = get();
+        if (b == null) return null;
+        Parcel d = Parcel.obtain();
+        Parcel r = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeLong(id);
+            b.transact(T_ICON, d, r, 0);
+            if (r.dataSize() < 8) return null;
+            int w = r.readInt();
+            int h = r.readInt();
+            if (outWH != null && outWH.length >= 2) { outWH[0] = w; outWH[1] = h; }
+            return w > 0 && h > 0 ? r.createByteArray() : null;
+        } catch (Exception e) {
+            Log.e(TAG, "ICON failed", e);
+            s = null;
+            return null;
         } finally {
             d.recycle();
             r.recycle();

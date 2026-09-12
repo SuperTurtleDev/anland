@@ -36,6 +36,14 @@ typedef struct awl_window_callbacks {
     void (*window_destroyed)(void* user, uint64_t id);
     void (*window_title)(void* user, uint64_t id, const char* title);
 
+    /* Toplevel icon applied/reset (xdg-toplevel-icon-v1, awl_icon.c): the
+     * double-buffered set_icon state took effect at the toplevel's surface
+     * commit (a reset notifies too — the fetch then returns "none"). Pure
+     * state sync on the client's dispatch thread → the adaptation layer
+     * tells the Activity over C_ICON; the pixels are pulled per change with
+     * awl_window_get_icon. */
+    void (*window_icon)(void* user, uint64_t id);
+
     /* Pointer constraint state change (zwp_pointer_constraints_v1
      * lock/confine request, set_region on a live constraint, or object /
      * surface destruction — pure state sync, always on the client's
@@ -154,6 +162,11 @@ pid_t awl_window_client_pid(uint64_t id);   /* window id → client host pid, re
 uid_t awl_window_client_uid(uint64_t id);   /* window id → wayland client uid
     * ((uid_t)-1 = unknown/destroyed) — binder SURFACE auth pass compares it
     * against the attaching app's binder uid */
+
+/* window id → current toplevel icon (xdg-toplevel-icon-v1, awl_icon.c):
+ * best available buffer (largest width×scale), swizzled to RGBA bytes
+ * (malloc'd, caller frees). w/h = pixel dims. 0 = the window has no icon. */
+int awl_window_get_icon(uint64_t id, void** pixels, int32_t* w, int32_t* h);
 /* Foreground scheduling (awl_sched.c): on = move pid's whole /proc subtree
  * into Android's top-app cgroups, off = back to the root groups. Stateless
  * and synchronous — the adapter calls it on window attach/detach and with

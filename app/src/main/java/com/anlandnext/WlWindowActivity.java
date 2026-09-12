@@ -100,6 +100,11 @@ public class WlWindowActivity extends Activity {
                                                   while the window is visible = the
                                                   protocol's visible-surface semantics),
                                                   0 → clear; re-sent on re-attach */
+    private static final int C_ICON = 10;      /* (has:i32) xdg-toplevel-icon-v1 icon
+                                                  applied/reset on this window's
+                                                  toplevel → re-fetch the pixels
+                                                  (WlBinder.icon) and re-apply the
+                                                  task description */
     private static final int STATE_RESET = 0x1;   /* v1 reset → clear composing state + restartInput */
     private static final int CAPTURE_NONE = 0;
     private static final int CAPTURE_CONFINE = 1;
@@ -120,6 +125,8 @@ public class WlWindowActivity extends Activity {
     private boolean attached;
     private boolean finishingByGone;   /* client closed the window / evicted, nothing left to report */
     private boolean deathLinked;       /* daemon death monitoring attached */
+    private String taskTitle;          /* last known client title (Recents label) */
+    private android.graphics.Bitmap taskIcon;   /* last fetched toplevel icon (xdg-toplevel-icon-v1) */
 
     /* ---- Clipboard bridge (#29; static shared = consistent across windows,
      *      single process) ----
@@ -178,9 +185,10 @@ public class WlWindowActivity extends Activity {
             }
             if (code == C_TITLE) {
                 String t = data.readString();
-                if (t != null && !t.isEmpty())
-                    runOnUiThread(() -> setTaskDescription(
-                            new android.app.ActivityManager.TaskDescription(t)));
+                if (t != null && !t.isEmpty()) {
+                    taskTitle = t;
+                    runOnUiThread(() -> applyTaskDescription());
+                }
                 return true;
             }
             if (code == C_IME_SHOW) {
@@ -225,6 +233,11 @@ public class WlWindowActivity extends Activity {
             if (code == C_KEEPON) {
                 final boolean on = data.readInt() != 0;
                 runOnUiThread(() -> applyKeepOn(on));
+                return true;
+            }
+            if (code == C_ICON) {
+                data.readInt();   /* has flag — always re-fetch (reset ⇒ fetch returns none) */
+                applyTaskIconAsync();
                 return true;
             }
             return super.onTransact(code, data, reply, flags);
@@ -279,8 +292,10 @@ public class WlWindowActivity extends Activity {
             imeWanted = false;
             LIVE.put(id, this);
             String nt = intent.getStringExtra("title");
-            if (nt != null && !nt.isEmpty())
-                setTaskDescription(new android.app.ActivityManager.TaskDescription(nt));
+            if (nt != null && !nt.isEmpty()) {
+                taskTitle = nt;
+                applyTaskDescription();
+            }
             Log.i(TAG, "win re-bound to id=" + id);
         }
     }
@@ -299,8 +314,10 @@ public class WlWindowActivity extends Activity {
 
         /* Recents shows the wayland window's real title (the UI itself has no title bar, only the task label) */
         String title = getIntent().getStringExtra("title");
-        if (title != null && !title.isEmpty())
-            setTaskDescription(new android.app.ActivityManager.TaskDescription(title));
+        if (title != null && !title.isEmpty()) {
+            taskTitle = title;
+            applyTaskDescription();
+        }
 
         /* Long-lived binder death monitoring: daemon gone (module restart / killed) → exit, no dead windows left behind */
         deathLinked = WlBinder.monitorDeath(daemonDeath);
@@ -372,6 +389,40 @@ public class WlWindowActivity extends Activity {
             android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
     }
 
+    /** Recents entry: last known client title + last fetched toplevel icon.
+     *  TaskDescription is atomic — every label update must re-carry the icon
+     *  or it is silently dropped. */
+    private void applyTaskDescription() {
+        if (taskTitle == null && taskIcon == null) return;
+        android.app.ActivityManager.TaskDescription td = taskIcon != null
+                ? new android.app.ActivityManager.TaskDescription(taskTitle, taskIcon)
+                : new android.app.ActivityManager.TaskDescription(taskTitle);
+        setTaskDescription(td);
+    }
+
+    /** Pull the daemon's stored toplevel icon (xdg-toplevel-icon-v1 pixels,
+     *  AWL_T_ICON) off the UI thread, then swap the task description. */
+    private void applyTaskIconAsync() {
+        final long fid = id;
+        new Thread(() -> {
+            int[] wh = new int[2];
+            byte[] px = WlBinder.icon(fid, wh);
+            android.graphics.Bitmap bmp = null;
+            if (px != null && wh[0] > 0 && wh[1] > 0) {
+                try {
+                    bmp = android.graphics.Bitmap.createBitmap(
+                            wh[0], wh[1], android.graphics.Bitmap.Config.ARGB_8888);
+                    bmp.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(px));
+                } catch (Exception e) {
+                    Log.w(TAG, "toplevel icon decode failed", e);
+                    bmp = null;
+                }
+            }
+            final android.graphics.Bitmap fb = bmp;
+            runOnUiThread(() -> { taskIcon = fb; applyTaskDescription(); });
+        }, "awl-icon").start();
+    }
+
     /** Report the Surface to the daemon (shared by first attach / resume re-attach).
      *  rc != 0 (service gone / window missing / attach failed) → exit, no
      *  placeholder instance left behind */
@@ -383,7 +434,9 @@ public class WlWindowActivity extends Activity {
         if (!attached) {
             Log.e(TAG, "win " + id + " surface binder rc=" + rc + " -> finish");
             finish();
+            return;
         }
+        applyTaskIconAsync();   /* the daemon may already hold an icon (re-attach / set before map) */
     }
 
     /* ---- Clipboard bridge (#29) ----

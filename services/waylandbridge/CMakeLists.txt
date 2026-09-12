@@ -154,6 +154,21 @@ add_custom_command(
           ${AWL_GENERATED}/idle-inhibit-unstable-v1-protocol.c
   DEPENDS ${II_XML})
 
+# xdg-toplevel-icon v1 protocol codegen (per-window Recents icons,
+# awl_icon.c in this dir — applied icon → C_ICON, the Activity pulls the
+# pixels over AWL_T_ICON and puts them in the task description)
+set(XTI_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/xdg-toplevel-icon-v1.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/xdg-toplevel-icon-v1-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${XTI_XML}
+          ${AWL_GENERATED}/xdg-toplevel-icon-v1-server-protocol.h
+  DEPENDS ${XTI_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/xdg-toplevel-icon-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${XTI_XML}
+          ${AWL_GENERATED}/xdg-toplevel-icon-v1-protocol.c
+  DEPENDS ${XTI_XML})
+
 # xwayland-shell v1 protocol codegen (Xwayland rootless window association,
 # awl_xwayland.c in this dir)
 set(XWLS_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/xwayland-shell-v1.xml)
@@ -236,6 +251,7 @@ add_executable(waylandbridge
   awl_viewport.c
   awl_xwayland.c
   awl_idle.c
+  awl_icon.c
   awl_sched.c
   ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
   ${AWL_GENERATED}/xwayland-shell-v1-server-protocol.h
@@ -245,6 +261,8 @@ add_executable(waylandbridge
   ${AWL_GENERATED}/pointer-constraints-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/idle-inhibit-unstable-v1-protocol.c
   ${AWL_GENERATED}/idle-inhibit-unstable-v1-server-protocol.h
+  ${AWL_GENERATED}/xdg-toplevel-icon-v1-protocol.c
+  ${AWL_GENERATED}/xdg-toplevel-icon-v1-server-protocol.h
   ${AWL_GENERATED}/viewporter-protocol.c
   ${AWL_GENERATED}/viewporter-server-protocol.h
   ${AWL_GENERATED}/fractional-scale-v1-protocol.c
