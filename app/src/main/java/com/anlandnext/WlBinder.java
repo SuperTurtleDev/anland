@@ -44,6 +44,8 @@ public final class WlBinder {
     public static final int T_ICON = 15;      /* (id) → w:i32 h:i32 bytes[RGBA]: toplevel icon (xdg-toplevel-icon-v1) */
     public static final int T_SUBSCRIBE = 16;   /* (eventBinder) → ok: window lifecycle events pushed to it (WindowEvents) */
     public static final int T_UNSUBSCRIBE = 17; /* (eventBinder) → ok: stop events (onPause; daemon watchdog backstops) */
+    /* T_CONNECT = 18 (wayland fd over binder, #36) is third-party-app only —
+     * this APK never uses it; the protocol lives in waylandbridge.cpp */
 
     /* Event codes on the event binder (match the daemon's AWL_E_*) */
     public static final int E_CREATED = 1;   /* (id:i64, title:string16) */

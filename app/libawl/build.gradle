@@ -1,0 +1,36 @@
+// Third-party client library for the anland daemon ("anland.host" binder
+// service): wayland connection fd over binder, window list/events, and the
+// window-hosting Activity. No external dependencies — the daemon does all
+// rendering. One small native helper (libawlspawn.so) provides the
+// fork+exec fd handoff Java cannot express.
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.anlandnext.awl'
+    compileSdk 36
+    ndkVersion '29.0.13113456'
+
+    defaultConfig {
+        minSdk 29
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=none'
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

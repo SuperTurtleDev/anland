@@ -70,7 +70,8 @@ native: check-tools
 	cmake --build "$(BUILD)" -j$$(nproc)
 	mkdir -p "$(OUT)"
 	cp -f "$(BUILD)/out/waylandbridge" "$(OUT)/"
-	ls -la "$(OUT)/waylandbridge"
+	cp -f "$(BUILD)/out/libawlshm.so" "$(OUT)/"
+	ls -la "$(OUT)/waylandbridge" "$(OUT)/libawlshm.so"
 
 # ---------------- native with LOGD hot-path tracing (development) ----------------
 # Separate build dir so switching does not thrash the release cache; output is
@@ -84,10 +85,12 @@ native-debug: check-tools
 	cp -f "$(BUILD_DBG)/out/waylandbridge" "$(OUT)/waylandbridge-debug"
 	ls -la "$(OUT)/waylandbridge-debug"
 
-# ---------------- APK (gradle: app/ → AGP, artifacts collected into build/) ----------------
+# ---------------- APK + third-party AAR (gradle: app/ → AGP, artifacts collected into build/) ----------------
 # Pure-Java APK: rendering/protocol all live in the root daemon — no
 # dependencies, no native libs. Signed with app/debug.keystore (gitignored;
 # bootstrapped here with keytool when missing).
+# :libawl = third-party client library (wayland fd / window list / events /
+# window hosting) — published as build/anland-awllib.aar.
 apk: check-tools
 	KS=app/debug.keystore
 	if [ ! -f "$$KS" ]; then
@@ -95,11 +98,26 @@ apk: check-tools
 	    -storepass anland -keypass anland -keyalg RSA -keysize 2048 \
 	    -validity 10000 -dname "CN=Anland Debug" >/dev/null 2>&1
 	fi
-	(cd app && ./gradlew --no-daemon -q assembleRelease)
+	(cd app && ./gradlew --no-daemon -q assembleRelease :libawl:assembleRelease)
 	cp -f app/build/outputs/apk/release/anland-wayland-release.apk "$(OUT)/anland-wayland.apk"
+	cp -f app/libawl/build/outputs/aar/libawl-release.aar "$(OUT)/anland-awllib.aar"
 	"$(BT)/apksigner" verify --print-certs "$(OUT)/anland-wayland.apk" | head -3
-	ls -la "$(OUT)/anland-wayland.apk"
-	echo "OK: $(OUT)/anland-wayland.apk"
+	ls -la "$(OUT)/anland-wayland.apk" "$(OUT)/anland-awllib.aar"
+	echo "OK: $(OUT)/anland-wayland.apk + $(OUT)/anland-awllib.aar"
+
+# ---------------- Test app APK (third-party-path harness, #36) ----------------
+# Packages libawlshm.so (built by `make native`) into :testapp's jniLibs and
+# builds com.anlandtest — a separate uid exercising the full third-party
+# path: binder wayland fd (fork-inherited WAYLAND_SOCKET), own-uid window
+# list/events, self-hosted windows via libawl.
+testapk: native
+	mkdir -p app/testapp/src/main/jniLibs/arm64-v8a
+	cp -f "$(OUT)/libawlshm.so" app/testapp/src/main/jniLibs/arm64-v8a/libawlshm.so
+	(cd app && ./gradlew --no-daemon -q :testapp:assembleRelease)
+	cp -f app/testapp/build/outputs/apk/release/testapp-release.apk "$(OUT)/anland-testapp.apk"
+	"$(BT)/apksigner" verify --print-certs "$(OUT)/anland-testapp.apk" | head -3
+	ls -la "$(OUT)/anland-testapp.apk"
+	echo "OK: $(OUT)/anland-testapp.apk"
 
 # ---------------- SukiSU module zip ----------------
 # Template lives in module/ (module.prop / sepolicy.rule / service.sh /

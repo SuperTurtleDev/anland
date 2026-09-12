@@ -235,6 +235,49 @@ static int socket_accept(int fd, uint32_t mask, void* data) {
     return 0;
 }
 
+/* ---------------- Binder-injected clients (#36) ----------------
+ * A binder-thread hands in one end of an app-created socketpair
+ * (awl_server_add_client). wl_client_create manipulates the display's main
+ * event loop (add_fd on its source list) — that is loop-thread-only, so the
+ * fd travels over this pipe and the event loop itself does the create.
+ * The peer creds read by wl_client_create were fixed at socketpair creation
+ * in the app = the wayland client's real uid/pid (see awl.h). */
+
+static int g_inject_pipe[2] = {-1, -1};
+static struct wl_event_source* g_inject_src = NULL;
+
+static int inject_cb(int fd, uint32_t mask, void* data) {
+    if (!(mask & WL_EVENT_READABLE)) return 0;
+    char buf[256];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i + (ssize_t)sizeof(int) <= n; i += (ssize_t)sizeof(int)) {
+            int cfd;
+            memcpy(&cfd, buf + i, sizeof cfd);
+            struct wl_client* client = wl_client_create(g_srv.display, cfd);
+            if (!client) {
+                close(cfd);
+                LOGE("binder-injected client: wl_client_create failed");
+            }
+        }
+    }
+    return 0;
+}
+
+/* Any thread (binder). 0 = the event loop thread now owns the fd, <0 = the
+ * caller keeps it and closes it. */
+int awl_server_add_client(int fd) {
+    if (!g_srv.running || !g_inject_src || g_inject_pipe[1] < 0) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    char b[sizeof(int)];
+    memcpy(b, &fd, sizeof b);
+    if (write(g_inject_pipe[1], b, sizeof b) != (ssize_t)sizeof b)
+        return -1;
+    return 0;
+}
+
 /* (The wake marshalling pipe is gone — with the libwayland awl patches every
  * thread sends directly:
  *   input           → binder thread sends directly (awl_input_dispatch)
@@ -288,8 +331,30 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     g_srv.g_output = wl_global_create(g_srv.display, &wl_output_interface, 3,
                                       NULL, output_bind);
 
-    wl_event_loop_add_fd(g_srv.loop, listen_fd, WL_EVENT_READABLE,
-                         socket_accept, NULL);
+    if (listen_fd >= 0)
+        wl_event_loop_add_fd(g_srv.loop, listen_fd, WL_EVENT_READABLE,
+                             socket_accept, NULL);
+    else
+        LOGI("no listen socket — binder-injected clients only");
+
+    /* binder-fd handoff pipe (awl_server_add_client): CLOEXEC so am/exec
+     * children never inherit it, NONBLOCK so a binder thread can never
+     * stall on it (4 bytes per fd vs 64K pipe capacity — never full) */
+    if (pipe2(g_inject_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+        LOGE("inject pipe2: %s", strerror(errno));
+        wl_display_destroy(g_srv.display);
+        return -1;
+    }
+    g_inject_src = wl_event_loop_add_fd(g_srv.loop, g_inject_pipe[0],
+                                        WL_EVENT_READABLE, inject_cb, NULL);
+    if (!g_inject_src) {
+        LOGE("inject source add failed");
+        close(g_inject_pipe[0]);
+        close(g_inject_pipe[1]);
+        g_inject_pipe[0] = g_inject_pipe[1] = -1;
+        wl_display_destroy(g_srv.display);
+        return -1;
+    }
 
     g_srv.running = 1;
     if (pthread_create(&g_srv.thread, NULL, server_thread, NULL) != 0) {
@@ -329,6 +394,14 @@ void awl_server_stop(void) {
     /* 2. Main event thread exits (accept / unmigrated client dispatch) */
     wl_display_terminate(g_srv.display);
     pthread_join(g_srv.thread, NULL);
+
+    /* inject pipe down (event thread joined → no concurrent callback;
+     * libwayland's source remove does not close the fd — close both ends
+     * ourselves, before wl_display_destroy could allocate over them) */
+    if (g_inject_src) { wl_event_source_remove(g_inject_src); g_inject_src = NULL; }
+    if (g_inject_pipe[0] >= 0) close(g_inject_pipe[0]);
+    if (g_inject_pipe[1] >= 0) close(g_inject_pipe[1]);
+    g_inject_pipe[0] = g_inject_pipe[1] = -1;
 
     /* 3. Join all sub-threads (each finishes its client destruction and teardown) */
     for (size_t i = 0; i < n; i++) pthread_join(tids[i], NULL);

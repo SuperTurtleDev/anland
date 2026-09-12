@@ -9,3 +9,9 @@ app/debug.keystore
 local.properties
 
 
+
+# testapp packaged native executable (built by make native)
+app/testapp/src/main/jniLibs/
+
+# gradle native build intermediates (libawl cmake)
+.cxx/

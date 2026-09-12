@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="Anland SHM Test"
+        android:allowBackup="false">
+
+        <!-- Launcher entry: start the wayland test client, watch the
+             window list/events, tap a window to host it (AwlWindowActivity
+             from libawl merges into this manifest → the window's Android
+             identity is THIS app). -->
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,60 @@
+// Third-party test app for the anland stack: launches the packaged shm
+// wayland client (libawlshm.so, exec'd from nativeLibraryDir with a
+// fork-inherited WAYLAND_SOCKET fd acquired over binder) and hosts its
+// windows through libawl — the whole third-party identity path (its own uid,
+// never the anland host APK's).
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.anlandnext.test'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.anlandtest'
+        minSdk 29
+        targetSdk 29
+        versionCode 1
+        versionName '0.1'
+    }
+
+    // extract the packaged "library" so nativeLibraryDir/libawlshm.so is an
+    // on-disk executable (Android 10+: apps may exec only there)
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    signingConfigs {
+        release {
+            storeFile rootProject.file('debug.keystore')
+            storePassword 'anland'
+            keyAlias 'anland'
+            keyPassword 'anland'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    lint {
+        // Sideloaded test app — never distributed via Google Play; targetSdk 29
+        // matches the host APK (legacy window semantics).
+        disable 'ExpiredTargetSdkVersion'
+    }
+}
+
+dependencies {
+    implementation project(':libawl')
+}

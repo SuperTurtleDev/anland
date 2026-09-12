@@ -10,7 +10,10 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-// Single-module project: the root project IS the application (no ':app'
-// child module) — gradle stays confined to app/, the awl repo root keeps
-// only the Makefile.
+// Root project IS the application (no ':app' child module) — gradle stays
+// confined to app/, the awl repo root keeps only the Makefile. Child
+// modules: libawl (third-party client AAR) and testapp (third-party-path
+// test harness APK).
 rootProject.name = "anland-wayland"
+include ':libawl'
+include ':testapp'

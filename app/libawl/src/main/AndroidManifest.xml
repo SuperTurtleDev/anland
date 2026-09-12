@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Window host, merged into the CONSUMING app's manifest: the wayland
+         window renders inside the third-party app's own task/process (Recents
+         identity, uid and binder credentials = that app — never the anland
+         host APK). One instance per window id (documentLaunchMode + unique
+         data URI); theme/configChanges mimic the host APK's activity. -->
+    <application>
+        <activity android:name="com.anlandnext.awl.AwlWindowActivity"
+            android:exported="false"
+            android:launchMode="standard"
+            android:documentLaunchMode="intoExisting"
+            android:excludeFromRecents="false"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
+    </application>
+</manifest>

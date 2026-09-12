@@ -132,12 +132,24 @@ typedef struct awl_display_info {
 } awl_display_info_t;
 
 /*
- * Start the server (listen_fd already bound+listening). Returns 0 on
- * success. The event loop owns a dedicated thread.
+ * Start the server (listen_fd already bound+listening; -1 = no accept
+ * source — pure binder-fd mode, clients arrive via awl_server_add_client
+ * only). Returns 0 on success. The event loop owns a dedicated thread.
  */
 int  awl_server_start(int listen_fd,
                       const awl_display_info_t* info,
                       const awl_window_callbacks_t* cbs);
+/* Binder-injected client (#36): hand one end of a caller-created socketpair
+ * to the server (called on a binder thread; the fd is marshalled onto the
+ * main event thread, which alone may run wl_client_create). SO_PEERCRED on
+ * that end is fixed at creation time to the CREATOR's credentials — the
+ * socketpair must be created by the wayland client app itself, never by
+ * this process (a daemon-created pair would stamp every client with the
+ * daemon's uid and collapse the window-ownership model). The app side uses
+ * wl_display_connect_to_fd on the other end. Returns 0 = handed off (the
+ * server owns the fd from here, whatever the outcome), <0 = refused (the
+ * caller keeps the fd and closes it). Any thread. */
+int  awl_server_add_client(int fd);
 void awl_server_stop(void);
 int  awl_server_is_running(void);
 

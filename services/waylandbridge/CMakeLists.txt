@@ -232,6 +232,59 @@ target_compile_definitions(wayland-server-static PRIVATE
   HAVE_MEMFD_CREATE=1 HAVE_ACCEPT4=1 HAVE_SYS_UCRED_H=0 HAVE_XUCRED_CR_PID=0
   HAVE_BROKEN_MSG_CMSG_CLOEXEC=0)
 
+# ---------------- libwayland-client (static, for the shm test app) ----------------
+# Client-flavor codegen: core client header + xdg-shell client header (the
+# private-code .c files are interface-agnostic and shared with the server).
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/wayland-client-protocol.h
+  COMMAND ${WAYLAND_SCANNER} client-header ${WAYLAND_SRC}/protocol/wayland.xml
+          ${AWL_GENERATED}/wayland-client-protocol.h
+  DEPENDS ${WAYLAND_SRC}/protocol/wayland.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/xdg-shell-client-protocol.h
+  COMMAND ${WAYLAND_SCANNER} client-header ${XDG_XML}
+          ${AWL_GENERATED}/xdg-shell-client-protocol.h
+  DEPENDS ${XDG_XML})
+
+add_library(wayland-client-static STATIC
+  ${WAYLAND_SRC}/src/wayland-client.c
+  ${WAYLAND_SRC}/src/connection.c
+  ${WAYLAND_SRC}/src/wayland-os.c
+  ${WAYLAND_SRC}/src/wayland-util.c
+  ${AWL_GENERATED}/wayland-protocol-core.c
+  ${AWL_GENERATED}/wayland-client-protocol.h
+)
+target_include_directories(wayland-client-static PUBLIC
+  ${WAYLAND_SRC}/src
+  ${AWL_GENERATED}
+  ${AWL_GENERATED}/config
+  ${AWL}/third_party/include
+  ${LIBFFI_DIR}/include)
+target_link_libraries(wayland-client-static PUBLIC ${LIBFFI_DIR}/lib/libffi.a)
+target_compile_options(wayland-client-static PRIVATE -Wno-unused-parameter -DHAVE_CONFIG_H=0)
+target_compile_definitions(wayland-client-static PRIVATE
+  HAVE_MEMFD_CREATE=1 HAVE_ACCEPT4=1 HAVE_SYS_UCRED_H=0 HAVE_XUCRED_CR_PID=0
+  HAVE_BROKEN_MSG_CMSG_CLOEXEC=0)
+
+# ---------------- SHM test app (third-party wayland client, #36) ----
+# Executable named like a shared library (libawlshm.so) so it packs into the
+# test APK's jniLibs and gets extracted to nativeLibraryDir (the only place
+# an app may exec on Android 10+); runtime: extractNativeLibs=true.
+# PURE wayland client: the connection fd arrives via the fork-inherited
+# WAYLAND_SOCKET env var — no binder here (a future glibc/proot build keeps
+# this file unchanged).
+add_executable(awlshm awl_shm_test.c
+  ${AWL_GENERATED}/xdg-shell-protocol.c
+  ${AWL_GENERATED}/xdg-shell-client-protocol.h)
+target_include_directories(awlshm PRIVATE ${AWL_GENERATED})
+target_link_libraries(awlshm PRIVATE wayland-client-static log)
+set_target_properties(awlshm PROPERTIES
+  OUTPUT_NAME awlshm
+  PREFIX "lib"
+  SUFFIX ".so"
+  RUNTIME_OUTPUT_DIRECTORY ${AWL_OUT}
+  COMPILE_OPTIONS "-Wno-unused-parameter")
+
 # ---------------- Single waylandbridge binary (root daemon, module install) ----
 # One executable target: logic layer (protocol state machines) + adaptation
 # layer (GPU renderer, binder host) compiled straight in — no adapt/logic
