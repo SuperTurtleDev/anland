@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_short_label">Configurações</string>
+
+    <!-- Titles / section headers -->
+    <string name="settings_title">Configurações</string>
+    <string name="section_virtual_keyboard">Tecla de Alternância do Teclado Virtual</string>
+    <string name="section_extra_keys">Barra de Teclas Extras</string>
+    <string name="section_custom_layout">Layout Customizado de Teclas Extras</string>
+    <string name="section_touchpad">Configurações de Touchpad</string>
+    <string name="section_connection">Conexão</string>
+    <string name="section_resolution">Resolução da Tela</string>
+    <string name="section_notification">Configuração da Notificação</string>
+
+    <!-- Settings home: category rows and back navigation -->
+    <string name="nav_back">‹ Voltar</string>
+    <string name="cat_keyboard_title">Teclado e Teclas</string>
+    <string name="cat_keyboard_subtitle">Mapeamento de teclas, modo imersivo, acessibilidade e barra de teclas extras</string>
+    <string name="cat_touchpad_title">Touchpad e Mouse</string>
+    <string name="cat_touchpad_subtitle">Modo touchpad, captura de ponteiro e sensibilidade</string>
+    <string name="cat_connection_subtitle">Socket, root, mic, câmera e latência do áudio</string>
+    <string name="cat_resolution_subtitle">Resolução de saída e presets</string>
+    <string name="cat_general_title">Geral</string>
+    <string name="cat_general_subtitle">Orientação da tela e notificação das configurações</string>
+
+    <!-- Screen orientation -->
+    <string name="section_orientation">Orientação da Tela</string>
+    <string name="orientation_label">Forçar orientação da tela</string>
+    <string-array name="orientation_options">
+        <item>Padrão (sistema)</item>
+        <item>Forçar paisagem</item>
+        <item>Forçar retrato</item>
+    </string-array>
+
+    <!-- Bind key -->
+    <string name="bind_key_button">Mapear Tecla de Alternância do Teclado Virtual</string>
+    <string name="raise_desktop_for_soft_keyboard">Elevar o desktop ao abrir o teclado virtual</string>
+    <string name="raise_desktop_for_soft_keyboard_hint">Quando ativado, o desktop encolhe e sobe para que você veja o que está digitando.</string>
+    <string name="listening_countdown">Ouvindo… (%1$ds)</string>
+    <string name="status_current_none">Atual: Nenhum</string>
+    <string name="status_current">Atual: %1$s</string>
+    <string name="status_current_no_scancode">Atual: %1$s — essa tecla não reporta um scan code, então o modo imersivo não pode usá-la. Mapeie uma tecla física como Aumentar Volume.</string>
+    <string name="keycode_unknown">Keycode %1$d</string>
+    <string name="scancode_unknown">Scan code %1$d</string>
+
+    <!-- Immersive mode -->
+    <string name="section_immersive">Modo Imersivo (Experimental)</string>
+    <string name="immersive_switch">Ativar Modo Imersivo (Experimental)</string>
+    <string name="immersive_hint">Envia toque, teclado e mouse diretamente para o desktop Linux, mantendo os gestos do Android fora do caminho. Precisa de root. Defina uma tecla de alternância abaixo: pressione uma vez para entrar e novamente para sair. O modo também termina quando você troca de app.</string>
+    <string name="bind_immersive_key_button">Mapear Tecla do Modo Imersivo</string>
+    <string name="immersive_entering">Modo imersivo: toda a entrada vai para o desktop. Pressione %1$s novamente para sair.</string>
+    <string name="immersive_exited">Modo imersivo desativado</string>
+    <string name="immersive_no_scancode">Mapeie uma tecla para o modo imersivo primeiro</string>
+    <string name="immersive_failed">Não foi possível iniciar o modo imersivo: root foi negado ou está indisponível</string>
+    <string name="immersive_no_devices">Não foi possível iniciar o modo imersivo: nenhum dispositivo de entrada pôde ser assumido</string>
+    <string name="immersive_interrupted">Modo imersivo encerrado; a entrada voltou para o Android</string>
+
+    <!-- Accessibility -->
+    <string name="accessibility_switch">Interceptação das Teclas via Acessibilidade</string>
+    <string name="accessibility_hint">Intercepta as teclas de função (Fn, F1-F12 etc.) via AccessibilityService e converte o Voltar do teclado de tablet/Voltar do navegador em ESC. Ative isso se combinações Fn ou o ESC de um teclado externo não estiverem chegando corretamente ao desktop. Requer a permissão de Acessibilidade concedida em Configurações do sistema &gt; Acessibilidade (uma única vez).</string>
+
+    <!-- Extra keys bar -->
+    <string name="extra_keys_mode_label">Modo da barra de teclas extras</string>
+    <string name="extra_keys_mode_hint">Controla quando a barra inferior estilo Termux com ESC/TAB/CTRL/ALT/setas/PgUp etc. é exibida. Aplica-se na próxima vez que você voltar para a área de exibição do desktop.</string>
+    <string-array name="extra_keys_mode_options">
+        <item>Sempre mostrar</item>
+        <item>Nunca mostrar</item>
+        <item>Mostrar com o teclado virtual</item>
+    </string-array>
+    <string name="back_opens_switch">Tecla Voltar alterna rapidamente a barra de teclas extras</string>
+    <string name="back_opens_hint">Quando ativado, pressionar Voltar enquanto a barra de teclas extras está escondida a exibe; pressionar Voltar novamente a esconde.</string>
+
+    <!-- Custom layout editor -->
+    <string name="btn_load_default">Carregar template original</string>
+    <string name="btn_load_file">Carregar de um arquivo…</string>
+    <string name="layout_hint">Define a barra de teclas extras como JSON: \"rows\" é um array de linhas, cada uma um array de teclas. Uma tecla tem um \"label\" e um \"type\" (key/text/modifier/keyboard/vkeyboard/settings). \"key\"/\"modifier\" usam um evdev \"code\"; \"text\" usa \"text\"; qualquer tecla pode adicionar \"repeat\":true ou um \"popup\" aninhado. JSON inválido retorna para o padrão. Tem efeito na próxima volta ao desktop.</string>
+    <string name="layout_status_default">Usando o layout padrão embutido</string>
+    <string name="layout_status_valid">✓ Layout Válido</string>
+    <string name="layout_status_invalid">✗ %1$s</string>
+
+    <!-- Touchpad -->
+    <string name="touchpad_mode_switch">Modo Touchpad (movimento relativo)</string>
+    <string name="touchpad_hint">Ativado: dedo move o cursor do mouse (relativo). Desativado: touch é mapeado direto para a tela (absoluto).</string>
+    <string name="pointer_capture_switch">Capturar ponteiro externo</string>
+    <string name="pointer_capture_hint">Trava um mouse ou touchpad externo na área de exibição do desktop e usa movimento relativo, para que alcançar a borda superior ou inferior não revele as barras do sistema Android. Use o Voltar do Android para liberar temporariamente; clique na área de exibição do desktop para capturar novamente. A entrada por toque na tela não é afetada.</string>
+    <string name="pointer_capture_released">Ponteiro externo liberado. Clique na área de exibição do desktop para capturá-lo novamente.</string>
+    <string name="mouse_sensitivity_label">Sensibilidade do Ponteiro do Touchpad (Aceleração)</string>
+    <string name="mouse_accel_value">%1$.1fx</string>
+    <string name="scroll_reverse_switch">Inverter direção da rolagem</string>
+    <string name="scroll_reverse_hint">Ativado: o conteúdo acompanha seus dedos (rolagem "natural"). Aplica-se à rolagem com dois dedos tanto no touchpad na tela quanto no físico.</string>
+    <string name="scroll_speed_label">Velocidade de rolagem com dois dedos</string>
+    <string name="scroll_speed_value">%1$.2f</string>
+    <string name="threshold_factor_value">%1$.2f× tolerância de toque</string>
+    <string name="scroll_threshold_label">Limite de detecção de rolagem</string>
+    <string name="scroll_threshold_hint">Até onde um dedo precisa se mover para contar como movimento. Diminua isso se um pinça estiver sendo tratado como rolagem.</string>
+    <string name="move_threshold_label">Limite de confirmação de gesto</string>
+    <string name="move_threshold_hint">Até onde o dedo principal precisa se mover antes que um gesto ambíguo de dois dedos seja resolvido. Diminua isso se a rolagem demorar para começar.</string>
+    <string name="gesture_scale_label">Magnitude do gesto</string>
+    <string name="gesture_scale_value">%1$.0f px</string>
+    <string name="gesture_scale_hint">Gestos encaminhados como toque (pinça, três ou mais dedos) são mapeados em um quadrado deste tamanho centralizado no ponteiro. Valores maiores fazem o mesmo movimento do dedo percorrer mais distância.</string>
+    <string name="disable_multi_finger_switch">Desativar gestos de pinça e multitoque</string>
+    <string name="disable_multi_finger_hint">Ativado: gestos de pinça/zoom com dois dedos e gestos com três ou mais dedos são bloqueados e nunca chegam ao desktop; a rolagem com dois dedos e o clique direito com dois dedos continuam funcionando. Desativado: os gestos de pinça e multitoque são encaminhados ao desktop como toque.</string>
+
+    <!-- Connection -->
+    <string name="socket_path_label">Caminho do socket do daemon</string>
+    <string name="second_window_label">Abrir uma segunda janela (daemon e título próprios)</string>
+    <string name="second_window_name_hint">Nome da Janela (ex: meu workspace)</string>
+    <string name="second_window_open">Abrir uma segunda janela</string>
+    <string name="root_switch">Conecta com root (Helper)</string>
+    <string name="root_hint">Executa um helper root (su) que conecta no socket e passa a conexão de volta para o app. Faz efeito na próxima sessão (Reabra o app).</string>
+    <string name="topapp_switch">Ativar escalonamento em primeiro plano (root)</string>
+    <string name="topapp_hint">Dá ao desktop Linux prioridade de CPU de primeiro plano do Android. Selecione o escopo de escalonamento abaixo; as mudanças têm efeito na próxima conexão.</string>
+    <string name="topapp_mode_label">Escopo do escalonamento em primeiro plano</string>
+    <string-array name="topapp_mode_options">
+        <item>1 - Aplicativo em foco</item>
+        <item>2 - Sessão completa do desktop</item>
+    </string-array>
+    <string name="topapp_mode_focused_hint">Modo 1: Mantém o KWin e o escopo do aplicativo ativo em top-app. Processos existentes nesse escopo e processos filhos são incluídos; o aplicativo anterior é restaurado quando o foco muda.</string>
+    <string name="topapp_mode_whole_hint">Modo 2: Move toda a árvore de processos do desktop do Anland para top-app até a desconexão. Aplicativos e serviços em segundo plano também são priorizados, usando mais energia mas dando à sessão prioridade máxima.</string>
+    <string name="topapp_stops_label">Nomes de processos para parar a varredura (opcional)</string>
+    <string name="topapp_stops_hint">ex: systemd:init (separado por \":\"); vazio usa os padrões embutidos</string>
+    <string name="mic_switch">Encaminha o microfone para o desktop</string>
+    <string name="mic_hint">O áudio do desktop sempre toca no alto-falante deste dispositivo. Ativar isso também envia o microfone na direção contrária. Tem efeito na próxima conexão (reabra o app).</string>
+    <string name="camera_switch">Encaminha a câmera para o desktop</string>
+    <string name="camera_hint">Permite que o desktop abra a(s) câmera(s) deste dispositivo como fonte de vídeo. A câmera só liga enquanto o desktop está gravando ativamente. Tem efeito na próxima vez que você voltar ao app; o primeiro uso solicitará a permissão da câmera.</string>
+    <string name="audio_keepalive_switch">Manter áudio ativo</string>
+    <string name="audio_keepalive_hint">Mantém o fluxo de saída de áudio em execução para que sons curtos do Linux (cliques de volume, cliques de tecla) sempre toquem instantaneamente. Custa um pouco de energia em espera. Desativado: o caminho de áudio hiberna após ~1,5 s de silêncio no desktop e acorda para o próximo som. Se a latência audível não corresponder à sua preferência, pode ser necessário ajustar os presets de latência de áudio abaixo.</string>
+    <string name="audio_latency_title">Latência do Áudio</string>
+    <string name="latency_speaker_label">Som (Desktop → Dispositivo)</string>
+    <string name="latency_mic_label">Microfone (Dispositivo → Desktop)</string>
+    <string name="latency_hint">Presets mais baixos reduzem a latência, mas causa ruídos e falhas em dispositivos mais sobrecarregados. Faz efeito na próxima sessão do app.</string>
+
+    <!-- Resolution -->
+    <string name="width_hint">Largura (ex: 1920)</string>
+    <string name="height_hint">Altura (ex: 1080)</string>
+    <string name="resolution_hint">Escolha um preset ou coloque a resolução manualmente. Coloque 0 para a resolução nativa. \"Tela ×\" ajusta a escala do painel do dispositivo (paisagem). Faz efeito na próxima sessão do app.</string>
+    <string name="auto_stretch_switch">Esticar exibição automaticamente</string>
+    <string name="auto_stretch_hint">Quando ativado, a exibição preenche a tela (esticada se necessário). Quando desativado, a exibição mantém a proporção da resolução personalizada com barras pretas (letterboxing). As coordenadas de entrada são mapeadas automaticamente.</string>
+
+    <!-- Settings notification -->
+    <string name="notification_switch">Mostrar a notificação de abrir as configurações</string>
+    <string name="notification_hint">Mostra uma notificação persistente enquanto o app está aberto; apertando-o abre as configurações. Desative para esconder. Faz efeito na próxima sessão do app.</string>
+    <string name="notification_channel_name">Anland</string>
+    <string name="notification_channel_desc">Acesso Rápido do Anland</string>
+    <string name="notification_title">Anland</string>
+    <string name="notification_text">Clique para abrir as configurações</string>
+
+    <!-- Toasts -->
+    <string name="toast_no_picker">Nenhum app de arquivos encontrado</string>
+    <string name="toast_read_failed">Não foi possível ler o arquivo</string>
+
+    <!-- Hardware key names -->
+    <string name="key_volume_up">Aumentar Volume</string>
+    <string name="key_volume_down">Diminuir Volume</string>
+    <string name="key_volume_mute">Mudo</string>
+    <string name="key_power">Ligar/Desligar</string>
+    <string name="key_camera">Câmera</string>
+    <string name="key_headset_hook">Botão do Headset</string>
+    <string name="key_media_play_pause">Play/Pause</string>
+    <string name="key_media_next">Próxima Mídia</string>
+    <string name="key_media_previous">Mídia Anterior</string>
+    <string name="key_brightness_up">Aumentar Brilho</string>
+    <string name="key_brightness_down">Diminuir Brilho</string>
+    <string name="key_home">Home</string>
+    <string name="key_back">Voltar</string>
+
+    <!-- Audio latency presets -->
+    <string-array name="latency_labels">
+        <item>Auto (padrão do motor)</item>
+        <item>Ultra Baixo (~1 ms)</item>
+        <item>Baixo (~3 ms)</item>
+        <item>Equilibrado (~5 ms)</item>
+        <item>Seguro (~10 ms)</item>
+        <item>Tranquilo (~20 ms)</item>
+    </string-array>
+
+    <!-- Resolution presets -->
+    <string-array name="res_preset_labels">
+        <item>Preset…</item>
+        <item>Auto (0×0, nativo)</item>
+        <item>4K (3840×2160)</item>
+        <item>2K (2560×1440)</item>
+        <item>1080p (1920×1080)</item>
+        <item>720p (1280×720)</item>
+        <item>480p (854×480)</item>
+        <item>Tela × 1.0</item>
+        <item>Tela × 0.8</item>
+        <item>Tela × 0.75</item>
+        <item>Tela × 0.5</item>
+        <item>Tela × 0.25</item>
+    </string-array>
+</resources>
