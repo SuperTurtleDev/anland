@@ -452,6 +452,13 @@ static void xwm_close_window(uint64_t id) {
     xwm_send_cmd(cmd, (size_t)n);
 }
 
+/* config.json "auto_attach" (default false; see the daemon config section):
+ * launch the host Activity on window creation. false = the window waits for a
+ * binder SURFACE — the uid pass lets the wayland client app attach its own
+ * windows. Defined here (used by cb_window_created), owned by the config
+ * block below (g_cfg_lock guards it). */
+static bool g_cfg_auto_attach = false;
+
 static void cb_window_created(void* user, uint64_t id, int32_t pref_w, int32_t pref_h,
                               const char* title, int is_popup) {
     LOGI("window %llu created %dx%d popup=%d '%s'",
@@ -461,6 +468,14 @@ static void cb_window_created(void* user, uint64_t id, int32_t pref_w, int32_t p
         awl_win_state& ws = g_wins[id];
         snprintf(ws.title, sizeof(ws.title), "%s", title ? title : "");
         ws.attached = false;
+    }
+    /* auto-attach (config.json "auto_attach", default false): off = the window
+     * waits for a binder SURFACE — the uid pass lets the wayland client app
+     * itself attach its own windows */
+    if (!g_cfg_auto_attach) {
+        LOGI("window %llu: auto_attach off — waiting for binder SURFACE",
+             (unsigned long long)id);
+        return;
     }
     /* am start = fork+waitpid (hundreds of ms) — run on a detached thread
      * so the event thread doesn't stall for it; if the window dies right
@@ -808,7 +823,11 @@ static awl_window_callbacks_t k_cbs = {
  * /data/local/tmp/awl). Never exposed over binder (cfg_set rejects it) —
  * hand-edited in config.json, read at daemon startup before the socket is
  * bound; a change needs a daemon restart. Daemon-driven saves preserve its
- * file value verbatim (re-read at save time). */
+ * file value verbatim (re-read at save time).
+ * "auto_attach" (default false): launch the host Activity automatically when
+ * a wayland window is created. false = the window waits for a binder SURFACE
+ * from the wayland client app itself (SURFACE uid pass); toggled over
+ * CFG_GET/SET as 0/1 or by hand in config.json (new windows only). */
 
 #define AWL_CFG_PATH "/data/adb/modules/anland-awl/config.json"
 
@@ -825,6 +844,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "init_w") { *lo = 100; *hi = 7680; return true; }
     if (key == "init_h") { *lo = 100; *hi = 4320; return true; }
     if (key == "scale_mode") { *lo = 0; *hi = 2; return true; }
+    if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
     return false;
 }
 
@@ -881,8 +901,10 @@ static void cfg_save_locked(void) {
     FILE* f = fopen(tmp, "w");
     if (!f) { LOGE("config save open %s: %s", tmp, strerror(errno)); return; }
     fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
-               "  \"scale_mode\": %d,\n  \"runtime_dir\": \"%s\"\n}\n",
-            g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode, rt);
+               "  \"scale_mode\": %d,\n  \"auto_attach\": %d,\n"
+               "  \"runtime_dir\": \"%s\"\n}\n",
+            g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
+            g_cfg_auto_attach ? 1 : 0, rt);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
     if (rename(tmp, AWL_CFG_PATH) != 0)
@@ -955,6 +977,14 @@ static void cfg_load_and_apply(void) {
     } else if (sm != -1) {
         LOGE("config: scale_mode=%d out of range (0..2), ignored", sm);
     }
+    int aa = cfg_parse_int(buf, "auto_attach");
+    if (aa == 0 || aa == 1) {
+        std::lock_guard<std::mutex> lk(g_cfg_lock);
+        g_cfg_auto_attach = aa != 0;
+        LOGI("config: auto_attach=%s (applied at startup)", aa ? "true" : "false");
+    } else if (aa != -1) {
+        LOGE("config: auto_attach=%d out of range (0..1), ignored", aa);
+    }
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -1000,6 +1030,12 @@ static int cfg_set(const std::string& key, int32_t val) {
         }
         for (uint64_t id : ids) awl_renderer_request_render(id);
         LOGI("config set scale_mode=%d (applied + persisted)", val);
+    } else if (key == "auto_attach") {
+        /* effective for windows created from now on — nothing live to apply */
+        std::lock_guard<std::mutex> lk(g_cfg_lock);
+        g_cfg_auto_attach = val != 0;
+        cfg_save_locked();
+        LOGI("config set auto_attach=%d (applied + persisted)", val ? 1 : 0);
     }
     return 0;
 }
@@ -1438,6 +1474,10 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             v = key == "init_w" ? iw : ih;
         }
         else if (key == "scale_mode") v = awl_display_scale_mode();
+        else if (key == "auto_attach") {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            v = g_cfg_auto_attach ? 1 : 0;
+        }
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;
