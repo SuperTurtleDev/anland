@@ -17,18 +17,22 @@ import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-import java.util.ArrayList;
+import com.anlandnext.awl.Awl;
+
+import java.util.List;
 import java.util.Locale;
 
 /**
- * Window list (launcher entry): shows the wayland windows the daemon holds
- * and their attach state — refreshed from daemon window events
- * (create/destroy/attach/detach, WindowEvents) while resumed, plus a LIST pull
- * on resume (events are live-edge only; whatever happened while paused is
- * picked up by the snapshot).
- * Tap → BRING (bring-to-front for attached ones / re-attach for detached
- * ones). Long-press → dropdown menu (the long-press itself does nothing,
- * guarding against accidental triggers):
+ * Window list (launcher entry), implemented on the libawl client library —
+ * the same API third-party consumer apps use (Awl.getWindows /
+ * registerCallback / attachWindow / closeWindow). The daemon scopes by
+ * caller identity: this APK is package-authenticated, so it manages every
+ * window; a consumer app only ever sees its own uid's.
+ * Refreshed from daemon window events (create/destroy/attach/detach) while
+ * resumed, plus a snapshot pull on resume (events are live-edge only).
+ * Tap → attachWindow (bring-to-front / re-attach). Long-press → dropdown
+ * menu (the long-press itself does nothing, guarding against accidental
+ * triggers):
  *   Close — the only close entry (daemon T_CLOSE → the client exits
  *   cleanly);
  *   Window info — id/title/attach state.
@@ -43,9 +47,9 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refresher = this::refresh;
 
-    /** daemon window events → one coalesced LIST pull (a re-attach bursts
+    /** daemon window events → one coalesced snapshot pull (a re-attach bursts
      *  detach+attach; a window going away bursts destroy+detach) */
-    private final WindowEvents.Listener events = new WindowEvents.Listener() {
+    private final Awl.Callback events = new Awl.Callback() {
         @Override public void onWindowCreated(long id, String title) { scheduleRefresh(); }
         @Override public void onWindowDestroyed(long id) { scheduleRefresh(); }
         @Override public void onWindowAttached(long id) { scheduleRefresh(); }
@@ -83,20 +87,18 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        WindowEvents.addListener(events);
-        WindowEvents.acquire();   /* live list updates while resumed (daemon disconnects a paused subscriber) */
+        Awl.registerCallback(events);   /* live list updates while resumed (daemon disconnects a paused subscriber) */
         refresh();
     }
 
     @Override
     protected void onPause() {
         handler.removeCallbacks(refresher);
-        WindowEvents.release();
-        WindowEvents.removeListener(events);
+        Awl.unregisterCallback(events);   /* last callback out → subscription dropped */
         super.onPause();
     }
 
-    /** event-burst coalescing: one LIST pull per burst */
+    /** event-burst coalescing: one snapshot pull per burst */
     private void scheduleRefresh() {
         handler.removeCallbacks(refresher);
         handler.postDelayed(refresher, 60);
@@ -104,14 +106,14 @@ public class MainActivity extends Activity {
 
     private void refresh() {
         list.removeAllViews();
-        ArrayList<WlBinder.WinInfo> wins = WlBinder.list();
+        List<Awl.WlWindow> wins = Awl.getWindows();
         if (wins == null) {
             status.setText(R.string.status_daemon_unreachable);
             return;
         }
-        WindowEvents.ensure();   /* daemon restarted under us → re-subscribe the event stream */
+        Awl.ensureSubscribed();   /* daemon restarted under us → re-subscribe the event stream */
         status.setText(getString(R.string.status_window_count, wins.size()));
-        for (WlBinder.WinInfo w : wins) list.addView(row(w));
+        for (Awl.WlWindow w : wins) list.addView(row(w));
         if (wins.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText(R.string.status_empty);
@@ -121,7 +123,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private View row(WlBinder.WinInfo w) {
+    private View row(Awl.WlWindow w) {
         LinearLayout r = new LinearLayout(this);
         r.setOrientation(LinearLayout.HORIZONTAL);
         r.setGravity(Gravity.CENTER_VERTICAL);
@@ -142,8 +144,9 @@ public class MainActivity extends Activity {
         r.addView(st);
 
         r.setOnClickListener(v -> {
-            WlBinder.bring(w.id);
-            refresh();
+            /* libawl hosting: AwlWindowActivity (merged from the library) —
+             * the daemon evicts any previous holder of this window */
+            Awl.attachWindow(MainActivity.this, w.id, w.title);
         });
         r.setOnLongClickListener(v -> {
             showRowMenu(v, w);
@@ -153,14 +156,14 @@ public class MainActivity extends Activity {
     }
 
     /** Row long-press dropdown: Close (the only close entry) / Window info */
-    private void showRowMenu(View anchor, WlBinder.WinInfo w) {
+    private void showRowMenu(View anchor, Awl.WlWindow w) {
         PopupMenu menu = new PopupMenu(this, anchor);
         menu.getMenu().add(Menu.NONE, MENU_CLOSE, Menu.NONE, R.string.menu_close);
         menu.getMenu().add(Menu.NONE, MENU_INFO, Menu.NONE, R.string.menu_window_info);
         menu.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == MENU_CLOSE) {
-                WlBinder.close(w.id);   /* daemon decides: the client exits cleanly */
-                refresh();
+                Awl.closeWindow(w.id);   /* daemon decides: the client exits cleanly */
+                scheduleRefresh();
             } else if (item.getItemId() == MENU_INFO) {
                 new AlertDialog.Builder(this)
                         .setTitle(R.string.menu_window_info)

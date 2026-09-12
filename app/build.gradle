@@ -48,4 +48,8 @@ android {
 }
 
 dependencies {
+    // Window management (list/events/attach/close) goes through the same
+    // library shipped to third-party apps; the daemon scopes by identity —
+    // this APK is package-authenticated and sees every window.
+    implementation project(':libawl')
 }

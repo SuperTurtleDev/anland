@@ -13,20 +13,9 @@
             </intent-filter>
         </activity>
 
-        <!-- wayland window (multi-instance: documentLaunchMode + unique data URI
-             per id → one task per id); theme/configChanges mimic legacy: no-title
-             fullscreen + rotation never rebuilds (surface resize only) -->
-        <activity android:name=".WlWindowActivity"
-            android:exported="false"
-            android:launchMode="standard"
-            android:documentLaunchMode="intoExisting"
-            android:excludeFromRecents="false"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
-            <property
-                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
-                android:value="true" />
-        </activity>
+        <!-- wayland windows are hosted by com.anlandnext.awl.AwlWindowActivity,
+             merged in from the libawl library module (same code third-party
+             consumer apps run) -->
 
         <!-- Window behavior settings -->
         <activity android:name=".WlSettingsActivity" android:exported="false"/>

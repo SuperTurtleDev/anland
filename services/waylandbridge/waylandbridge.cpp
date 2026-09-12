@@ -9,7 +9,7 @@
  *     held by the daemon)
  *   - window state table: alive (wayland window exists) / attached
  *     (Activity holds a surface)
- *   - Attach = am start WlWindowActivity(--el id) (bring-to-front if
+ *   - Attach = am start AwlWindowActivity(libawl, --el id) (bring-to-front if
  *     already present)
  *   - single-attach model (APK only reports facts; all decisions in the
  *     daemon):
@@ -98,7 +98,7 @@ static bool binder_plat_init(void) {
 
 #define AWL_BINDER_NAME "anland.host"
 #define AWL_PKG  "com.anlandnext"
-#define AWL_WIN_ACT AWL_PKG "/.WlWindowActivity"
+#define AWL_WIN_ACT AWL_PKG "/com.anlandnext.awl.AwlWindowActivity"   /* libawl-merged (host APK ships no activity of its own) */
 
 /* binder transaction codes (agreed with the APP BinderProxy)
  * single-attach model: the APK only reports facts; detach/evict/close
@@ -595,7 +595,7 @@ static void attach_activity(uint64_t id, const char* title) {
     run_am("am start -n %s -d 'anland://win/%llu' --el id %llu --es title %s "
            "-f 0x90000000 >/dev/null 2>&1",
            AWL_WIN_ACT, (unsigned long long)id, (unsigned long long)id, q);
-    LOGI("Attach: am start WlWindowActivity id=%llu", (unsigned long long)id);
+    LOGI("Attach: am start AwlWindowActivity id=%llu", (unsigned long long)id);
 }
 
 /* ---------------- wayland logic-layer callbacks (wayland event thread) ---------------- */
@@ -731,7 +731,7 @@ static void cb_window_destroyed(void* user, uint64_t id) {
         LOGI("window %llu: CLOSE sent via ctrl channel", (unsigned long long)id);
     /* lifecycle event: subscribed list UIs (e.g. the APK's MainActivity)
      * drop the row — the Activity side is finished by the ctrl/broadcast
-     * paths above, events never target WlWindowActivity itself */
+     * paths above, events never target AwlWindowActivity itself */
     evt_dispatch(owner, id, AWL_E_DESTROYED, nullptr);
 }
 
