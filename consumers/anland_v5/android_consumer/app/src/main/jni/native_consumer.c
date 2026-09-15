@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -31,6 +32,8 @@
 
 #define PIXEL_FORMAT_RGBA_8888 1
 #define MAX_COLLECT_BUFS 8
+#define BYTES_PER_RGBA_PIXEL 4U
+#define ACQUIRE_FENCE_TIMEOUT_MS 1000
 
 /* Saved JVM reference for event-thread JNI callbacks. Process-global (the JVM is);
  * the per-thread env is attached as needed. The activity callback target is
@@ -130,78 +133,301 @@ struct consumer_state {
 static void topapp_handle_scheduling_event(struct consumer_state *s,
                                            const struct OutputEvent *event);
 
+struct dmabuf_fdinfo {
+    unsigned long long size;
+    char exporter[64];
+};
+
+static bool query_dmabuf_fdinfo(int fd, struct dmabuf_fdinfo *info)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fdinfo/%d", fd);
+    int info_fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (info_fd < 0)
+        return false;
+
+    char data[2048];
+    ssize_t count = read(info_fd, data, sizeof(data) - 1);
+    close(info_fd);
+    if (count <= 0)
+        return false;
+    data[count] = '\0';
+
+    memset(info, 0, sizeof(*info));
+    char *save = NULL;
+    for (char *line = strtok_r(data, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        unsigned long long size = 0;
+        char exporter[sizeof(info->exporter)];
+        if (sscanf(line, "size:%llu", &size) == 1) {
+            info->size = size;
+        } else if (sscanf(line, "exp_name:%63s", exporter) == 1) {
+            strncpy(info->exporter, exporter, sizeof(info->exporter) - 1);
+        }
+    }
+    return info->size > 0 && info->exporter[0] != '\0';
+}
+
+static bool wait_for_acquire_fence(int fence_fd)
+{
+    struct pollfd pfd = {
+        .fd = fence_fd,
+        .events = POLLIN,
+    };
+    int result;
+    do {
+        pfd.revents = 0;
+        result = poll(&pfd, 1, ACQUIRE_FENCE_TIMEOUT_MS);
+    } while (result < 0 && errno == EINTR);
+
+    if (result > 0 && (pfd.revents & POLLIN))
+        return true;
+
+    if (result == 0) {
+        LOGE("acquire fence %d timed out after %d ms",
+             fence_fd, ACQUIRE_FENCE_TIMEOUT_MS);
+    } else if (result < 0) {
+        LOGE("acquire fence %d poll failed: %s", fence_fd, strerror(errno));
+    } else {
+        LOGE("acquire fence %d signaled unexpected poll events 0x%x",
+             fence_fd, pfd.revents);
+    }
+    return false;
+}
+
+/* queueBuffer/cancelBuffer take ownership of fence_fd, including on paths where
+ * the caller did not wait on the acquire fence. Never close fence_fd after this. */
+static int finish_dequeued_buffer(ANativeWindow *window,
+                                  ANativeWindowBuffer *buffer,
+                                  int fence_fd,
+                                  bool queue)
+{
+    int result = queue
+        ? api.queueBuffer(window, buffer, fence_fd)
+        : api.cancelBuffer(window, buffer, fence_fd);
+    if (result != 0) {
+        LOGE("%s failed: %d", queue ? "queueBuffer" : "cancelBuffer", result);
+    }
+    return result;
+}
+
+/* This transport currently carries one packed RGBA plane. ANativeWindow does
+ * not expose vendor-private handle plane metadata, so never infer an offset or
+ * stride from handle->data[]. The metadata-free path is valid only when the
+ * allocation exactly matches the public stride-by-height geometry: that proves
+ * this supported plane starts at byte zero. */
+static bool describe_packed_rgba_buffer(const ANativeWindowBuffer *anb,
+                                        int expected_width,
+                                        int expected_height,
+                                        struct buf_info *info,
+                                        unsigned long long *required_size)
+{
+    if (anb->format != PIXEL_FORMAT_RGBA_8888 ||
+        anb->width != expected_width || anb->height != expected_height ||
+        anb->stride < anb->width || anb->layerCount != 1) {
+        LOGE("unsupported Surface layout: format=%d size=%dx%d expected=%dx%d "
+             "stride=%d layers=%llu",
+             anb->format, anb->width, anb->height, expected_width,
+             expected_height, anb->stride,
+             (unsigned long long)anb->layerCount);
+        return false;
+    }
+
+    const unsigned long long stride_bytes =
+        (unsigned long long)(unsigned int)anb->stride * BYTES_PER_RGBA_PIXEL;
+    if (stride_bytes > UINT32_MAX) {
+        LOGE("Surface stride exceeds protocol range: %llu", stride_bytes);
+        return false;
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->stride = (uint32_t)stride_bytes;
+    info->width = (uint32_t)anb->width;
+    info->height = (uint32_t)anb->height;
+    info->format = PIXEL_FORMAT_RGBA_8888;
+    info->modifier = 0;
+    info->offset = 0;
+    *required_size = (unsigned long long)info->offset
+                   + stride_bytes * (unsigned long long)info->height;
+    return true;
+}
+
+static int find_surface_dmabuf(const ANativeWindowBuffer *anb,
+                               unsigned long long required_size,
+                               struct dmabuf_fdinfo *selected_info)
+{
+    int best_fd = -1;
+    int best_index = -1;
+    int best_rank = -1;
+    struct stat best_stat = {0};
+    bool ambiguous = false;
+
+    for (int i = 0; i < anb->handle->numFds; i++) {
+        const int candidate = anb->handle->data[i];
+        const int flags = fcntl(candidate, F_GETFL);
+        const int access_mode = flags >= 0 ? flags & O_ACCMODE : O_RDONLY;
+        struct stat candidate_stat = {0};
+        const bool stat_ok = fstat(candidate, &candidate_stat) == 0;
+        struct dmabuf_fdinfo candidate_info = {0};
+        const bool is_dmabuf = query_dmabuf_fdinfo(candidate, &candidate_info);
+        const bool writable = flags >= 0 &&
+            (access_mode == O_WRONLY || access_mode == O_RDWR);
+        const bool exact_size = is_dmabuf &&
+            candidate_info.size == required_size;
+        const bool valid = stat_ok && writable && exact_size;
+        const int rank = access_mode == O_RDWR ? 1 : 0;
+
+        LOGI("    handle_fd[%d/%d]=%d flags=0x%x writable=%d dmabuf=%d "
+             "exporter=%s size=%llu required=%llu inode=%llu exact=%d",
+             i, anb->handle->numFds, candidate, flags, writable, is_dmabuf,
+             is_dmabuf ? candidate_info.exporter : "-",
+             is_dmabuf ? candidate_info.size : 0ULL, required_size,
+             stat_ok ? (unsigned long long)candidate_stat.st_ino : 0ULL,
+             exact_size);
+
+        if (!valid)
+            continue;
+
+        if (rank > best_rank) {
+            best_fd = candidate;
+            best_index = i;
+            best_rank = rank;
+            best_stat = candidate_stat;
+            *selected_info = candidate_info;
+            ambiguous = false;
+        } else if (rank == best_rank &&
+                   (candidate_stat.st_dev != best_stat.st_dev ||
+                    candidate_stat.st_ino != best_stat.st_ino)) {
+            LOGE("equally ranked dma-buf candidates at handle indices %d and %d",
+                 best_index, i);
+            ambiguous = true;
+        }
+    }
+
+    if (best_fd < 0) {
+        LOGE("no writable exact-size dma-buf matches the %llu-byte Surface plane",
+             required_size);
+        return -1;
+    }
+    if (ambiguous) {
+        LOGE("ambiguous Surface dma-buf handle; refusing a vendor-specific guess");
+        return -1;
+    }
+
+    LOGI("selected handle_fd[%d]=%d exporter=%s size=%llu rank=%d",
+         best_index, best_fd, selected_info->exporter, selected_info->size,
+         best_rank);
+    return best_fd;
+}
+
 static int collect_dmabufs(struct consumer_state *s)
 {
     ANativeWindow *win = s->window;
-    int target = s->buf_count;
+    const int target = s->buf_count;
     int found = 0;
 
-    LOGI("collecting %d dma-bufs via dequeue/queue", target);
+    LOGI("collecting %d direct Surface dma-bufs via dequeue/queue", target);
 
     for (int attempt = 0; attempt < target * 4 && found < target; attempt++) {
         ANativeWindowBuffer *anb = NULL;
-        int fence = -1;
-        if (api.dequeueBuffer(win, &anb, &fence) != 0 || !anb) {
-            LOGE("dequeueBuffer failed on attempt %d", attempt);
-            if (fence >= 0)
-                close(fence);
+        int acquire_fence = -1;
+        const int dequeue_result =
+            api.dequeueBuffer(win, &anb, &acquire_fence);
+        if (dequeue_result != 0 || !anb) {
+            LOGE("dequeueBuffer failed on attempt %d: %d",
+                 attempt, dequeue_result);
+            if (acquire_fence >= 0)
+                close(acquire_fence);
             break;
         }
-        if (fence >= 0)
-            close(fence);   /* enumeration only: no need to wait the fence */
+
+        if (acquire_fence >= 0) {
+            if (!wait_for_acquire_fence(acquire_fence)) {
+                if (finish_dequeued_buffer(win, anb, acquire_fence, false) != 0)
+                    break;
+                continue;
+            }
+            close(acquire_fence);
+            acquire_fence = -1;
+        }
 
         if (!anb->handle || anb->handle->numFds < 1) {
-            LOGE("dequeued buffer has no dma-buf handle on attempt %d", attempt);
-            api.cancelBuffer(win, anb, -1);
+            LOGE("dequeued buffer has no fd-bearing handle on attempt %d",
+                 attempt);
+            if (finish_dequeued_buffer(win, anb, -1, false) != 0)
+                break;
             continue;
         }
 
-        int fd = anb->handle->data[0];   /* first fd backs the dma-buf */
-        int stride = anb->stride, width = anb->width, height = anb->height;
-
-        /* deduplicate by ANativeWindowBuffer pointer (stable per queue slot) */
-        bool dup_found = false;
+        bool duplicate = false;
         for (int i = 0; i < found; i++) {
             if (s->buf_anb[i] == anb) {
-                dup_found = true;
+                duplicate = true;
                 break;
             }
         }
-
-        /* post it back so the next dequeue rotates to another slot */
-        api.queueBuffer(win, anb, -1);
-
-        if (dup_found)
+        if (duplicate) {
+            if (finish_dequeued_buffer(win, anb, -1, true) != 0)
+                break;
             continue;
+        }
 
-        int dup_fd = dup(fd);
-        if (dup_fd < 0)
+        struct buf_info buffer_info;
+        unsigned long long required_size = 0;
+        if (!describe_packed_rgba_buffer(anb, s->screen_w, s->screen_h,
+                                         &buffer_info, &required_size)) {
+            if (finish_dequeued_buffer(win, anb, -1, false) != 0)
+                break;
             continue;
+        }
+
+        struct dmabuf_fdinfo selected_info = {0};
+        const int fd =
+            find_surface_dmabuf(anb, required_size, &selected_info);
+        if (fd < 0) {
+            if (finish_dequeued_buffer(win, anb, -1, false) != 0)
+                break;
+            continue;
+        }
+
+        const int dup_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        if (dup_fd < 0) {
+            LOGE("failed to duplicate Surface dma-buf %d: %s",
+                 found, strerror(errno));
+            if (finish_dequeued_buffer(win, anb, -1, false) != 0)
+                break;
+            continue;
+        }
+        if (finish_dequeued_buffer(win, anb, -1, true) != 0) {
+            close(dup_fd);
+            break;
+        }
 
         s->buf_anb[found] = anb;
         s->dmabuf_fds[found] = dup_fd;
-        s->dmabuf_infos[found].stride = stride * 4;
-        s->dmabuf_infos[found].width  = width;
-        s->dmabuf_infos[found].height = height;
-        s->dmabuf_infos[found].format = PIXEL_FORMAT_RGBA_8888;
-        s->dmabuf_infos[found].modifier = 0;
-        s->dmabuf_infos[found].offset = 0;
-        LOGI("  buf[%d]: anb=%p fd=%d dup=%d %dx%d stride=%d",
-             found, (void *)anb, fd, dup_fd, width, height, stride);
+        s->dmabuf_infos[found] = buffer_info;
+        LOGI("  direct buf[%d]: anb=%p fd=%d dup=%d exporter=%s size=%llu "
+             "%ux%u stride_bytes=%u offset=%u",
+             found, (void *)anb, fd, dup_fd, selected_info.exporter,
+             selected_info.size, buffer_info.width, buffer_info.height,
+             buffer_info.stride, buffer_info.offset);
         found++;
     }
 
     if (found < target) {
-        LOGE("only collected %d/%d", found, target);
+        LOGE("only collected %d/%d direct Surface dma-bufs", found, target);
         for (int i = 0; i < found; i++) {
             close(s->dmabuf_fds[i]);
             s->dmabuf_fds[i] = -1;
+            s->buf_anb[i] = NULL;
+            memset(&s->dmabuf_infos[i], 0, sizeof(s->dmabuf_infos[i]));
         }
+        s->buf_count = 0;
         return -1;
     }
 
     s->buf_count = found;
-    LOGI("collected %d dma-bufs", found);
+    LOGI("collected %d direct Surface dma-bufs", found);
     return 0;
 }
 
@@ -212,6 +438,8 @@ static void cleanup_dmabufs(struct consumer_state *s)
             close(s->dmabuf_fds[i]);
             s->dmabuf_fds[i] = -1;
         }
+        s->buf_anb[i] = NULL;
+        memset(&s->dmabuf_infos[i], 0, sizeof(s->dmabuf_infos[i]));
     }
     s->buf_count = 0;
 }
@@ -718,6 +946,11 @@ static int do_connect(struct consumer_state *s)
        s->screen_w = ANativeWindow_getWidth(win);
        s->screen_h = ANativeWindow_getHeight(win);
     }
+    if (s->screen_w <= 0 || s->screen_h <= 0) {
+        LOGE("invalid Surface geometry request: %dx%d",
+             s->screen_w, s->screen_h);
+        return -1;
+    }
 
     /* dequeueBuffer needs the window connected to an API first (ANativeWindow_lock
      * did this internally). Disconnect first so reconnect is idempotent. */
@@ -726,17 +959,40 @@ static int do_connect(struct consumer_state *s)
         LOGE("api_connect(CPU) failed");
         return -1;
     }
+    const uint64_t cpu_usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN
+                             | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
+    const int usage_result = api.setUsage(win, cpu_usage);
+    LOGI("setUsage(CPU_READ_OFTEN|CPU_WRITE_OFTEN)=%d", usage_result);
+    if (usage_result != 0)
+        return -1;
 
-    ANativeWindow_setBuffersGeometry(win, s->screen_w, s->screen_h,
-                                     AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+
+    const int geometry_result =
+        ANativeWindow_setBuffersGeometry(
+            win, s->screen_w, s->screen_h,
+            AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+    if (geometry_result != 0) {
+        LOGE("setBuffersGeometry(%dx%d, RGBA8888) failed: %d",
+             s->screen_w, s->screen_h, geometry_result);
+        return -1;
+    }
 
     int min_undequeued = 0;
-    api.query(win, ANATIVEWINDOW_QUERY_MIN_UNDEQUEUED_BUFFERS, &min_undequeued);
-    int total = min_undequeued + 2;
-    if (total > MAX_COLLECT_BUFS)
-        total = MAX_COLLECT_BUFS;
-
-    api.setBufferCount(win, total);
+    const int query_result =
+        api.query(win, ANATIVEWINDOW_QUERY_MIN_UNDEQUEUED_BUFFERS,
+                  &min_undequeued);
+    if (query_result != 0 || min_undequeued < 0 ||
+        min_undequeued > MAX_COLLECT_BUFS - 2) {
+        LOGE("query(min undequeued) failed or unsupported: result=%d value=%d",
+             query_result, min_undequeued);
+        return -1;
+    }
+    const int total = min_undequeued + 2;
+    const int count_result = api.setBufferCount(win, (size_t)total);
+    if (count_result != 0) {
+        LOGE("setBufferCount(%d) failed: %d", total, count_result);
+        return -1;
+    }
 
     s->buf_count = total;
     if (collect_dmabufs(s) < 0)
@@ -797,7 +1053,7 @@ static void on_fallback(void *userdata)
      * session. One tree sweep covers every pid either mode boosted. */
     topapp_restore_tree(s);
 
-    audio_set_ctx(s->audio, NULL);   /* the lib has closed the audio fd; stop touching it */
+    audio_set_ctx(s->audio, NULL);   /* the old audio channel is invalid; stop touching it */
 
     /* Let the owning MainActivity probe the daemon socket and close the window if the
      * daemon is gone. onFallback() marshals itself to the UI thread on the Java side. */
@@ -844,6 +1100,10 @@ static void on_exit_fallback(void *userdata)
     struct consumer_state *s = userdata;
     LOGI("exit fallback triggered");
 
+    /* on_fallback() detached the bridge after its old socket was closed. Restore
+     * the new connection before top-app discovery or any JNI early return. */
+    audio_set_ctx(s->audio, s->ctx);
+
     /* Producer (re)connected. Mode 2 promotes the whole tree right here;
      * mode 1 only discovers the namespace anchor now -- the per-pid boosts
      * happen when the event thread drains KWin's producer-identity and
@@ -852,8 +1112,10 @@ static void on_exit_fallback(void *userdata)
      * cfg_topapp_enable is read locklessly like every other cfg read on this
      * path (Java only reconfigures between connections). */
     if (s->topapp_run_enable && s->topapp_run_path[0] != '\0') {
-        pid_t root = topapp_discover_root(s, get_data_fd(s->ctx),
-                                          s->topapp_run_mode == 2);
+        const int data_fd = get_data_fd(s->ctx);
+        pid_t root = topapp_discover_root(s, data_fd, s->topapp_run_mode == 2);
+        if (data_fd >= 0)
+            close(data_fd);
         if (root > 0) {
             pthread_mutex_lock(&s->topapp_lock);
             s->topapp_root_pid = root;
@@ -903,23 +1165,32 @@ static void *render_thread_func(void *arg)
         }
 
         ANativeWindowBuffer *anb = NULL;
-        int acqfence = -1;
+        int acquire_fence = -1;
         TracyCZoneN(zDequeue, "dequeueBuffer", 1);
-        int dq = api.dequeueBuffer(s->window, &anb, &acqfence);
+        const int dequeue_result =
+            api.dequeueBuffer(s->window, &anb, &acquire_fence);
         TracyCZoneEnd(zDequeue);
-        if (dq != 0 || !anb) {
+        if (dequeue_result != 0 || !anb) {
+            if (acquire_fence >= 0)
+                close(acquire_fence);
             usleep(16000);
             continue;
         }
-        /* Emulate ANativeWindow_lock: CPU-wait the acquire fence so the buffer is
-         * already safe to write (SurfaceFlinger done reading the previous frame)
-         * before we hand it to the producer. A sync_file fd signals POLLIN. */
-        if (acqfence >= 0) {
+
+        /* The producer may write only after SurfaceFlinger's acquire fence
+         * signals. On timeout/error, pass the still-owned fence back through
+         * cancelBuffer; never close it and continue rendering. */
+        if (acquire_fence >= 0) {
             TracyCZoneN(zAcqFence, "acquire fence wait", 1);
-            struct pollfd fpfd = { .fd = acqfence, .events = POLLIN };
-            poll(&fpfd, 1, 1000);
-            close(acqfence);
+            const bool ready = wait_for_acquire_fence(acquire_fence);
             TracyCZoneEnd(zAcqFence);
+            if (!ready) {
+                finish_dequeued_buffer(s->window, anb, acquire_fence, false);
+                usleep(16000);
+                continue;
+            }
+            close(acquire_fence);
+            acquire_fence = -1;
         }
 
         int idx = -1;
@@ -931,28 +1202,40 @@ static void *render_thread_func(void *arg)
         }
 
         if (idx < 0) {
-            api.queueBuffer(s->window, anb, -1);
+            finish_dequeued_buffer(s->window, anb, -1, false);
             usleep(16000);
             continue;
         }
 
         TracyCZoneN(zSelect, "select_dmabuf", 1);
-        int sel = select_dmabuf(s->ctx, idx);
+        const int select_result = select_dmabuf(s->ctx, idx);
         TracyCZoneEnd(zSelect);
-        if (sel < 0) {
-            api.queueBuffer(s->window, anb, -1);
+        if (select_result < 0) {
+            finish_dequeued_buffer(s->window, anb, -1, false);
             usleep(16000);
             continue;
         }
 
-        /* The producer renders into the buffer and hands back a render-done fence
-         * over data_fd (reverse). Queue with it so SurfaceFlinger waits GPU-side
-         * before scanout -- this lets the producer submit before its GPU render
-         * completes (no glFinish stall). rfence == -1 falls back to "ready now". */
-        TracyCZoneN(zRefresh, "refresh_done (producer render)", 1);
-        int rfence = refresh_done(s->ctx);
+        /* The producer writes this exact Android Surface DMA-BUF. A successful
+         * completion may return an optional render fence; queueBuffer takes
+         * ownership so SurfaceFlinger waits before reading. Failure means no
+         * completion was observed, so cancel rather than present the buffer. */
+        int render_fence = -1;
+        TracyCZoneN(zRefresh, "refresh_done (direct Surface render)", 1);
+        const int refresh_result = refresh_done(s->ctx, &render_fence);
         TracyCZoneEnd(zRefresh);
-        api.queueBuffer(s->window, anb, rfence);
+        if (refresh_result < 0) {
+            LOGE("refresh completion failed; cancelling dequeued buffer");
+            if (finish_dequeued_buffer(s->window, anb, -1, false) != 0)
+                s->need_reconnect = true;
+            usleep(16000);
+            continue;
+        }
+        if (finish_dequeued_buffer(s->window, anb, render_fence, true) != 0) {
+            s->need_reconnect = true;
+            usleep(16000);
+            continue;
+        }
         TracyCFrameMark;
     }
 

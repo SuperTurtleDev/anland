@@ -339,8 +339,12 @@ sequenceDiagram
         P->>SHM: read index 读取下标 (get_selected_idx)
         P-->>P: render into dmabuf[idx] 渲染到该缓冲区
         P-->>C: sendmsg(fence_fd, 1 byte ± fence fd via SCM_RIGHTS)  (trigger_refresh)
-        C-->>C: recvmsg(fence_fd) → get fence fd 获取栅栏 fd (refresh_done)
-        C->>C: queueBuffer(fence_fd) → SurfaceFlinger waits GPU-side
+        C-->>C: recvmsg(fence_fd) → status + optional fence fd 状态与可选栅栏 (refresh_done)
+        alt 完成消息合法
+            C->>C: queueBuffer(fence_fd) → SurfaceFlinger waits GPU-side
+        else 超时 / EOF / 格式错误 / 旧连接代际
+            C->>C: cancelBuffer(-1) → 禁止呈现失败缓冲区
+        end
     end
 
     Note over C,P: input flows the other way 输入反向流动
@@ -358,8 +362,10 @@ sequenceDiagram
 - `select_dmabuf(idx)` → 写入下标并触发信号。
 - producer 被唤醒后读下标、渲染、可选存 fence、再调用 `trigger_refresh()`。
 - `trigger_refresh()` 在 fence socketpair 上发送 1 字节 + 可选 SCM_RIGHTS fence fd。
-- `refresh_done()` 在 fence 通道上等待，**5 秒**超时即进入 fallback，
-  读取消息后返回 fence fd（或 `-1` 无 fence）。
+- `refresh_done(ctx, &fence_fd)` 在 fence 通道上等待，超时为 **5 秒**。只有收到合法
+  producer 完成消息时才返回 `0`，并将可选 fence fd 写入 `fence_fd`（producer 未发送时为
+  `-1`）。超时、EOF、消息格式错误或连接代际变化时返回 `-1`；调用者必须取消已 dequeue
+  的缓冲区，禁止将其 queue。
 
 ### 7.1 剪贴板交换（V3）
 
@@ -557,7 +563,7 @@ stateDiagram-v2
 | 函数 | V2 | V3 | 兼容性 |
 |------|----|----|--------|
 | `connect_to_deamon()` | 相同签名 | 相同签名 | ✅ 不变 |
-| `refresh_done()` | 返回 fence fd (>=0 or -1) | 相同签名 | ✅ 不变 |
+| `refresh_done()` | 返回 fence fd (>=0 or -1) | 返回状态，并通过 `int *out_fence` 写出可选 fence | ❌ **签名与语义变化** — 仅返回 `0` 时 queue，返回 `< 0` 时 cancel |
 | `push_dmabufs()` | 相同签名 | 相同签名 | ✅ 不变 |
 | `select_dmabuf()` | 相同签名 | 相同签名 | ✅ 不变 |
 | `set_screen_info()` | 相同签名 | 相同签名 | ✅ 不变 |
@@ -568,7 +574,7 @@ stateDiagram-v2
 | `push_input_event_with_length()` | — | **V3 新增**：发送变长输入事件（剪贴板） | ✅ 新增 API |
 | `poll_output_event_extend_data()` | — | **V3 新增**：排空变长输出事件的尾随负载 | ✅ 新增 API |
 | `set_exit_fallback_callback()` | — | **V3 新增**：producer 重连时回调 | ✅ 新增 API |
-| `get_data_fd()` | — | **V3 新增**：获取 data channel fd | ✅ 新增 API |
+| `get_data_fd()` | — | **V3 新增**：获取当前 data channel 的独立 fd；调用者负责关闭 | ✅ 新增 API |
 | `handle_unhandled_event()` | — | **V3 新增**：排空未处理的变长事件 | ❌ **必须调用**：收到未处理的变长事件时必须调用以排空流 |
 
 > **Consumer 不兼容说明**：V3 producer 可能发送 `DATA_MSG_OUTPUT_EVENT`（103）+ 剪贴板变长负载。V2 consumer 没有 `poll_output_event()`，无法读取这些消息，导致 data channel 流损坏。
@@ -602,7 +608,7 @@ stateDiagram-v2
 | 组件 | 兼容性 | 是否需要修改 |
 |------|--------|-------------|
 | **Producer 库** | **不兼容** | **必须修改**：添加 `INPUT_TYPE_CLIPBOARD` 处理或调用 `handle_unhandled_event()` |
-| **Consumer 库** | **不兼容** | **必须修改**：添加 `poll_output_event()` 调用或调用 `handle_unhandled_event()` |
+| **Consumer 库** | **不兼容** | **必须修改**：向 `refresh_done()` 传入 `out_fence`、失败时 cancel，并添加 `poll_output_event()` 调用或调用 `handle_unhandled_event()` |
 | **Daemon** | **完全兼容** | 零修改 |
 | **线上协议** | **不兼容** | V3 引入变长事件和新消息类型 (103) |
 
@@ -614,9 +620,10 @@ stateDiagram-v2
 | V2 producer + V3 consumer | ❌ **流损坏** — V3 consumer 可能发送 `INPUT_TYPE_CLIPBOARD` 变长事件，V2 producer 的 `poll_input_event()` 不排空尾随负载 |
 | V3 producer + V2 consumer | ❌ **流损坏** — V3 producer 可能发送 `DATA_MSG_OUTPUT_EVENT`(103) 变长事件，V2 consumer 无法读取 |
 | V2 producer + V2 consumer | ✅ **正常工作** — 与 V2 行为一致 |
+| V2 consumer 二进制 + V3 `libdisplay_consumer.so` | ❌ **ABI 不兼容** — 旧调用者没有传入 `out_fence` 指针 |
 | V1 producer + V3 `libdisplay_producer.so` | ❌ **流损坏** — V1 producer 调用 `poll_input_event()` 获取触摸/按键事件，当 V3 consumer 发送 `INPUT_TYPE_CLIPBOARD` 变长事件时，V1 代码不排空尾随负载 |
 | V1 producer + V3 consumer（无剪贴板） | ⚠️ **有条件正常** — 若 V3 consumer 从不发送剪贴板事件则不触发；但无法保证 |
-| V1 consumer + V3 `libdisplay_consumer.so` | ❌ **不兼容** — `refresh_done()` 返回 fence fd（V2 变更） |
+| V1 consumer + V3 `libdisplay_consumer.so` | ❌ **ABI 不兼容** — `refresh_done()` 现在要求传入 `out_fence` 指针 |
 | V3 daemon + V2/V3 producer/consumer | ✅ **正常工作** — daemon 不感知 fd 语义 |
 
 > [!CAUTION]

@@ -2288,7 +2288,7 @@ public class MainActivity extends Activity
                 || keyCode == KeyEvent.KEYCODE_META_RIGHT
                 || keyCode == KeyEvent.KEYCODE_SEARCH
                 || keyCode == KeyEvent.KEYCODE_ASSIST
-                || (keyCode >= KeyEvent.KEYCODE_F13 && keyCode <= KeyEvent.KEYCODE_F24);
+                || KeyCodeMapper.isExtendedFunctionKey(keyCode);
     }
 
     public boolean isAccessibilityInterceptEnabled() {

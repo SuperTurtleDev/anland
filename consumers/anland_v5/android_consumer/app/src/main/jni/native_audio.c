@@ -751,8 +751,11 @@ void audio_stop(audio_bridge *b)
 
 void audio_set_ctx(audio_bridge *b, display_ctx *ctx)
 {
-    if (b)
-        b->ctx = ctx;
+    if (!b)
+        return;
+    b->ctx = ctx;
+    if (ctx)
+        b->resend_formats = true;
 }
 
 void audio_set_mic_enabled(audio_bridge *b, int enabled)

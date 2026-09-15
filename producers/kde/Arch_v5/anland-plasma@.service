@@ -1,0 +1,16 @@
+[Unit]
+Description=Anland KWin Plasma session for %i
+After=basic.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/home/%i/anland-startup.sh /run/display.sock
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

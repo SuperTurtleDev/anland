@@ -357,8 +357,12 @@ sequenceDiagram
         P->>SHM: read index (get_selected_idx)
         P-->>P: render into dmabuf[idx]
         P-->>C: sendmsg(fence_fd, 1 byte ± fence fd via SCM_RIGHTS) (trigger_refresh)
-        C-->>C: recvmsg(fence_fd) → get fence fd (refresh_done)
-        C->>C: queueBuffer(fence_fd) → SurfaceFlinger waits GPU-side
+        C-->>C: recvmsg(fence_fd) → status + optional fence fd (refresh_done)
+        alt completion valid
+            C->>C: queueBuffer(fence_fd) → SurfaceFlinger waits GPU-side
+        else timeout / EOF / malformed / stale generation
+            C->>C: cancelBuffer(-1) → never present a failed buffer
+        end
     end
 
     Note over C,P: input flows the other way
@@ -379,8 +383,11 @@ sequenceDiagram
   `trigger_refresh()`.
 - `trigger_refresh()` sends 1 byte (+ optionally fence fd via `SCM_RIGHTS`)
   on the fence socketpair.
-- `refresh_done()` waits on fence channel with a **5 s** timeout, reads the message,
-  returns the fence fd (or `-1` if none).
+- `refresh_done(ctx, &fence_fd)` waits on the fence channel with a **5 s** timeout.
+  It returns `0` only after a valid producer completion and stores the optional fence fd
+  in `fence_fd` (`-1` when the producer sent none). On timeout, EOF, a malformed message,
+  or a connection-generation change it returns `-1`; the caller must cancel the dequeued
+  buffer and must not queue it.
 
 ### 7.1 Clipboard exchange (V3)
 
@@ -595,7 +602,7 @@ stateDiagram-v2
 | Function | V2 | V3 | Compatibility |
 |----------|----|----|---------------|
 | `connect_to_deamon()` | Same signature | Same signature | ✅ Unchanged |
-| `refresh_done()` | Returns fence fd (>=0 or -1) | Same signature | ✅ Unchanged |
+| `refresh_done()` | Returns fence fd (>=0 or -1) | Returns status; writes the optional fence to `int *out_fence` | ❌ **Signature/semantics changed** — queue only on `0`; cancel on `< 0` |
 | `push_dmabufs()` | Same signature | Same signature | ✅ Unchanged |
 | `select_dmabuf()` | Same signature | Same signature | ✅ Unchanged |
 | `set_screen_info()` | Same signature | Same signature | ✅ Unchanged |
@@ -606,7 +613,7 @@ stateDiagram-v2
 | `push_input_event_with_length()` | — | **V3 new**: send variable-length input event (clipboard) | ✅ New API |
 | `poll_output_event_extend_data()` | — | **V3 new**: drain variable-length output payload | ✅ New API |
 | `set_exit_fallback_callback()` | — | **V3 new**: callback on producer reconnect | ✅ New API |
-| `get_data_fd()` | — | **V3 new**: get data channel fd | ✅ New API |
+| `get_data_fd()` | — | **V3 new**: get an owned duplicate of the active data channel; caller closes it | ✅ New API |
 | `handle_unhandled_event()` | — | **V3 new**: drain unhandled variable-length events | ❌ **Required**: must call to keep stream clean |
 
 > **Consumer incompatibility**: A V3 producer may send `DATA_MSG_OUTPUT_EVENT`(103) with clipboard payload. A V2 consumer has no `poll_output_event()` and cannot read these messages, corrupting the data channel stream.
@@ -640,7 +647,7 @@ stateDiagram-v2
 | Component | Compatibility | Needs changes |
 |-----------|---------------|---------------|
 | **Producer library** | **Incompatible** | **Must update**: handle `INPUT_TYPE_CLIPBOARD` or call `handle_unhandled_event()` |
-| **Consumer library** | **Incompatible** | **Must update**: add `poll_output_event()` or call `handle_unhandled_event()` |
+| **Consumer library** | **Incompatible** | **Must update**: pass `out_fence` to `refresh_done()`, cancel on failure, and add `poll_output_event()` or call `handle_unhandled_event()` |
 | **Daemon** | **Fully compatible** | Zero changes |
 | **Wire protocol** | **Incompatible** | V3 introduces variable-length events and new message type (103) |
 
@@ -652,9 +659,10 @@ stateDiagram-v2
 | V2 producer + V3 consumer | ❌ **Stream corruption** — V2 `poll_input_event()` does not drain trailing payload |
 | V3 producer + V2 consumer | ❌ **Stream corruption** — V2 consumer cannot read `DATA_MSG_OUTPUT_EVENT`(103) |
 | V2 producer + V2 consumer | ✅ **Works** — same as V2 behavior |
+| V2 consumer binary + V3 `libdisplay_consumer.so` | ❌ **ABI incompatible** — the old caller supplies no `out_fence` pointer |
 | V1 producer + V3 `libdisplay_producer.so` | ❌ **Stream corruption** — V1 code does not drain clipboard payload |
 | V1 producer + V3 consumer (no clipboard) | ⚠️ **Conditional** — works if consumer never sends clipboard, but not guaranteed |
-| V1 consumer + V3 `libdisplay_consumer.so` | ❌ **Incompatible** — `refresh_done()` returns fence fd (V2 change) |
+| V1 consumer + V3 `libdisplay_consumer.so` | ❌ **ABI incompatible** — `refresh_done()` now requires an `out_fence` pointer |
 | V3 daemon + V2/V3 producer/consumer | ✅ **Works** — daemon is unaware of fd semantics |
 
 > [!CAUTION]

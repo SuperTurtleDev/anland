@@ -6,6 +6,11 @@ import android.view.KeyEvent;
 
 public class KeyCodeMapper {
     private static final SparseIntArray MAP = new SparseIntArray();
+    // Added in API 36; keep the stable Android keycode values so compileSdk 35
+    // builds can still forward extended function keys received at runtime.
+    private static final int KEYCODE_F13 = 326;
+    private static final int KEYCODE_F24 = 337;
+
 
     /** Android keycode → localized name, for the keys worth binding to. */
     private static final SparseIntArray NAME_RES = new SparseIntArray();
@@ -133,22 +138,16 @@ public class KeyCodeMapper {
         MAP.put(KeyEvent.KEYCODE_F10, 68);
         MAP.put(KeyEvent.KEYCODE_F11, 87);  // 修正
         MAP.put(KeyEvent.KEYCODE_F12, 88);  // 修正
-        MAP.put(KeyEvent.KEYCODE_F13, 183);
-        MAP.put(KeyEvent.KEYCODE_F14, 184);
-        MAP.put(KeyEvent.KEYCODE_F15, 185);
-        MAP.put(KeyEvent.KEYCODE_F16, 186);
-        MAP.put(KeyEvent.KEYCODE_F17, 187);
-        MAP.put(KeyEvent.KEYCODE_F18, 188);
-        MAP.put(KeyEvent.KEYCODE_F19, 189);
-        MAP.put(KeyEvent.KEYCODE_F20, 190);
-        MAP.put(KeyEvent.KEYCODE_F21, 191);
-        MAP.put(KeyEvent.KEYCODE_F22, 192);
-        MAP.put(KeyEvent.KEYCODE_F23, 193);
-        MAP.put(KeyEvent.KEYCODE_F24, 194);
+        for (int keyCode = KEYCODE_F13; keyCode <= KEYCODE_F24; keyCode++)
+            MAP.put(keyCode, 183 + keyCode - KEYCODE_F13);
 
         // Home / End
         MAP.put(KeyEvent.KEYCODE_MOVE_HOME, 102);
         MAP.put(KeyEvent.KEYCODE_MOVE_END, 107);
+    }
+
+    static boolean isExtendedFunctionKey(int keyCode) {
+        return keyCode >= KEYCODE_F13 && keyCode <= KEYCODE_F24;
     }
 
     public static int getScanCode(int keyCode) {

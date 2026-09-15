@@ -45,7 +45,7 @@ struct buf_info {
     uint32_t height;     /* buffer logical height (consumer-side native resolution) */
     uint32_t format;
     uint64_t modifier;
-    uint32_t offset;
+    uint32_t offset;        /* byte offset of plane 0 within the dma-buf */
 } __attribute__((packed));
 
 #define INPUT_TYPE_TOUCH          1
