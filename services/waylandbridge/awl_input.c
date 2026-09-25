@@ -554,14 +554,20 @@ static void tr_ptr_button(uint64_t win, uint32_t btn, uint32_t state) {
             int tracked = (g_ptr_buttons & bit) != 0;
             g_ptr_buttons &= ~bit;
             g_ptr_grabbed &= ~bit;
+
+            /* End the compositor-owned DnD grab before forwarding the
+             * physical release.  Firefox treats wl_pointer.button(released)
+             * as drag cancellation when it arrives before
+             * wl_data_device.drop: DOM sees pointerup/dragend, never drop,
+             * and the data offer remains unfinished.  drop first matches
+             * the semantic end of the implicit grab; the later release is
+             * retained for Chromium, which needs the paired pointer event. */
+            awl_datadev_drag_end();
+
             if (tracked) {
-                /* kwin seat.cpp pointer-release-during-drag: the drag button's
-                 * release is forwarded to the pointer-focused surface before
-                 * endDrag — the client ends its own drag session on it
-                 * (chromium never finished the DnD handshake without it:
-                 * no offer.finish, drag icon surface leaked, 2026-09-18
-                 * "mouse drag stuck"). Untracked releases (no matching press
-                 * went through the normal path) can't be paired → consumed. */
+                /* Keep the paired pointer release after the drop. Untracked
+                 * releases (no matching press through the normal path) cannot
+                 * be paired and are consumed. */
                 pthread_rwlock_rdlock(&g_srv.rwl);
                 struct awl_surface* s;
                 struct wl_resource* ptr = resolve(&g_ptrs, win, &s);
@@ -578,7 +584,6 @@ static void tr_ptr_button(uint64_t win, uint32_t btn, uint32_t state) {
                 }
                 pthread_rwlock_unlock(&g_srv.rwl);
             }
-            awl_datadev_drag_end();   /* release = drop (KWin endDrag) */
         }
         return;   /* presses during a drag are all consumed (implicit grab) */
     }
