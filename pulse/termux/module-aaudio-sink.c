@@ -62,8 +62,7 @@ PA_MODULE_USAGE(
 #define DEFAULT_SINK_NAME "AAudio sink"
 
 enum {
-    SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX,
-    SINK_MESSAGE_OPEN_STREAM
+    SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX
 };
 
 struct userdata {
@@ -99,6 +98,8 @@ static const char* const valid_modargs[] = {
     "no_close_hack",
     NULL
 };
+
+void pa__done(pa_module *m);
 
 static int process_render(struct userdata *u, void *audioData, int64_t numFrames) {
     pa_assert(u->sink->thread_info.state != PA_SINK_INIT);
@@ -196,61 +197,27 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
     switch (code) {
         case SINK_MESSAGE_RENDER:
             return process_render(u, data, offset);
-        case SINK_MESSAGE_OPEN_STREAM:
-            if (pa_open_aaudio_stream(u) < 0) {
-                pa_log("pa_open_aaudio_stream() failed.");
-                return -1;
-            }
-            code = PA_SINK_MESSAGE_SET_FIXED_LATENCY;
-            offset = get_latency(u);
-            break;
     }
 
     return pa_sink_process_msg(o, code, data, offset, memchunk);
 };
 
-static int state_func_main(pa_sink *s, pa_sink_state_t state, pa_suspend_cause_t suspend_cause) {
-    struct userdata *u = s->userdata;
-    uint32_t idx;
-    pa_sink_input *i;
-    pa_idxset *inputs;
-
-    if (s->state == PA_SINK_SUSPENDED && PA_SINK_IS_OPENED(state)) {
-        if (pa_asyncmsgq_send(u->aaudio_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_OPEN_STREAM, NULL, 0, NULL) < 0)
-            return -1;
-
-        inputs = pa_idxset_copy(s->inputs, NULL);
-        PA_IDXSET_FOREACH(i, inputs, idx) {
-            if (i->state == PA_SINK_INPUT_RUNNING) {
-                pa_sink_input_cork(i, true);
-            } else {
-                pa_idxset_remove_by_index(inputs, idx);
-            }
-        }
-
-        s->alternate_sample_rate = u->ss.rate;
-        pa_sink_reconfigure(s, &u->ss, false);
-        s->default_sample_rate = u->ss.rate;
-
-        /* Avoid infinite loop triggered if uncork in this case */
-        if (s->suspend_cause == PA_SUSPEND_IDLE)
-            pa_sink_suspend(u->sink, true, PA_SUSPEND_UNAVAILABLE);
-
-        PA_IDXSET_FOREACH(i, inputs, idx) pa_sink_input_cork(i, false);
-        pa_idxset_free(inputs, NULL);
-    }
-    return 0;
-}
-
 static int state_func_io(pa_sink *s, pa_sink_state_t state, pa_suspend_cause_t suspend_cause) {
     struct userdata *u = s->userdata;
 
-    if (PA_SINK_IS_OPENED(s->thread_info.state) &&
-        (state == PA_SINK_SUSPENDED || state == PA_SINK_UNLINKED)) {
+    if (PA_SINK_IS_LINKED(s->thread_info.state) && state == PA_SINK_UNLINKED) {
         if (!u->no_close)
             AAudioStream_close(u->stream);
         else
             AAudioStream_requestStop(u->stream);
+    } else if (PA_SINK_IS_OPENED(s->thread_info.state) &&
+               state == PA_SINK_SUSPENDED) {
+        /* Closing here can wait for data_callback(), which is synchronously
+         * waiting for this IO thread's message queue.  It deadlocks on
+         * alioth.  Stop and retain the stream; resume reuses it instead of
+         * leaking a newly opened AAudioStream on every idle wake. */
+        if (AAudioStream_requestStop(u->stream) < 0)
+            pa_log("AAudioStream_requestStop() failed.");
     } else if (s->thread_info.state == PA_SINK_SUSPENDED && PA_SINK_IS_OPENED(state)) {
         if (AAudioStream_requestStart(u->stream) < 0)
             pa_log("AAudioStream_requestStart() failed.");
@@ -378,7 +345,6 @@ int pa__init(pa_module*m) {
     }
 
     u->sink->parent.process_msg = sink_process_msg;
-    u->sink->set_state_in_main_thread = state_func_main;
     u->sink->set_state_in_io_thread = state_func_io;
     u->sink->reconfigure = reconfigure_func;
     u->sink->userdata = u;
