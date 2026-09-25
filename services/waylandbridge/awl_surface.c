@@ -364,14 +364,15 @@ static void shm_buffer_gone(struct wl_listener* l, void* data) {
 }
 
 /* wl_callback(frame) resource destroyed → removed from the surface list.
- * Multi-threaded entry (presented direct send / client destroy / surface
- * destroy) → ev_lock */
+ * Resource-map mutation is dispatch-thread-only.  The render thread only
+ * marks a callback delivered; surface_frame() retires it on the client's
+ * next request (or surface teardown retires it during client destruction). */
 static void frame_cb_res_destroy(struct wl_resource* res) {
     struct awl_frame_cb* cb = wl_resource_get_user_data(res);
     if (cb) {
         struct awl_surface* s = cb->s;
         pthread_mutex_lock(&s->ev_lock);
-        if (!cb->detached) wl_list_remove(&cb->link);
+        wl_list_remove(&cb->link);
         pthread_mutex_unlock(&s->ev_lock);
         free(cb);
     }
@@ -826,6 +827,22 @@ static void surface_frame(struct wl_client* client, struct wl_resource* res,
     LOGD("frame cb id=%u", callback);
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
+
+    /* wl_resource_destroy mutates the client's object map and is unsafe from
+     * the render thread while this dispatch thread may be creating another
+     * callback with a freshly reusable id.  Retire callbacks whose done was
+     * sent by awl_surface_presented() here, before creating the replacement.
+     * The client allocates a different id until delete_id is emitted, so the
+     * one-request delay is protocol-safe and bounds the parked set. */
+    pthread_mutex_lock(&s->ev_lock);
+    struct awl_frame_cb* old;
+    struct awl_frame_cb* old_tmp;
+    wl_list_for_each_safe(old, old_tmp, &s->frame_callbacks, link) {
+        if (old->detached)
+            wl_resource_destroy(old->resource); /* recursive ev_lock listener */
+    }
+    pthread_mutex_unlock(&s->ev_lock);
+
     struct wl_resource* cb_res = wl_resource_create(
             client, &wl_callback_interface, 1, callback);
     struct awl_frame_cb* cb = calloc(1, sizeof(*cb));
@@ -1196,10 +1213,11 @@ void awl_surface_shm_end(awl_shm_frame_t* f, int consumed) {
     f->pixels = NULL;
 }
 
-/* Render thread sends directly (no longer marshaled through the event
- * thread): rd resolution → send frame_done under ev_lock. cb resources
- * are destroyed inside the lock — ev_lock is recursive, listener
- * re-entry is safe. */
+/* Render thread sends done directly under ev_lock, but does not destroy the
+ * callback resource here: wl_resource_destroy mutates the client object map
+ * and can race its dispatch thread creating the next callback.  Delivered
+ * callbacks are parked in the list and retired by surface_frame() on that
+ * dispatch thread (or by surface teardown). */
 void awl_surface_presented(uint64_t id) {
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s = awl_surface_by_id(id);
@@ -1211,10 +1229,9 @@ void awl_surface_presented(uint64_t id) {
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
     wl_list_for_each_safe(cb, tmp, &s->frame_callbacks, link) {
+        if (cb->detached) continue;   /* done sent; waiting for dispatch-thread GC */
         wl_callback_send_done(cb->resource, awl_now_ms());
         cb->detached = 1;
-        wl_list_remove(&cb->link);
-        wl_resource_destroy(cb->resource);   /* listener: detached → free */
     }
     /* (buffer releases are not tied to presentation any more: they go out
      * when the frame leaves the surface's queue — bq_release_cb) */

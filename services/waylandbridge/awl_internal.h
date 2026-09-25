@@ -83,7 +83,7 @@ struct awl_buffer {
 struct awl_frame_cb {
     struct wl_resource* resource;
     struct awl_surface* s;           /* owner for backfill (destroy listener takes lock via it) */
-    int detached;                    /* already unlinked from the list (presented path: unlink first, destroy later) */
+    int detached;                    /* done sent; parked until dispatch-thread destruction */
     struct wl_list link;
 };
 
