@@ -1,4 +1,6 @@
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* for recvmsg()/SCM_RIGHTS; DE builds already define it */
+#endif
 #include "display_producer.h"
 #include "socket_utils.h"
 
@@ -479,6 +481,21 @@ bool is_fallback(display_ctx *ctx)
     return ctx->fallback;
 }
 
+bool is_daemon_alive(display_ctx *ctx)
+{
+    if (!ctx || ctx->ctrl_fd < 0)
+        return false;
+
+    /* Non-blocking liveness probe: a healthy idle daemon connection reports no
+     * revents at all, a closed/restarted one reports POLLHUP (or POLLERR when the
+     * peer went away mid-write). Nothing is consumed from the socket. */
+    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) < 0)
+        return false;
+
+    return !(pfd.revents & (POLLHUP | POLLERR | POLLNVAL));
+}
+
 void force_fallback(display_ctx *ctx)
 {
     if (!ctx || ctx->fallback)
@@ -538,10 +555,19 @@ int get_buf_count(display_ctx *ctx)
 
 int get_selected_idx(display_ctx *ctx)
 {
-    if (!ctx->shm_ptr)
-        return 0;
-    uint32_t idx = *ctx->shm_ptr;
-    return (idx < (uint32_t)ctx->buf_count) ? (int)idx : 0;
+    int raw = get_selected_idx_raw(ctx);
+    return (raw >= 0 && raw < ctx->buf_count) ? raw : 0;
+}
+
+/* Unclamped view of the consumer's shared index page. The producer must not
+ * trust this value: it is written by the consumer and read without a lock, so a
+ * backend that switches framebuffers on it checks it against get_buf_count()
+ * first and treats anything else as consumer loss. */
+int get_selected_idx_raw(display_ctx *ctx)
+{
+    if (!ctx || !ctx->shm_ptr)
+        return -1;
+    return (int)(*ctx->shm_ptr);
 }
 
 int get_dmabuf_fd(display_ctx *ctx)

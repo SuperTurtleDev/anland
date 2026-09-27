@@ -7,23 +7,16 @@
 # are root or an ordinary user with sudo rights.
 #
 # The Mutter patch enables the Anland backend, and the sibling 'mutter/'
-# directory contains the backend files copied into the source tree.
-#
-# The Mutter version below is a *preference*, not a hard pin: it names the
-# packaging revision the patch was written against. Debian supersedes revisions
-# in trixie-updates/-security, which drops the superseded one from the archive,
-# so a hard pin eventually stops resolving and wedges the build. When the
-# preferred revision is gone the script falls back to the newest source version
-# apt can see and lets the patch step report whether it still applies. XWayland
-# always follows the latest source version available to apt.
+# directory contains the backend files copied into the source tree. The Mutter
+# source version is pinned below because the patch targets that Ubuntu package
+# revision. XWayland follows the latest source version available to apt.
 #
 # You can override the patch locations with MUTTER_PATCH=... and
-# XWAYLAND_PATCH=... ./build.sh, and pin a different Mutter revision with
-# MUTTER_VERSION=... ./build.sh.
+# XWAYLAND_PATCH=... ./build.sh.
 #
 set -u
 
-MUTTER_VERSION="${MUTTER_VERSION:-48.7-0+deb13u1}"
+MUTTER_VERSION='48.7-0+deb13u1'
 
 # ---- sudo helper (no-op if already root) -----------------------------------
 if [ "$(id -u)" -eq 0 ]; then
@@ -73,49 +66,14 @@ ensure_deb_src() {
     $SUDO apt-get update -qq || warn "apt-get update reported issues"
 }
 
-# ---- resolve a source version apt can actually fetch ------------------------
-# A pinned packaging revision only exists until Debian supersedes it in
-# trixie-updates/-security; the superseded revision then leaves the archive and
-# `apt-get source pkg=version` fails outright. Treat the pin as a preference:
-# keep it while it resolves, otherwise fall back to the newest revision apt
-# offers and let the patch step judge whether that source is still compatible.
-resolve_source_version() {
-    local src="$1" preferred="${2:-}"
-    local available latest
-
-    available="$(apt-cache showsrc "$src" 2>/dev/null | sed -n 's/^Version: //p')"
-    [ -n "$available" ] || { printf '\n'; return 0; }
-
-    if [ -n "$preferred" ] && \
-            printf '%s\n' "$available" | grep -qxF -- "$preferred"; then
-        printf '%s\n' "$preferred"
-        return 0
-    fi
-
-    latest="$(printf '%s\n' "$available" | sort -V | tail -1)"
-    if [ -n "$preferred" ]; then
-        # stderr, not warn(): callers capture stdout as the version to build.
-        printf '\033[1;33m[warn] source %s has no version %s; building %s instead\033[0m\n' \
-            "'$src'" "$preferred" "$latest" >&2
-    fi
-    printf '%s\n' "$latest"
-}
-
 # ---- build one source package with an optional overlay and patch ------------
 build_pkg() {
     local src="$1" patch="$2" version="${3:-}" overlay_dir="${4:-}" \
-        sentinel="${5:-}" resolved source_spec="$1" source_label
+        sentinel="${5:-}" source_spec="$1" source_label
 
     if [ -n "$version" ]; then
-        resolved="$(resolve_source_version "$src" "$version")"
-        if [ -n "$resolved" ]; then
-            source_spec="$src=$resolved"
-            source_label="$resolved"
-        else
-            # No deb-src index (e.g. showsrc unavailable): fall back to an
-            # unversioned fetch so apt resolves the newest source itself.
-            source_label="$version (unverified)"
-        fi
+        source_spec="$src=$version"
+        source_label="$version"
     else
         source_label='latest available'
     fi
@@ -137,20 +95,16 @@ build_pkg() {
     if [ -n "$overlay_dir" ]; then
         [ -d "$overlay_dir" ] || die "overlay directory not found: $overlay_dir"
         log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
-        cp -a "$overlay_dir/." "$tree/"
+        # Follow overlay symlinks so the staged source contains real backend
+        # files: the overlay reaches the shared device layer and protocol header
+        # through nested relative links, which would dangle once copied.
+        cp -aL "$overlay_dir/." "$tree/" \
+            || die "failed to stage the backend overlay for $src"
     fi
 
     log "Applying patch: $patch -> $tree"
-    if ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ); then
-        :
-    else
-        # already applied? Verify using the caller's patch sentinel.
-        if [ -n "$sentinel" ] && grep -rqF -- "$sentinel" "$tree" 2>/dev/null; then
-            warn "patch looks already applied, continuing"
-        else
-            die "patch did not apply cleanly for $src"
-        fi
-    fi
+    ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
+        || die "patch did not apply cleanly for $src"
 
     log "Building '$src' $source_label (.deb)"
     # -d: don't re-check build-deps (already installed above)
@@ -159,6 +113,10 @@ build_pkg() {
         dpkg-buildpackage -b -uc -us -d ) \
         || die "dpkg-buildpackage failed for $src"
 
+    if [ "${ANLAND_INSTALL:-0}" != 1 ]; then
+        log "Build only: not installing $src"
+        return 0
+    fi
     log "Installing built .deb(s) for '$src'"
     local debs
     debs="$(find "$WORKDIR/$src" -maxdepth 1 -name '*.deb' -type f)"
@@ -166,7 +124,7 @@ build_pkg() {
     printf '%s\n' "$debs"
     # shellcheck disable=SC2086
     $SUDO dpkg --force-confdef --force-confold -i $debs \
-        || warn "dpkg -i for $src reported issues (deps?)"
+        || die "dpkg -i for $src failed"
 }
 
 # ---------------------------------------------------------------------------
@@ -190,7 +148,12 @@ main() {
     build_pkg xwayland "$xwayland_patch" '' '' \
         'No usable linux-dmabuf main device'
 
-    sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment
+    if [ "${ANLAND_INSTALL:-0}" != 1 ]; then
+        log "Done. Built packages only; global environment unchanged."
+        return 0
+    fi
+    $SUDO sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment \
+        || die "failed to update /etc/environment"
 
     log "Done. Patched Mutter and XWayland built and installed."
     echo "Built packages are under: $WORKDIR/{mutter,xwayland}/"

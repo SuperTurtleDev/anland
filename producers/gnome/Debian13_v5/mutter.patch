@@ -884,27 +884,14 @@ index b0c103b0c7..28bcd61d2a 100644
      libeis_dep,
    ]
  endif
-@@ -901,6 +906,25 @@ if have_native_backend
+@@ -901,6 +906,12 @@ if have_native_backend
    ]
  endif
  
 +if have_anland
-+  mutter_sources += [
-+    'backends/anland/meta-backend-anland.c',
-+    'backends/anland/meta-backend-anland.h',
-+    'backends/anland/meta-anland-audio.c',
-+    'backends/anland/meta-anland-audio.h',
-+    'backends/anland/meta-anland-camera.c',
-+    'backends/anland/meta-anland-camera.h',
-+    'backends/anland/meta-anland-input.c',
-+    'backends/anland/meta-anland-input.h',
-+    'backends/anland/meta-anland-clipboard.c',
-+    'backends/anland/meta-anland-clipboard.h',
-+    'backends/anland/vendor/meta-anland-socket-utils.c',
-+    'backends/anland/vendor/meta-anland-socket-utils.h',
-+    'backends/anland/vendor/meta-anland-transport.c',
-+    'backends/anland/vendor/meta-anland-transport.h',
-+  ]
++  # The backend source list lives in the shared backend directory so every
++  # distribution overlay consumes one list instead of keeping its own copy.
++  subdir('backends/anland')
 +endif
 +
  if have_wayland or have_native_backend
@@ -914,25 +901,26 @@ diff --git a/src/tests/meson.build b/src/tests/meson.build
 index 99a7beaa69..4a5290c380 100644
 --- a/src/tests/meson.build
 +++ b/src/tests/meson.build
-@@ -141,6 +141,24 @@ gnome.compile_schemas(
+@@ -141,6 +141,25 @@ gnome.compile_schemas(
    depend_files: 'org.gnome.mutter.test.gschema.xml',
  )
  
-+anland_transport_test = executable('mutter-anland-transport-tests',
++anland_device_test = executable('mutter-anland-device-tests',
 +  sources: [
-+    'anland-transport-tests.c',
-+    '../backends/anland/vendor/meta-anland-socket-utils.c',
-+    '../backends/anland/vendor/meta-anland-transport.c',
++    'anland-device-tests.c',
++    '../backends/anland/libdisplay_producer/anland_device.c',
++    '../backends/anland/libdisplay_producer/display_producer.c',
++    '../backends/anland/libdisplay_producer/socket_utils.c',
 +  ],
 +  include_directories: [
 +    tests_includes,
-+    include_directories('../backends/anland/vendor'),
++    include_directories('../backends/anland/libdisplay_producer'),
 +  ],
 +  dependencies: glib_dep,
 +  install: false,
 +)
 +
-+test('anland-transport', anland_transport_test,
++test('anland-device', anland_device_test,
 +  suite: ['core', 'mutter/anland'],
 +)
 +

@@ -8,8 +8,8 @@
 # KWIN_TARBALL and XWAYLAND_TARBALL may point at locally cached source archives.
 # Repository-level tarballs are used when available before makepkg downloads the
 # pinned upstream sources. KWIN_PATCH and XWAYLAND_PATCH override the patches.
-# By default, successful builds are installed through pacman; set INSTALL=0
-# only when package artifacts are needed without changing the running system.
+# Builds do not install compositor packages by default. ANLAND_INSTALL=1 opts
+# into installation; INSTALL remains supported as an explicit legacy override.
 #
 set -euo pipefail
 
@@ -118,7 +118,7 @@ prepare_kwin_stage() {
 }
 
 export JOBS="${JOBS:-$(nproc)}"
-INSTALL="${INSTALL:-1}"
+INSTALL="${ANLAND_INSTALL:-${INSTALL:-0}}"
 [[ "$INSTALL" == '0' || "$INSTALL" == '1' ]] || die 'INSTALL must be 0 or 1'
 MAKEPKG_ARGS=(-C -f -s --clean)
 if [[ "$INSTALL" == '1' ]]; then

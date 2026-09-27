@@ -512,6 +512,13 @@ static int create_node(struct cam *cam)
 {
     if (cam->node)
         return 0;
+    /* PipeWire may be unreachable (no daemon, or a sandboxed XDG_RUNTIME_DIR).
+     * pw_stream_new() dereferences the core, so building a node without one would
+     * crash; defer instead and let on_reconnect_timer() -> create_nodes() create it
+     * once build_pw() succeeds. The caller still attaches the stream fd, so the
+     * camera shows up late rather than not at all. */
+    if (!cam->owner || !cam->owner->pw_connected || !cam->owner->core)
+        return -1;
     cam->streaming = false;
     cam->recording = false;
     cam->process_seen = false;

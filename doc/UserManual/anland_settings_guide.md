@@ -84,15 +84,11 @@ When enabled, the visible soft keyboard and extra keys bar occupy space at the b
 <a id="enable-immersive"></a>
 #### Enable Immersive Mode (Experimental)
 
-This is the master switch for immersive mode. To enter manually, bind the toggle key below and press it in the Anland desktop. The Gold keyboard source also offers automatic entry.
+This is the master switch for immersive mode. Enabling it does not enter the mode immediately; first bind the toggle key below, then press that key once in the Anland desktop.
 
 While active, physical input from the touchscreen, keyboard, mouse, and touchpad goes directly to the Linux desktop. Android's Back gesture, status bar, and navigation bar no longer take those inputs. This is useful for games, full-screen applications, and other cases that need complete keyboard and mouse behavior.
 
 This feature requires working root access and at least one input device that can be taken over. Anland automatically leaves immersive mode and returns input to Android when you switch apps, the window loses focus, or the screen is locked or turned off, so the Android interface remains accessible.
-
-“Gold keyboard directly to desktop” exclusively reads Gold's remapped output and sends raw keys to the desktop, including Meta and system shortcuts, without Android key dispatch. Touch, mouse and Android gestures remain available. The combined source also takes the selected physical pointer and touch devices.
-
-Gold's separate `Anland` mapping profile is preserved: entering selects it, and leaving restores the previous profile. Module upgrades retain saved profiles. Reboot after updating Gold to restore Android's native Meta shortcuts.
 
 Internally, Anland's root helper temporarily takes exclusive control of these input devices and forwards their raw events to the Linux desktop. It does more than hide the Android system bars.
 

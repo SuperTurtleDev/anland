@@ -13,6 +13,15 @@ set -eu
 SOCK="${1:-${ANLAND_SOCKET:-/run/display.sock}}"
 KWIN_BIN="${KWIN_BIN:-kwin_wayland}"
 
+# Refuse a second desktop instead of attaching to an existing Wayland socket.
+for process in kwin_wayland plasmashell startplasma-wayland; do
+    if pgrep -u "$(id -u)" -f "(^|/)${process}([[:space:]]|$)" >/dev/null; then
+        echo "An existing $process session is running; refusing to start another." >&2
+        exit 1
+    fi
+done
+[ -S "$SOCK" ] || { echo "Display socket not found: $SOCK" >&2; exit 1; }
+
 command -v "$KWIN_BIN" >/dev/null 2>&1 || {
     echo "kwin_wayland not found in PATH; set KWIN_BIN=/path/to/kwin_wayland" >&2
     exit 1

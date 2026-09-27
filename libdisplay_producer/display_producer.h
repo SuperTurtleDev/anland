@@ -77,6 +77,13 @@ int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *
 
 bool is_fallback(display_ctx *ctx);
 
+/* True while the daemon control connection is still usable. Turns false once the
+ * daemon died or restarted: the ctrl_fd then reports POLLHUP/POLLERR and every
+ * handshake step fails, which is indistinguishable from "no consumer yet" by
+ * return code alone. Backends use this to tell the two apart and reconnect from
+ * scratch instead of polling forever for a consumer that can never arrive. */
+bool is_daemon_alive(display_ctx *ctx);
+
 /* Drop the current consumer connection without dropping the daemon control
  * connection.  This is used when the KWin/EGL side cannot import a freshly
  * received dmabuf set; the caller can then use try_exit_fallback() to retry. */
@@ -95,7 +102,13 @@ int  get_data_fd(display_ctx *ctx);
 int  get_audio_fd(display_ctx *ctx);
 int  get_buffer_ready_fd(display_ctx *ctx);
 int  get_buf_count(display_ctx *ctx);
+/* Consumer-published framebuffer index, clamped into [0, buf_count) so callers
+ * can index their own array directly. */
 int  get_selected_idx(display_ctx *ctx);
+/* The same shared-page value WITHOUT clamping: -1 when no session is mapped,
+ * otherwise the raw index the consumer published. Lets a backend detect a
+ * corrupt/stale index instead of silently presenting buffer 0. */
+int  get_selected_idx_raw(display_ctx *ctx);
 int  get_dmabuf_fd(display_ctx *ctx);
 int  get_dmabuf_fd_at(display_ctx *ctx, int idx);
 int  get_dmabuf_info(display_ctx *ctx, struct buf_info *info);

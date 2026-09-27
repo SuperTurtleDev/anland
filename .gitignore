@@ -1,11 +1,13 @@
 # ---- Build outputs ----
 build/
+build-*/
 cmake-build-*/
 *.o
 *.a
 *.so
 *.out
 anland-daemon.zip
+*.log
 
 # CMake
 CMakeCache.txt
@@ -30,6 +32,9 @@ local.properties
 obj/
 .externalNativeBuild/
 
+# ---- KWin-verification private-header stubs (downloaded for syntax checks) ----
+.kwin-stubs/
+
 # ---- IDE ----
 .idea/
 *.iml
@@ -40,7 +45,3 @@ obj/
 # ---- OS ----
 .DS_Store
 Thumbs.db
-
-# 发布签名密钥，绝不入库
-anland-release.jks
-consumers/anland_v5/android_consumer/anland-release.jks

@@ -1,4 +1,6 @@
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* for recvmsg()/SCM_RIGHTS; DE builds already define it */
+#endif
 #include "socket_utils.h"
 
 #include <errno.h>

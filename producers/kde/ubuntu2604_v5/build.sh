@@ -30,7 +30,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${WORKDIR:-$HOME/anland-debbuild}"
-JOBS="$(nproc)"
+JOBS="${JOBS:-$(nproc)}"
 
 # ---- locate a patch file by name, regardless of where it lives -------------
 find_patch() {
@@ -74,18 +74,23 @@ ensure_deb_src() {
 build_pkg() {
     local src="$1" patch="$2"
 
-    log "Installing build dependencies for '$src'"
-    $SUDO apt-get build-dep -y "$src" || warn "build-dep for $src had issues; continuing"
-
-    log "Fetching source for '$src'"
-    rm -rf "${WORKDIR:?}/$src"
-    mkdir -p "$WORKDIR/$src"
-    ( cd "$WORKDIR/$src" && apt-get source "$src" ) \
-        || die "apt-get source $src failed"
-
-    local tree
-    tree="$(find "$WORKDIR/$src" -maxdepth 1 -type d -name "${src}-*" | head -1)"
-    [ -n "$tree" ] || die "could not find unpacked source tree for $src"
+    local tree=""
+    if [ "$src" = kwin ] && [ -n "${KWIN_SOURCE_TREE:-}" ]; then
+        tree="$(realpath "$KWIN_SOURCE_TREE")"
+        [ -f "$tree/debian/control" ] || die "KWIN_SOURCE_TREE lacks debian/control: $tree"
+        mkdir -p "$WORKDIR/$src"
+        log "Reusing prepared KWin source: $tree"
+    else
+        log "Installing build dependencies for '$src'"
+        $SUDO apt-get build-dep -y "$src" || die "build-dep for $src failed"
+        log "Fetching source for '$src'"
+        mkdir -p "$WORKDIR/$src"
+        ( cd "$WORKDIR/$src" && apt-get source "$src" ) \
+            || die "apt-get source $src failed"
+        tree="$(find "$WORKDIR/$src" -maxdepth 1 -type d -name "${src}-*" | head -1)"
+        [ -n "$tree" ] || die "could not find unpacked source tree for $src"
+    fi
+    ( cd "$tree" && dpkg-checkbuilddeps ) || die "build dependencies missing for $src"
 
     # ---- overlay: copy local overrides into the source tree if present ------
     local overlay_dir="$SCRIPT_DIR/$src"
@@ -93,35 +98,48 @@ build_pkg() {
         log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
         # -L dereferences the libdisplay_producer symlinks so the merged tree
         # is self-contained (relative links only resolve inside the checkout).
-        cp -aL "$overlay_dir/." "$tree/"
+        cp -aL "$overlay_dir/." "$tree/" \
+            || die "failed to stage the backend overlay for $src"
     fi
 
     log "Applying patch: $patch -> $tree"
-    if ( cd "$tree" && patch -p1 --forward --reject-file=- < "$patch" ); then
-        :
+    if [ "$src" = kwin ] && [ -n "${KWIN_SOURCE_TREE:-}" ]; then
+        # Validate every hunk without changing the prepared source.
+        ( cd "$tree" && patch --batch --force --dry-run -R -p1 < "$patch" ) \
+            || die "prepared KWin source does not contain the complete kwin.patch"
+        log "Prepared source already contains kwin.patch"
     else
-        # already applied? verify by sentinel; otherwise fail
-        if grep -rqF "$sentinel" "$tree" 2>/dev/null; then
-            warn "patch looks already applied, continuing"
-        else
-            die "patch did not apply cleanly for $src"
-        fi
+        ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
+            || die "patch did not apply cleanly for $src"
     fi
 
     log "Building '$src' (.deb, keeping official version)"
     # -d: don't re-check build-deps (already installed above)
     # -b -uc -us: binary only, unsigned. changelog untouched -> official version.
     ( cd "$tree" && DEB_BUILD_OPTIONS="nocheck parallel=$JOBS" \
-        dpkg-buildpackage -b -uc -us -d ) \
+        dpkg-buildpackage -b -uc -us -d -nc ) \
         || die "dpkg-buildpackage failed for $src"
 
+    if [ "${ANLAND_INSTALL:-0}" != 1 ]; then
+        log "Build only: not installing $src"
+        return 0
+    fi
     log "Installing built .deb(s) for '$src'"
     local debs
-    debs="$(find "$WORKDIR/$src" -maxdepth 1 -name '*.deb' -type f)"
-    [ -n "$debs" ] || die "no .deb produced for $src"
-    printf '%s\n' "$debs"
-    # shellcheck disable=SC2086
-    $SUDO dpkg -i $debs || warn "dpkg -i for $src reported issues (deps?)"
+    local version="$(dpkg-parsechangelog -l "$tree/debian/changelog" -S Version)"
+    version="${version#*:}" # Debian package filenames omit the epoch.
+    local changes="$(dirname "$tree")/${src}_${version}_$(dpkg --print-architecture).changes"
+    [ -f "$changes" ] || die "no current .changes file produced for $src: $changes"
+    debs="$(awk '/^Files:/ {in_files=1; next} in_files && /^[^ ]/ {exit} in_files && $5 ~ /\.deb$/ {print $5}' "$changes")"
+    [ -n "$debs" ] || die "no .deb listed in $changes"
+    local files=() deb
+    while IFS= read -r deb; do
+        [[ "$deb" == *.deb && "$deb" != */* ]] || die "unsafe package name in $changes"
+        [ -f "$(dirname "$tree")/$deb" ] || die "missing package $deb"
+        files+=("$(dirname "$tree")/$deb")
+    done <<< "$debs"
+    printf '%s\n' "${files[@]}"
+    $SUDO dpkg -i "${files[@]}" || die "dpkg -i for $src failed"
 }
 
 # ---------------------------------------------------------------------------
@@ -136,23 +154,34 @@ main() {
     log "xwayland.patch : $xwl_patch"
     log "work dir       : $WORKDIR"
 
-    ensure_deb_src
+    if [ "${KWIN_ONLY:-0}" != 1 ] || [ -z "${KWIN_SOURCE_TREE:-}" ]; then
+        ensure_deb_src
+    fi
 
     # sentinels: a distinctive literal string introduced by each patch
     # (no regex metacharacters, so plain grep matches it verbatim).
     build_pkg kwin     "$kwin_patch"
-    build_pkg xwayland "$xwl_patch"
+    if [ "${KWIN_ONLY:-0}" != 1 ]; then
+        build_pkg xwayland "$xwl_patch"
+    fi
     
-    sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment
+    if [ "${ANLAND_INSTALL:-0}" != 1 ]; then
+        log "Done. Built packages only; global environment unchanged."
+        return 0
+    fi
+    $SUDO sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment \
+        || die "failed to update /etc/environment"
 
     # plasma-wayland.service imports this file before starting the compositor.
     # Keep the fast path here as well as in startup.sh, which is used by the
     # manual launch path.
-    sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment
-    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' >> /etc/environment
-    
-    log "Done. Patched kwin and Xwayland built and installed."
-    echo "Built packages are under: $WORKDIR/{kwin,xwayland}/"
+    $SUDO sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment \
+        || die "failed to update /etc/environment"
+    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' | $SUDO tee -a /etc/environment > /dev/null \
+        || die "failed to update /etc/environment"
+
+    log "Done. Patched KWin${KWIN_ONLY:+ (KWIN_ONLY)} built and installed."
+    echo "Built packages are under: ${KWIN_SOURCE_TREE:-$WORKDIR/kwin} parent directory."
     echo "Restart the compositor session for the changes to take effect."
 }
 

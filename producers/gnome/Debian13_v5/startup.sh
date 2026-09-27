@@ -1,17 +1,15 @@
 #!/bin/bash
-# Linux truncates process names to 15 characters in /proc, so cover both forms.
-gnome_processes=(gnome-shell gnome-session gnome-session-b gnome-session-s gnome-session-service mutter)
-gnome_user_id="$(id -u)"
-for process_name in "${gnome_processes[@]}"; do
-    pkill -TERM -u "$gnome_user_id" -x "$process_name" > /dev/null 2>&1 || true
+SOCK="${1:-/run/display.sock}"
+# Never terminate an existing graphical session implicitly.
+for process_name in gnome-shell gnome-session mutter; do
+    if pgrep -u "$(id -u)" -f "(^|/)${process_name}([[:space:]]|$)" >/dev/null; then
+        echo "An existing $process_name session is running; refusing to start another." >&2
+        exit 1
+    fi
 done
-sleep 1
-for process_name in "${gnome_processes[@]}"; do
-    pkill -KILL -u "$gnome_user_id" -x "$process_name" > /dev/null 2>&1 || true
-done
-
+[ -S "$SOCK" ] || { echo "Display socket not found: $SOCK" >&2; exit 1; }
 export ANLAND=1
-export ANLAND_SOCKET="${1:-/run/display.sock}"
+export ANLAND_SOCKET="$SOCK"
 export QT_QPA_PLATFORM=wayland XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome XDG_SESSION_TYPE=wayland GNOME_SHELL_SESSION_MODE=gnome
 export WAYLAND_DISPLAY=wayland-anland GNOME_WAYLAND_DISPLAY=wayland-anland
 export ANLAND_DRM_DEVICE=/dev/dri/renderD128
@@ -20,7 +18,6 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 sudo mkdir -p $XDG_RUNTIME_DIR
 sudo chown $(id -un):$(id -gn) $XDG_RUNTIME_DIR
 chmod 700 $XDG_RUNTIME_DIR
-rm -f $XDG_RUNTIME_DIR/wayland-* > /dev/null 2>&1
 sudo mkdir -p /tmp/.X11-unix
 sudo chmod 1777 /tmp/.X11-unix
-gnome-session
+exec gnome-session
