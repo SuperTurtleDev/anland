@@ -34,8 +34,11 @@
 
 #include <android/log.h>
 #include <android/native_window.h>
+#include <linux/dma-buf.h>
 #include <math.h>                 /* round: pixel-grid snap of the dst */
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>               /* close (release fence) */
 
 #include <atomic>
@@ -54,6 +57,7 @@
 struct wl_layer {
     struct awl_ahb_cache* cache = nullptr;
     awl_gl_shm_tex shm;
+    bool cpu_dmabuf = false;      /* sticky after vendor AHB forging is incompatible */
 };
 
 struct wl_window {
@@ -145,6 +149,51 @@ static void window_teardown_gl(wl_window* w) {
 
 static void render_thread_loop(wl_window* w);   /* defined at end of file */
 void awl_renderer_request_render(uint64_t id);  /* awl_renderer.hpp; used by render_frame's re-arm */
+
+/* Compatibility path for vendor gralloc layouts that cannot describe Mesa's
+ * linear KGSL pitch (alioth: client 2048px, Android allocator skips directly
+ * from 1792 to 2304).  The queue has already waited the acquire fence before
+ * this point.  Copy the linear AR24/XR24 dma-buf into the same GL texture
+ * uploader used by wl_shm; release happens only after the upload has returned.
+ * Full upload is deliberate: linux-dmabuf commits do not carry a stable damage
+ * snapshot in the queue element. */
+static GLuint dmabuf_cpu_texture(wl_layer* l, const struct awl_bq_buffer* b) {
+    size_t bytes = (size_t)b->stride * b->height;
+    if (!bytes || b->stride < b->width * 4) return 0;
+    off_t alloc = lseek(b->dmabuf_fd, 0, SEEK_END);
+    if (alloc > 0 && (uint64_t)alloc < bytes) {
+        LOGE("dmabuf CPU fallback allocation too small: %lld < %zu",
+             (long long)alloc, bytes);
+        return 0;
+    }
+    struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
+    bool cpu_sync = ioctl(b->dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync) == 0;
+    void* pixels = mmap(NULL, bytes, PROT_READ, MAP_SHARED, b->dmabuf_fd, 0);
+    if (pixels == MAP_FAILED) {
+        LOGE("dmabuf CPU fallback mmap %ux%u stride=%u failed: %s",
+             b->width, b->height, b->stride, strerror(errno));
+        if (cpu_sync) {
+            sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+            ioctl(b->dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync);
+        }
+        return 0;
+    }
+    awl_shm_frame_t f = {};
+    f.width = b->width;
+    f.height = b->height;
+    f.stride = b->stride;
+    f.format = b->format;
+    f.pixels = pixels;
+    f.dmg_full = 1;
+    f.serial = l->shm.serial + 1;
+    bool ok = awl_gl_shm_update(&l->shm, &f);
+    munmap(pixels, bytes);
+    if (cpu_sync) {
+        sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+        ioctl(b->dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    }
+    return ok ? l->shm.texture : 0;
+}
 
 /* Detach and reclaim a window entry (map removal inside g_map_lock, join/free
  * entirely outside the lock — join must not hold g_map_lock: it would stall
@@ -291,12 +340,24 @@ static void render_frame(wl_window* w) {
         uint32_t bw = 0, bh = 0, fmt = 0;
         if (b && b->dmabuf_fd >= 0) {
             /* dmabuf frame → forged AHB → EGLImage texture (cache hit from the second lap on) */
-            if (l.shm.texture) awl_gl_shm_release(&l.shm);   /* the surface left wl_shm */
-            if (!l.cache) l.cache = awl_ahb_cache_create(awl_gl_tex_payload_destroy);
-            struct awl_ahb_slot* s = l.cache
-                ? awl_ahb_cache_get(l.cache, b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, w->frame_no)
-                : nullptr;
-            if (s) tex = awl_gl_slot_texture(s);   /* 0 = forge/import refused — retry next frame */
+            if (!l.cpu_dmabuf) {
+                if (!l.cache) l.cache = awl_ahb_cache_create(awl_gl_tex_payload_destroy);
+                struct awl_ahb_slot* s = l.cache
+                    ? awl_ahb_cache_get(l.cache, b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, w->frame_no)
+                    : nullptr;
+                if (s) tex = awl_gl_slot_texture(s);
+            }
+            if (tex) {
+                if (l.shm.texture) awl_gl_shm_release(&l.shm);
+            } else {
+                tex = dmabuf_cpu_texture(&l, b);
+                if (tex && !l.cpu_dmabuf) {
+                    l.cpu_dmabuf = true;
+                    LOGI("window %llu layer %llu: AHB unavailable — linear dmabuf CPU upload fallback",
+                         (unsigned long long)w->id,
+                         (unsigned long long)lay[i].surface_id);
+                }
+            }
             bw = b->width;
             bh = b->height;
             fmt = b->format;
