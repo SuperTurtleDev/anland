@@ -1,0 +1,189 @@
+# Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+# Maintainer: Fabian Bornschein <fabiscafe@archlinux.org>
+# Contributor: Ionut Biru <ibiru@archlinux.org>
+# Contributor: Michael Kanis <mkanis_at_gmx_dot_de>
+
+pkgbase=mutter
+pkgname=(
+  mutter
+  mutter-devkit
+  mutter-docs
+)
+pkgver=50.5
+pkgrel=1.1
+
+pkgdesc="Window manager and compositor for GNOME"
+url="https://gitlab.gnome.org/GNOME/mutter"
+arch=(aarch64)
+license=(GPL-2.0-or-later)
+depends=(
+  at-spi2-core
+  cairo
+  colord
+  dconf
+  egl-wayland
+  fontconfig
+  fribidi
+  gdk-pixbuf2
+  glib2
+  glibc
+  glycin
+  gnome-desktop-4
+  gnome-settings-daemon
+  graphene
+  gsettings-desktop-schemas
+  gtk4
+  harfbuzz
+  iio-sensor-proxy
+  lcms2
+  libcanberra
+  libcolord
+  libdisplay-info
+  libdrm
+  libei
+  libgcc
+  libgirepository
+  libglvnd
+  libgudev
+  libinput
+  libpipewire
+  libsysprof-capture
+  libwacom
+  libx11
+  libxau
+  libxcb
+  libxcomposite
+  libxcursor
+  libxdamage
+  libxext
+  libxfixes
+  libxi
+  libxinerama
+  libxkbcommon
+  libxrandr
+  mesa
+  pango
+  pipewire
+  pixman
+  python
+  python-argcomplete
+  python-dbus
+  python-gobject
+  startup-notification
+  systemd-libs
+  wayland
+  xorg-xwayland
+)
+makedepends=(
+  bash-completion
+  gi-docgen
+  git
+  glib2-devel
+  gobject-introspection
+  meson
+  python-docutils
+  sysprof
+  wayland-protocols
+)
+# Based on Arch's 50.5-1 PKGBUILD. Archive checksums pin the same 50.5 tag
+# and gvdb commit; the signed Arch git source is not silently substituted.
+source=(
+  "mutter-${pkgver}.tar.gz::https://codeload.github.com/GNOME/mutter/tar.gz/refs/tags/${pkgver}"
+  'gvdb-b54bc5da.tar.gz::https://gitlab.gnome.org/GNOME/gvdb/-/archive/b54bc5da25127ef416858a3ad92e57159ff565b3/gvdb-b54bc5da25127ef416858a3ad92e57159ff565b3.tar.gz'
+  'mutter.patch'
+  'mutter-overlay.tar.gz'
+)
+sha512sums=(
+  '940be388e3b46767544b68d04dd75322b03c2377ef6de3d6d3cd45a0bf4697424a4237c53260a086af7d985aef01b34e235fd390f2c1bf7e91b09bc54f981f14'
+  '1cd8d689758cda662737e5ec78d55e4f4c6934b0f429d8cadcec4a423bafd8765040f8d62c51d8797b101fff89df75a7b85e37006ea133ab81e600f205c2ef1e'
+  'bee4164e3c7b5912bb027a5593bed04da1968841c5c38e9d3d9059c5216ea0ca352213e7f97fdb3fe0b8946240e4d4a79371eee762cbbcd30118ebf8c7bafcfe'
+  'SKIP' # generated from this checkout by build.sh, not downloaded
+)
+prepare() {
+  [[ "$(uname -m)" == aarch64 ]] || { error 'Arch Mutter port requires aarch64'; return 1; }
+  local tree="$srcdir/mutter-${pkgver}"
+  local gvdb="$srcdir/gvdb-b54bc5da25127ef416858a3ad92e57159ff565b3"
+  [[ -d "$tree/subprojects" && -f "$gvdb/meson.build" ]] || return 1
+  rm -rf "$tree/subprojects/gvdb"
+  cp -a "$gvdb" "$tree/subprojects/gvdb" || return 1
+  tar -xzf "$srcdir/mutter-overlay.tar.gz" -C "$tree" || return 1
+  patch --batch --fuzz=0 -p1 -d "$tree" -i "$srcdir/mutter.patch" || return 1
+}
+
+build() {
+  local meson_options=(
+    -D docs=true
+    -D egl_device=true
+    -D installed_tests=false
+    -D tests=disabled
+    -D wayland_eglstream=true
+    -D anland=enabled
+    -D c_args=-DANLAND_MUTTER_50
+
+  )
+
+  CFLAGS="${CFLAGS/-O2/-O3} -fno-semantic-interposition"
+  LDFLAGS+=" -Wl,-Bsymbolic-functions"
+
+  # Inject gvdb
+  export MESON_PACKAGE_CACHE_DIR="$srcdir"
+
+  arch-meson "mutter-${pkgver}" build "${meson_options[@]}"
+  meson compile -C build
+}
+
+_pick() {
+  local p="$1" f d; shift
+  for f; do
+    d="$srcdir/$p/${f#$pkgdir/}"
+    mkdir -p "$(dirname "$d")"
+    mv "$f" "$d"
+    rmdir -p --ignore-fail-on-non-empty "$(dirname "$f")"
+  done
+}
+
+package_mutter() {
+  provides=(libmutter-18.so)
+  optdepends=(
+    'bash-completion: Bash completions for gdctl'
+    'mutter-devkit: Mutter SDK, "MDK"'
+  )
+
+  meson install -C build --destdir "$pkgdir"
+
+  _pick devkit "$pkgdir"/usr/lib/mutter-devkit
+  _pick devkit "$pkgdir"/usr/share/applications/org.gnome.Mutter.Mdk.desktop
+  _pick devkit "$pkgdir"/usr/share/icons/hicolor/scalable/apps/org.gnome.Mutter.Mdk.Devel.svg
+  _pick devkit "$pkgdir"/usr/share/icons/hicolor/scalable/apps/org.gnome.Mutter.Mdk.svg
+  _pick devkit "$pkgdir"/usr/share/icons/hicolor/symbolic/apps/org.gnome.Mutter.Mdk-symbolic.svg
+
+  _pick docs "$pkgdir"/usr/share/mutter-*/doc
+}
+
+package_mutter-devkit() {
+  pkgdesc="GNOME Mutter Development Kit"
+  depends=(
+    cairo
+    glib2
+    glibc
+    gtk4
+    hicolor-icon-theme
+    libadwaita
+    libei
+    libgcc
+    libpipewire
+    libxkbcommon
+    mutter
+  )
+
+  mv devkit/* "$pkgdir"
+}
+
+package_mutter-docs() {
+  pkgdesc+=" (documentation)"
+  depends=()
+
+  mv docs/* "$pkgdir"
+}
+
+# vim:set sw=2 sts=-1 et:

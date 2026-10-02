@@ -1,0 +1,86 @@
+# Maintainer: anland contributors
+# Official niri v26.04 plus the single repository Anland backend.
+pkgname=niri-anland
+pkgver=26.4.0
+pkgrel=5
+pkgdesc='Scrollable-tiling Wayland compositor with the common Anland producer backend'
+arch=('aarch64')
+url='https://github.com/niri-wm/niri'
+license=('GPL-3.0-or-later')
+_upstream_version=26.04
+_smithay_rev=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef
+depends=(glibc gcc-libs mesa libdrm libinput seatd libdisplay-info libxkbcommon pixman wayland pango cairo pipewire libpipewire systemd-libs xwayland-satellite xorg-xwayland)
+makedepends=(cargo rust cmake make gcc clang pkgconf patch tar unzip)
+source=(
+  "niri-${_upstream_version}.zip::https://github.com/niri-wm/niri/archive/refs/tags/v${_upstream_version}.zip"
+  "smithay-${_smithay_rev}.tar.gz::https://github.com/Smithay/smithay/archive/${_smithay_rev}.tar.gz"
+  'niri.patch'
+  'smithay.patch'
+  'anland-overlay.tar'
+)
+noextract=('anland-overlay.tar')
+sha256sums=(
+  '065c06f624ba46af8e82fe358ecc74392a645688a73871532d193c5d45bca6d5'
+  '2df0f01fd83ee01dc2fcd5976ac0004334b03ef567f467b6c511f11fc1c8a7b9'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+require_aarch64() {
+  [[ "$(uname -m)" == aarch64 && "${CARCH:-}" == aarch64 ]] || {
+    error 'this package must be built natively on Arch Linux ARM (aarch64)'
+    return 1
+  }
+}
+
+cargo_environment() {
+  export ANLAND_NIRI_BRIDGE_BUILD="$srcdir/bridge-build"
+  export CARGO_HOME="${ANLAND_NIRI_CARGO_HOME:-$srcdir/cargo-home}"
+  export CARGO_TARGET_DIR="${ANLAND_NIRI_TARGET_DIR:-$srcdir/cargo-target}"
+}
+
+prepare() {
+  require_aarch64 || return 1
+  local tree="$srcdir/niri-$_upstream_version"
+  local overlay="$srcdir/anland-overlay"
+  tar -xf "$srcdir/anland-overlay.tar" -C "$srcdir"
+  [[ -f "$tree/Cargo.lock" && -f "$overlay/producers/niri/anland_backend/mod.rs" ]] || {
+    error 'official niri source or shared backend overlay missing'; return 1;
+  }
+  patch --batch --forward --fuzz=0 -Np1 -d "$tree" -i "$srcdir/niri.patch"
+  patch --batch --forward --fuzz=0 -Np1 -d "$srcdir/smithay-$_smithay_rev" -i "$srcdir/smithay.patch"
+  mkdir -p "$tree/src/backend/anland"
+  install -m644 "$overlay"/producers/niri/anland_backend/*.rs "$tree/src/backend/anland/"
+  cargo_environment
+  cd "$tree"
+  # Download release-locked dependencies explicitly, then compile offline.
+  if [[ ${ANLAND_OFFLINE:-0} == 1 ]]; then
+    cargo fetch --locked --offline --target aarch64-unknown-linux-gnu
+  else
+    cargo fetch --locked --target aarch64-unknown-linux-gnu
+  fi
+}
+
+build() {
+  local tree="$srcdir/niri-$_upstream_version"
+  local overlay="$srcdir/anland-overlay"
+  cmake -S "$overlay/producers/niri/anland_backend" -B "$srcdir/bridge-build" \
+    -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$srcdir/bridge-build" --parallel "${JOBS:-$(nproc)}"
+  cargo_environment
+  cd "$tree"
+  cargo build --release --locked --offline -j "${JOBS:-$(nproc)}"
+  LD_LIBRARY_PATH="$srcdir/bridge-build:$srcdir/bridge-build/common/libdisplay_producer${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    "$CARGO_TARGET_DIR/release/niri" --version
+}
+
+package() {
+  local tree="$srcdir/niri-$_upstream_version"
+  local target="${ANLAND_NIRI_TARGET_DIR:-$srcdir/cargo-target}"
+  install -Dm755 "$target/release/niri" "$pkgdir/usr/bin/niri-anland"
+  install -Dm755 "$srcdir/bridge-build/libanland_niri_bridge.so" "$pkgdir/usr/lib/libanland_niri_bridge.so"
+  install -Dm755 "$srcdir/bridge-build/common/libdisplay_producer/libdisplay_producer.so" "$pkgdir/usr/lib/libdisplay_producer.so"
+  install -Dm644 "$tree/resources/default-config.kdl" "$pkgdir/usr/share/doc/$pkgname/default-config.kdl"
+  install -Dm644 "$tree/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

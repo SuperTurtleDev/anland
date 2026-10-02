@@ -512,6 +512,13 @@ static int create_node(struct cam *cam)
 {
     if (cam->node)
         return 0;
+    /* PipeWire may be unreachable (no daemon, or a sandboxed XDG_RUNTIME_DIR).
+     * pw_stream_new() dereferences the core, so building a node without one would
+     * crash; defer instead and let on_reconnect_timer() -> create_nodes() create it
+     * once build_pw() succeeds. The caller still attaches the stream fd, so the
+     * camera shows up late rather than not at all. */
+    if (!cam->owner || !cam->owner->pw_connected || !cam->owner->core)
+        return -1;
     cam->streaming = false;
     cam->recording = false;
     cam->process_seen = false;
@@ -670,6 +677,13 @@ static void query_max_res(int ctrl_fd, uint32_t *w, uint32_t *h, int n)
 
 /* ---- public API ---- */
 
+static int limit_camera_resources(const int *stream_fds, int num_cameras)
+{
+    for (int i = MAX_CAMERAS; i < num_cameras; ++i)
+        if (stream_fds[i] >= 0) close(stream_fds[i]);
+    return num_cameras > MAX_CAMERAS ? MAX_CAMERAS : num_cameras;
+}
+
 void anland_camera_set_resources(int ctrl_fd, const int *stream_fds, int num_cameras)
 {
     /* Lazily bring the engine up on the first resource delivery: the PipeWire
@@ -684,8 +698,8 @@ void anland_camera_set_resources(int ctrl_fd, const int *stream_fds, int num_cam
         return;
     }
     struct anland_camera *c = g_cam;
-    if (num_cameras > MAX_CAMERAS)
-        num_cameras = MAX_CAMERAS;
+    // Ownership covers ALL descriptors, including unsupported cameras.
+    num_cameras = limit_camera_resources(stream_fds, num_cameras);
 
     /* Only worth the blocking GET_INFO round-trip when we'll actually create a NEW
      * node: existing (persistent) nodes keep their negotiated format across reconnects,

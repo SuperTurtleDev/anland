@@ -8,8 +8,8 @@
 # KWIN_TARBALL and XWAYLAND_TARBALL may point at locally cached source archives.
 # Repository-level tarballs are used when available before makepkg downloads the
 # pinned upstream sources. KWIN_PATCH and XWAYLAND_PATCH override the patches.
-# By default, successful builds are installed through pacman; set INSTALL=0
-# only when package artifacts are needed without changing the running system.
+# Builds do not install compositor packages by default. ANLAND_INSTALL=1 opts
+# into installation; INSTALL remains supported as an explicit legacy override.
 #
 set -euo pipefail
 
@@ -27,6 +27,15 @@ fi
 
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Extra arguments cannot bypass explicit installation or source verification.
+for arg in "$@"; do
+    case "$arg" in
+        --nocheck|--noconfirm|--log|--nosign|--needed|--force|--syncdeps|--clean|--cleanbuild|-f|-s|-c|-C) ;;
+        *) die "Unsupported makepkg option: $arg (use ANLAND_INSTALL=1 to install)" ;;
+    esac
+done
+[[ "${JOBS:-$(nproc)}" =~ ^[1-9][0-9]*$ ]] || die 'JOBS must be a positive integer'
 
 [[ "$VERSION" == '6.7.4' ]] || die "this Arch port is tied to KWin 6.7.4 (got $VERSION)"
 [[ "$(id -u)" -ne 0 ]] || die 'makepkg must run as an unprivileged user'
@@ -118,7 +127,7 @@ prepare_kwin_stage() {
 }
 
 export JOBS="${JOBS:-$(nproc)}"
-INSTALL="${INSTALL:-1}"
+INSTALL="${ANLAND_INSTALL:-${INSTALL:-0}}"
 [[ "$INSTALL" == '0' || "$INSTALL" == '1' ]] || die 'INSTALL must be 0 or 1'
 MAKEPKG_ARGS=(-C -f -s --clean)
 if [[ "$INSTALL" == '1' ]]; then
@@ -157,8 +166,9 @@ prepare_xwayland_stage
 run_makepkg "$XWAYLAND_STAGE" "$XWAYLAND_SRCDEST_DIR" "$XWAYLAND_BUILDDIR" "$@"
 
 shopt -s nullglob
-xwayland_packages=("$PKGDEST_DIR"/xorg-xwayland-"$XWAYLAND_VERSION"-*.pkg.tar.*)
-(( ${#xwayland_packages[@]} > 0 )) || die 'makepkg finished without producing an aarch64 Xwayland package'
+mapfile -t xwayland_packages < <(cd "$XWAYLAND_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
+(( ${#xwayland_packages[@]} > 0 )) || die 'makepkg returned no xwayland package names'
+for pkg in "${xwayland_packages[@]}"; do [[ -s "$pkg" ]] || die "missing package: $pkg"; done
 if [[ "$INSTALL" == '1' ]]; then
     log 'Installing the freshly built patched Xwayland package'
     install_packages "${xwayland_packages[@]}"
@@ -167,8 +177,9 @@ fi
 prepare_kwin_stage
 run_makepkg "$KWIN_STAGE" "$KWIN_SRCDEST_DIR" "$KWIN_BUILDDIR" "$@"
 
-kwin_packages=("$PKGDEST_DIR"/kwin-"$VERSION"-*.pkg.tar.*)
-(( ${#kwin_packages[@]} > 0 )) || die 'makepkg finished without producing an aarch64 KWin package'
+mapfile -t kwin_packages < <(cd "$KWIN_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
+(( ${#kwin_packages[@]} > 0 )) || die 'makepkg returned no kwin package names'
+for pkg in "${kwin_packages[@]}"; do [[ -s "$pkg" ]] || die "missing package: $pkg"; done
 if [[ "$INSTALL" == '1' ]]; then
     log 'Installing the freshly built anland KWin package'
     install_packages "${kwin_packages[@]}"

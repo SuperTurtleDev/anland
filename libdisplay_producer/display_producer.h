@@ -39,7 +39,11 @@ void set_render_fence(display_ctx *ctx, int fence_fd);
 int  trigger_refresh(display_ctx *ctx);
 
 /* Pull one pending input event. Returns 1 if an event was written, 0 if none was
- * available, -1 on consumer loss. No-op (returns 0) in fallback. */
+ * available, -1 on consumer loss. No-op (returns 0) in fallback.
+ * timeout=0 never blocks; incomplete bytes/fds are retained in the context.
+ * Retry the same operation/size until complete; do not poll a new header while
+ * an extended payload is pending. Incomplete frames expire after 5 seconds.
+ * Access to a context must be serialized by the caller. */
 int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
 int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms);
 
@@ -58,6 +62,9 @@ int  poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
  * three zeros). No-op (returns 0) in fallback. */
 int  push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args);
 
+/* Complete-write semantics, with a 10ms data-channel deadline. On backpressure
+ * or partial failure the session is detached to preserve framing; returns -1.
+ * This is bounded synchronous I/O, not an asynchronous output queue. */
 int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
 /* Variable-length output events: an output event may carry extra trailing payload,
  * hence this length-aware variant. The sender must set the event's size field to
@@ -77,6 +84,13 @@ int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *
 
 bool is_fallback(display_ctx *ctx);
 
+/* True while the daemon control connection is still usable. Turns false once the
+ * daemon died or restarted: the ctrl_fd then reports POLLHUP/POLLERR and every
+ * handshake step fails, which is indistinguishable from "no consumer yet" by
+ * return code alone. Backends use this to tell the two apart and reconnect from
+ * scratch instead of polling forever for a consumer that can never arrive. */
+bool is_daemon_alive(display_ctx *ctx);
+
 /* Drop the current consumer connection without dropping the daemon control
  * connection.  This is used when the KWin/EGL side cannot import a freshly
  * received dmabuf set; the caller can then use try_exit_fallback() to retry. */
@@ -95,7 +109,13 @@ int  get_data_fd(display_ctx *ctx);
 int  get_audio_fd(display_ctx *ctx);
 int  get_buffer_ready_fd(display_ctx *ctx);
 int  get_buf_count(display_ctx *ctx);
+/* Consumer-published framebuffer index, clamped into [0, buf_count) so callers
+ * can index their own array directly. */
 int  get_selected_idx(display_ctx *ctx);
+/* The same shared-page value WITHOUT clamping: -1 when no session is mapped,
+ * otherwise the raw index the consumer published. Lets a backend detect a
+ * corrupt/stale index instead of silently presenting buffer 0. */
+int  get_selected_idx_raw(display_ctx *ctx);
 int  get_dmabuf_fd(display_ctx *ctx);
 int  get_dmabuf_fd_at(display_ctx *ctx, int idx);
 int  get_dmabuf_info(display_ctx *ctx, struct buf_info *info);

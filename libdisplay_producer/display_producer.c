@@ -1,4 +1,6 @@
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* for recvmsg()/SCM_RIGHTS; DE builds already define it */
+#endif
 #include "display_producer.h"
 #include "socket_utils.h"
 
@@ -10,6 +12,8 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/time.h>
 
 /* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
  * caller's reconnect loop stays responsive when no consumer is present yet. */
@@ -32,6 +36,13 @@ struct display_ctx {
     int      dmabuf_fds[MAX_BUFS];
     struct buf_info dmabuf_infos[MAX_BUFS];
     int      buf_count;
+    // Input framing state survives partial socket reads; owned by this context.
+    unsigned char *input_bytes;
+    size_t input_size, input_used;
+    int input_kind;
+    int input_fds[64], input_fd_count;
+    int64_t input_deadline;
+
 
     void (*pre_release_cb)(void *);
     void  *pre_release_userdata;
@@ -53,6 +64,11 @@ static void release_consumer_resources(display_ctx *ctx)
         }
     }
     ctx->buf_count = 0;
+    free(ctx->input_bytes); ctx->input_bytes = NULL;
+    ctx->input_size = ctx->input_used = 0; ctx->input_kind = 0;
+    for (int i = 0; i < ctx->input_fd_count; ++i) close(ctx->input_fds[i]);
+    ctx->input_fd_count = 0;
+
 
     if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
     if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
@@ -113,6 +129,9 @@ static int pickup_fds(display_ctx *ctx)
     ctx->data_fd          = fds[2];
     ctx->shm_fd           = fds[3];
     ctx->audio_fd         = fds[4];
+    struct timeval io_timeout = {.tv_sec=0, .tv_usec=100000};
+    if (setsockopt(ctx->data_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout)) < 0)
+        return -1;
 
     ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
     if (ctx->shm_ptr == MAP_FAILED) {
@@ -203,6 +222,11 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
 
     ctx->ctrl_fd = connect_unix(socket_path);
     if (ctx->ctrl_fd < 0)
+        goto fail;
+    // Handshake operations also have a finite per-syscall timeout.
+    struct timeval io_timeout = {.tv_sec=0, .tv_usec=100000};
+    if (setsockopt(ctx->ctrl_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout)) < 0 ||
+        setsockopt(ctx->ctrl_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout)) < 0)
         goto fail;
 
     struct ctrl_msg hdr = { .type = CTRL_MSG_PRODUCER_HELLO, .size = 0 };
@@ -318,75 +342,139 @@ int trigger_refresh(display_ctx *ctx)
     return 0;
 }
 
+static int64_t monotonic_ms(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* A zero timeout really is non-blocking. Partial bytes/fds remain context-owned
+ * until the complete frame is available. A framing error ends the session rather
+ * than ever parsing leftover payload as an event. Callers serialize the context. */
+static int input_step(display_ctx *ctx, void *out, size_t size, int kind, int timeout_ms)
+{
+    if (ctx->fallback) return 0;
+    if (!ctx->input_bytes) {
+        if (!size || size > 1024u * 1024u) { enter_fallback(ctx); return -1; }
+        ctx->input_bytes = malloc(size);
+        if (!ctx->input_bytes) { enter_fallback(ctx); return -1; }
+        ctx->input_size = size; ctx->input_used = 0; ctx->input_kind = kind;
+        ctx->input_deadline = kind == 1 ? 0 : monotonic_ms()+5000;
+        // An idle connection is not incomplete; an announced payload is.
+    }
+    if (ctx->input_size != size || ctx->input_kind != kind ||
+        (ctx->input_deadline && monotonic_ms() >= ctx->input_deadline)) { enter_fallback(ctx); return -1; }
+    struct pollfd pfd = { .fd=ctx->data_fd, .events=POLLIN };
+    // Never extend the frame's absolute deadline, even for timeout=-1.
+    int remaining = ctx->input_deadline ? (int)(ctx->input_deadline - monotonic_ms()) : 5000;
+    int wait = timeout_ms < 0 || timeout_ms > remaining ? remaining : timeout_ms;
+    int ready = poll(&pfd, 1, wait);
+    if (ready < 0) {
+        if (errno == EINTR) return 0;
+        enter_fallback(ctx); return -1;
+    }
+    if (!ready) return 0;
+    for (int budget = 0; budget < 16 && ctx->input_used < size; ++budget) {
+        ssize_t n;
+        if (kind == 3) {
+            struct iovec iov = {ctx->input_bytes + ctx->input_used, size - ctx->input_used};
+            union { struct cmsghdr align; char bytes[CMSG_SPACE(64 * sizeof(int))]; } control;
+            struct msghdr msg = {.msg_iov=&iov, .msg_iovlen=1,
+                .msg_control=control.bytes, .msg_controllen=sizeof(control.bytes)};
+            n = recvmsg(ctx->data_fd, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+            bool bad = msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC);
+            if (n > 0) {
+                for (struct cmsghdr *c=CMSG_FIRSTHDR(&msg); c; c=CMSG_NXTHDR(&msg,c)) {
+                    if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
+                    size_t count=(c->cmsg_len-CMSG_LEN(0))/sizeof(int);
+                    int *fds=(int *)CMSG_DATA(c);
+                    for (size_t i=0; i<count; ++i) {
+                        if (ctx->input_fd_count < 64) ctx->input_fds[ctx->input_fd_count++]=fds[i];
+                        else { close(fds[i]); bad=true; }
+                    }
+                }
+                if (bad) { enter_fallback(ctx); return -1; }
+            }
+        } else {
+            n = recv(ctx->data_fd, ctx->input_bytes + ctx->input_used,
+                     size - ctx->input_used, MSG_DONTWAIT);
+        }
+        if (n > 0) {
+            if (!ctx->input_deadline) ctx->input_deadline=monotonic_ms()+5000;
+            ctx->input_used += (size_t)n;
+        }
+        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) break;
+        else { enter_fallback(ctx); return -1; }
+    }
+    if (ctx->input_used != size) return 0;
+    memcpy(out, ctx->input_bytes, size);
+    free(ctx->input_bytes); ctx->input_bytes=NULL;
+    ctx->input_size=ctx->input_used=0; ctx->input_kind=0;
+    return 1;
+}
+
+static int input_read(display_ctx *ctx, void *out, size_t size, int kind, int timeout_ms)
+{
+    if (ctx->fallback) return 0;
+    int64_t deadline=monotonic_ms()+(timeout_ms < 0 ? 5000 : timeout_ms);
+    do {
+        int remaining=timeout_ms == 0 ? 0 : (int)(deadline-monotonic_ms());
+        if (remaining < 0) remaining=0;
+        int rc=input_step(ctx,out,size,kind,remaining);
+        if (rc != 0 || timeout_ms == 0) return rc;
+        if (monotonic_ms() >= deadline) {
+            if (ctx->input_used) { enter_fallback(ctx); return -1; }
+            return 0;
+        }
+    } while (true);
+}
+
 int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
 {
-    if (ctx->fallback)
-        return 0;
-
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
-    if (ret <= 0)
-        return 0;
-
-    if (pfd.revents & (POLLHUP | POLLERR)) {
-        enter_fallback(ctx);
-        return -1;
+    uint8_t bytes[sizeof(struct data_msg) + sizeof(struct InputEvent)];
+    int rc=input_read(ctx, bytes, sizeof(bytes), 1, timeout_ms);
+    if (rc <= 0) return rc;
+    struct data_msg hdr; memcpy(&hdr,bytes,sizeof(hdr));
+    if (hdr.type != DATA_MSG_INPUT_EVENT || hdr.size != sizeof(*event)) {
+        enter_fallback(ctx); return -1;
     }
-
-    /* Consume the message directly -- no MSG_PEEK pre-check. The stream framing
-     * guarantees the next message is an INPUT_EVENT: EXTEND_FDS is only sent
-     * immediately after the RESOURCE event announcing it (the caller drains it
-     * with poll_input_event_extend_fds before polling again) and BUFS_READY
-     * only at the handshake (drained by receive_dmabufs before fallback is
-     * cleared). The peek cost one extra syscall per event; a header mismatch
-     * here can only mean the stream desynced, so fall back instead of leaving
-     * unconsumed bytes wedged in the socket. */
-    uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
-    if (recv_all(ctx->data_fd, msg_buf, sizeof(msg_buf)) < 0)
-        return -1;
-
-    struct data_msg hdr;
-    memcpy(&hdr, msg_buf, sizeof(hdr));
-    if (hdr.type != DATA_MSG_INPUT_EVENT || hdr.size != sizeof(struct InputEvent)) {
-        enter_fallback(ctx);
-        return -1;
-    }
-
-    memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
-    return 1;
+    memcpy(event,bytes+sizeof(hdr),sizeof(*event)); return 1;
 }
 int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
                                 int *fd_count, int timeout_ms)
 {
-    *fd_count = 0;
-    if (ctx->fallback)
-        return 0;
-
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
-    if (ret <= 0)
-        return 0;
-
-    if (pfd.revents & (POLLHUP | POLLERR)) {
-        enter_fallback(ctx);
-        return -1;
-    }
-
+    *fd_count=0;
     struct data_msg hdr;
-    int got = 0;
-    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
-    if (n < (int)sizeof(struct data_msg)) {
-        for (int i = 0; i < got; i++)
-            close(fds[i]);
-        return -1;
+    int rc=input_read(ctx, &hdr, sizeof(hdr), 3, timeout_ms);
+    if (rc <= 0) return rc;
+    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS || hdr.size != 0 || max_fds < 0 || ctx->input_fd_count > max_fds) {
+        enter_fallback(ctx); return -1;
     }
-    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
-        for (int i = 0; i < got; i++)
-            close(fds[i]);
-        return -1;
+    *fd_count=ctx->input_fd_count;
+    memcpy(fds,ctx->input_fds,(size_t)*fd_count * sizeof(int));
+    ctx->input_fd_count=0; return 1;
+}
+
+// A bounded synchronous send preserves the existing API's completed-write
+// contract. On partial failure, detach: continuing would corrupt stream framing.
+static int output_send(display_ctx *ctx, const void *bytes, size_t size)
+{
+    size_t offset=0;
+    int64_t deadline=monotonic_ms()+10;
+    while (offset < size) {
+        if (monotonic_ms() >= deadline) { enter_fallback(ctx); return -1; }
+        ssize_t n=send(ctx->data_fd,(const char *)bytes+offset,size-offset,MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n > 0) { offset+=(size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            int remaining=(int)(deadline-monotonic_ms());
+            struct pollfd pfd={.fd=ctx->data_fd,.events=POLLOUT};
+            if (remaining > 0 && poll(&pfd,1,remaining)>0 && (pfd.revents & POLLOUT)) continue;
+        }
+        enter_fallback(ctx); return -1;
     }
-    *fd_count = got;
-    return 1;
+    return 0;
 }
 
 int push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args)
@@ -413,7 +501,7 @@ int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
     memcpy(msg, &hdr, sizeof(hdr));
     memcpy(msg + sizeof(hdr), event, sizeof(*event));
 
-    if (send_all(ctx->data_fd, msg, sizeof(msg)) < 0) {
+    if (output_send(ctx, msg, sizeof(msg)) < 0) {
         enter_fallback(ctx);
         return -1;
     }
@@ -434,7 +522,7 @@ int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *ev
     if (size > 0)
         memcpy(msg + sizeof(hdr) + sizeof(struct OutputEvent), payload, size);
 
-    if (send_all(ctx->data_fd, msg, msg_size) < 0) {
+    if (output_send(ctx, msg, msg_size) < 0) {
         free(msg);
         enter_fallback(ctx);
         return -1;
@@ -442,23 +530,15 @@ int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *ev
     free(msg);
     return 0;
 }
-int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms)
+int poll_input_event_extend_data(display_ctx *ctx, void *payload, size_t size, int timeout_ms)
 {
     if (ctx->fallback)
         return 0;
-
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
-    if (ret <= 0)
-        return 0;
-
-    if (pfd.revents & (POLLHUP | POLLERR)) {
-        enter_fallback(ctx);
-        return -1;
-    }
-    if (recv_all(ctx->data_fd, payload, size) < 0)
-        return -1;
-    return 1;
+    /* Empty text/clipboard events have no bytes to consume. Preserve the legacy
+     * completed-read contract without allocating or detaching the session. */
+    if (size == 0)
+        return 1;
+    return input_read(ctx, payload, size, 2, timeout_ms);
 }
 int set_pre_release_callback(display_ctx *ctx, void (*on_pre_release)(void *), void *userdata)
 {
@@ -477,6 +557,21 @@ int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *u
 bool is_fallback(display_ctx *ctx)
 {
     return ctx->fallback;
+}
+
+bool is_daemon_alive(display_ctx *ctx)
+{
+    if (!ctx || ctx->ctrl_fd < 0)
+        return false;
+
+    /* Non-blocking liveness probe: a healthy idle daemon connection reports no
+     * revents at all, a closed/restarted one reports POLLHUP (or POLLERR when the
+     * peer went away mid-write). Nothing is consumed from the socket. */
+    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) < 0)
+        return false;
+
+    return !(pfd.revents & (POLLHUP | POLLERR | POLLNVAL));
 }
 
 void force_fallback(display_ctx *ctx)
@@ -538,10 +633,19 @@ int get_buf_count(display_ctx *ctx)
 
 int get_selected_idx(display_ctx *ctx)
 {
-    if (!ctx->shm_ptr)
-        return 0;
-    uint32_t idx = *ctx->shm_ptr;
-    return (idx < (uint32_t)ctx->buf_count) ? (int)idx : 0;
+    int raw = get_selected_idx_raw(ctx);
+    return (raw >= 0 && raw < ctx->buf_count) ? raw : 0;
+}
+
+/* Unclamped view of the consumer's shared index page. The producer must not
+ * trust this value: it is written by the consumer and read without a lock, so a
+ * backend that switches framebuffers on it checks it against get_buf_count()
+ * first and treats anything else as consumer loss. */
+int get_selected_idx_raw(display_ctx *ctx)
+{
+    if (!ctx || !ctx->shm_ptr)
+        return -1;
+    return (int)(*ctx->shm_ptr);
 }
 
 int get_dmabuf_fd(display_ctx *ctx)

@@ -1,0 +1,230 @@
+diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
+--- a/src/backends/CMakeLists.txt
++++ b/src/backends/CMakeLists.txt
+@@ -1,3 +1,4 @@
++add_subdirectory(anland)
+ add_subdirectory(drm)
+ add_subdirectory(fakeinput)
+ add_subdirectory(libinput)
+diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
+--- a/src/main_wayland.cpp
++++ b/src/main_wayland.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "config-kwin.h"
+ 
++#include "backends/anland/anland_backend.h"
+ #include "backends/drm/drm_backend.h"
+ #include "backends/virtual/virtual_backend.h"
+ #include "backends/wayland/wayland_backend.h"
+@@ -354,6 +355,7 @@
+                                      i18n("Exits this instance so it can be restarted by kwin_wayland_wrapper."));
+ 
+     QCommandLineOption drmOption(QStringLiteral("drm"), i18n("Render through drm node."));
++    QCommandLineOption anlandOption(QStringLiteral("anland"), i18n("Render to the anland display daemon."));
+     QCommandLineOption locale1Option(QStringLiteral("locale1"), i18n("Extract locale information from locale1 rather than the user's configuration"));
+ 
+     QCommandLineParser parser;
+@@ -377,6 +379,7 @@
+     parser.addOption(scaleOption);
+     parser.addOption(outputCountOption);
+     parser.addOption(drmOption);
++    parser.addOption(anlandOption);
+     parser.addOption(locale1Option);
+ 
+     QCommandLineOption inputMethodOption(QStringLiteral("inputmethod"),
+@@ -438,6 +441,7 @@
+         X11,
+         Wayland,
+         Virtual,
++        Anland,
+     };
+ 
+     BackendType backendType;
+@@ -447,7 +451,9 @@
+     qreal outputScale = 1;
+ 
+     // Decide what backend to use.
+-    if (parser.isSet(drmOption)) {
++    if (parser.isSet(anlandOption) || qEnvironmentVariable("ANLAND") == QLatin1String("1") || qEnvironmentVariableIsSet("ANLAND_SOCKET")) {
++        backendType = BackendType::Anland;
++    } else if (parser.isSet(drmOption)) {
+         backendType = BackendType::Kms;
+ #if KWIN_BUILD_X11
+     } else if (parser.isSet(x11DisplayOption)) {
+@@ -502,6 +508,12 @@
+     }
+ 
+     switch (backendType) {
++    case BackendType::Anland: {
++        const QString socketPath = qEnvironmentVariable("ANLAND_SOCKET");
++        a.setSession(KWin::Session::create(KWin::Session::Type::Noop));
++        a.setOutputBackend(std::make_unique<KWin::AnlandBackend>(socketPath));
++        break;
++    }
+     case BackendType::Kms:
+         a.setSession(KWin::Session::create());
+         if (!a.session()) {
+diff --git a/src/inputmethod.h b/src/inputmethod.h
+--- a/src/inputmethod.h
++++ b/src/inputmethod.h
+@@ -72,6 +72,7 @@
+     void forceActivate();
+ 
+     void commitPendingText();
++    void commitText(const QString &text);
+ 
+ Q_SIGNALS:
+     void panelChanged();
+diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
+--- a/src/inputmethod.cpp
++++ b/src/inputmethod.cpp
+@@ -80,9 +80,11 @@
+         return {};
+     }
+ 
+-    if (text.isUpper()) {
++    // QString::isUpper() also accepts digits and punctuation (no lowercase).
++    // Only a genuinely uppercase character should synthesize Shift.
++    if (text.size() == 1 && text.front().isUpper()) {
+         return {KEY_LEFTSHIFT, quint32(keyCode.value())};
+     }
+ 
+     return {quint32(keyCode.value())};
+ }
+@@ -564,6 +566,13 @@
+         state = KeyboardKeyState::Released;
+     }
+     waylandServer()->seat()->notifyKeyboardKey(keysymToKeycode(sym), state);
++}
++
++void InputMethod::commitText(const QString &text)
++{
++    if (!text.isEmpty()) {
++        commitString(m_serial++, text);
++    }
+ }
+ 
+ void InputMethod::commitString(qint32 serial, const QString &text)
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -569,8 +569,8 @@
+         break;
+     case ANLAND_DEVICE_IN_PTR_AXIS: {
+         // protocol axis: 0 = vertical scroll, 1 = horizontal scroll (wayland order)
+-        const PointerAxis axis =
+-            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
++        const auto axis = ev.pointer_axis.axis == 0 ? InputRedirection::PointerAxisVertical
++                                                    : InputRedirection::PointerAxisHorizontal;
+         m_inputDevice->pointerAxis(axis, ev.pointer_axis.value, ev.pointer_axis.discrete * 120);
+         break;
+     }
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+--- a/src/backends/anland/anland_input.h
++++ b/src/backends/anland/anland_input.h
+@@ -24,8 +24,9 @@
+ 
+ public:
+     explicit AnlandInputDevice(QObject *parent = nullptr);
++    QString name() const override;
++    QString sysName() const override;
+ 
+-    QString name() const override;
+     bool isEnabled() const override;
+     void setEnabled(bool enabled) override;
+     LEDs leds() const override;
+@@ -44,7 +45,7 @@
+     void pointerMotionAbsolute(const QPointF &position);
+     void pointerMotion(const QPointF &position, const QPointF &delta, const QPointF &deltaNonAccelerated);
+     void pointerButton(quint32 button, bool pressed);
+-    void pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120);
++    void pointerAxis(InputRedirection::PointerAxis axis, qreal delta, qint32 deltaV120);
+     void keyboardKey(quint32 keycode, bool pressed);
+     void touchDown(qint32 id, const QPointF &position);
+     void touchMotion(qint32 id, const QPointF &position);
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -26,6 +26,11 @@
+ QString AnlandInputDevice::name() const
+ {
+     return QStringLiteral("anland virtual input");
++}
++
++QString AnlandInputDevice::sysName() const
++{
++    return QStringLiteral("anland-virtual-input");
+ }
+ 
+ bool AnlandInputDevice::isEnabled() const
+@@ -108,25 +113,23 @@
+ void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
+ {
+     Q_EMIT pointerButtonChanged(button,
+-                                pressed ? PointerButtonState::Pressed : PointerButtonState::Released,
++                                pressed ? InputRedirection::PointerButtonPressed : InputRedirection::PointerButtonReleased,
+                                 now(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+-void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120)
++void AnlandInputDevice::pointerAxis(InputRedirection::PointerAxis axis, qreal delta, qint32 deltaV120)
+ {
+-    const PointerAxisSource source =
+-        deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
+-    // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
+-    // the daemon already delivers deltas in KWin's direction, so it is never set.
+-    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, now(), this);
++    const auto source = deltaV120 != 0 ? InputRedirection::PointerAxisSourceWheel
++                                       : InputRedirection::PointerAxisSourceContinuous;
++    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, now(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+ {
+     Q_EMIT keyChanged(keycode,
+-                      pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
++                      pressed ? InputRedirection::KeyboardKeyPressed : InputRedirection::KeyboardKeyReleased,
+                       now(), this);
+ }
+ 
+diff --git a/src/compositor_wayland.cpp b/src/compositor_wayland.cpp
+--- a/src/compositor_wayland.cpp
++++ b/src/compositor_wayland.cpp
+@@ -10,5 +10,6 @@
+ 
+ #include "compositor_wayland.h"
++#include "backends/anland/anland_egl_backend.h"
+ #include "core/graphicsbufferview.h"
+ #include "core/output.h"
+ #include "core/outputbackend.h"
+@@ -313,5 +314,7 @@
+     bool directScanout = false;
+ 
+-    if (primaryLayer->needsRepaint() || superLayer->needsRepaint()) {
++    const auto anlandLayer = dynamic_cast<AnlandEglLayer *>(primaryLayer);
++    if (primaryLayer->needsRepaint() || superLayer->needsRepaint()
++        || (anlandLayer && anlandLayer->hasBufferDamage())) {
+         auto totalTimeQuery = std::make_unique<CpuRenderTimeQuery>();
+         renderLoop->beginPaint();
+ 
+diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
+--- a/src/backends/anland/anland_egl_backend.h
++++ b/src/backends/anland/anland_egl_backend.h
+@@ -51,6 +51,14 @@
+ public:
+     AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend);
+     ~AnlandEglLayer() override;
++
++    bool hasBufferDamage() const
++    {
++        // Buffer repair is not new scene damage. Let beginFrame() provide it
++        // without propagating the same damage back to every rotation slot.
++        const int index = targetBufferIndex();
++        return index >= 0 && !m_accumDamage[index].isEmpty();
++    }
+ 
+     std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
+ #ifdef ANLAND_KWIN_66

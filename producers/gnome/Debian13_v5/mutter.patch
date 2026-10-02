@@ -884,103 +884,19 @@ index b0c103b0c7..28bcd61d2a 100644
      libeis_dep,
    ]
  endif
-@@ -901,6 +906,25 @@ if have_native_backend
+@@ -901,6 +906,12 @@ if have_native_backend
    ]
  endif
  
 +if have_anland
-+  mutter_sources += [
-+    'backends/anland/meta-backend-anland.c',
-+    'backends/anland/meta-backend-anland.h',
-+    'backends/anland/meta-anland-audio.c',
-+    'backends/anland/meta-anland-audio.h',
-+    'backends/anland/meta-anland-camera.c',
-+    'backends/anland/meta-anland-camera.h',
-+    'backends/anland/meta-anland-input.c',
-+    'backends/anland/meta-anland-input.h',
-+    'backends/anland/meta-anland-clipboard.c',
-+    'backends/anland/meta-anland-clipboard.h',
-+    'backends/anland/vendor/meta-anland-socket-utils.c',
-+    'backends/anland/vendor/meta-anland-socket-utils.h',
-+    'backends/anland/vendor/meta-anland-transport.c',
-+    'backends/anland/vendor/meta-anland-transport.h',
-+  ]
++  # The backend source list lives in the shared backend directory so every
++  # distribution overlay consumes one list instead of keeping its own copy.
++  subdir('backends/anland')
 +endif
 +
  if have_wayland or have_native_backend
    mutter_sources += [
      'common/meta-cogl-drm-formats.c',
-diff --git a/src/tests/meson.build b/src/tests/meson.build
-index 99a7beaa69..4a5290c380 100644
---- a/src/tests/meson.build
-+++ b/src/tests/meson.build
-@@ -141,6 +141,24 @@ gnome.compile_schemas(
-   depend_files: 'org.gnome.mutter.test.gschema.xml',
- )
- 
-+anland_transport_test = executable('mutter-anland-transport-tests',
-+  sources: [
-+    'anland-transport-tests.c',
-+    '../backends/anland/vendor/meta-anland-socket-utils.c',
-+    '../backends/anland/vendor/meta-anland-transport.c',
-+  ],
-+  include_directories: [
-+    tests_includes,
-+    include_directories('../backends/anland/vendor'),
-+  ],
-+  dependencies: glib_dep,
-+  install: false,
-+)
-+
-+test('anland-transport', anland_transport_test,
-+  suite: ['core', 'mutter/anland'],
-+)
-+
- if have_cogl_tests
-   subdir('cogl')
- endif
-diff --git a/src/tests/wayland-unit-tests.c b/src/tests/wayland-unit-tests.c
-index 984e79f8df..ae3569dde0 100644
---- a/src/tests/wayland-unit-tests.c
-+++ b/src/tests/wayland-unit-tests.c
-@@ -1499,6 +1499,8 @@ toplevel_fixed_size_fullscreen (void)
- 
-   while (!(window = find_client_window ("fixed-size-client")))
-     g_main_context_iteration (NULL, TRUE);
-+  g_object_add_weak_pointer (G_OBJECT (window), (gpointer *) &window);
-+
-   while (meta_window_is_hidden (window))
-     g_main_context_iteration (NULL, TRUE);
-   meta_wait_for_effects (window);
-@@ -1519,6 +1521,9 @@ toplevel_fixed_size_fullscreen (void)
-   meta_wayland_test_client_finish (wayland_test_client);
- 
-   meta_cursor_tracker_set_pointer_visible (cursor_tracker, TRUE);
-+
-+  while (window)
-+    g_main_context_iteration (NULL, TRUE);
- }
- 
- static void
-@@ -1535,6 +1540,8 @@ toplevel_fixed_size_fullscreen_exceeds (void)
- 
-   while (!(window = find_client_window ("fixed-size-client")))
-     g_main_context_iteration (NULL, TRUE);
-+  g_object_add_weak_pointer (G_OBJECT (window), (gpointer *) &window);
-+
-   while (meta_window_is_hidden (window))
-     g_main_context_iteration (NULL, TRUE);
-   meta_wait_for_effects (window);
-@@ -1550,6 +1557,9 @@ toplevel_fixed_size_fullscreen_exceeds (void)
-   meta_wayland_test_driver_terminate (test_driver);
-   meta_wayland_test_client_finish (wayland_test_client);
-   g_test_assert_expected_messages ();
-+
-+  while (window)
-+    g_main_context_iteration (NULL, TRUE);
- }
- 
- static void
 diff --git a/src/wayland/meta-wayland-text-input.c b/src/wayland/meta-wayland-text-input.c
 index b70d8c8c1c..02a52df031 100644
 --- a/src/wayland/meta-wayland-text-input.c

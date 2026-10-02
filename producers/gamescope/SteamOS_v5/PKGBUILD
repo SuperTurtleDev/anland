@@ -1,0 +1,171 @@
+# SteamOS aarch64: release sources, shared Anland overlay, native package build.
+pkgname=gamescope
+pkgver=3.16.28
+pkgrel=7
+pkgdesc='Native Gamescope with Anland backend and Steam Big Picture launcher'
+arch=('aarch64')
+url='https://github.com/ValveSoftware/gamescope'
+license=('MIT')
+depends=('xorg-xwayland' 'libavif' 'aom' 'rav1e' 'libxres' 'xcb-util-errors' 'freerdp' 'xcb-util-wm' 'libxcomposite' 'pixman' 'libinput' 'seatd' 'pipewire' 'libxmu' 'libxcursor' 'libdecor' 'libei' 'luajit' 'libdrm' 'steam' 'bash' 'util-linux')
+makedepends=('meson' 'ninja' 'git' 'python' 'pkgconf' 'gcc' 'glslang' 'vulkan-headers' 'wayland-protocols' 'cmake' 'patch')
+conflicts=('gamescope-anland')
+replaces=('gamescope-anland')
+options=('!strip' '!debug')
+source=("gamescope-$pkgver.zip::https://github.com/ValveSoftware/gamescope/archive/refs/tags/$pkgver.zip"
+        'gamescope.patch' 'anland-overlay.tar' 'dependencies.lock' 'startup.sh')
+noextract=('anland-overlay.tar')
+# build.sh supplies SHA256 for this run's downloaded ZIP and local inputs.
+# This is transfer-integrity checking, not an independently published upstream hash.
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+_dependency_paths=()
+_dependency_names=()
+_dependency_revisions=()
+_root_revision=''
+declare -A _seen_paths=()
+while read -r _path _revision _url _extra || [[ -n "$_path" ]]; do
+  [[ -z "$_path" || "$_path" == \#* ]] && continue
+  [[ -z "$_extra" && "$_revision" =~ ^[0-9a-f]{40}$ && "$_url" == https://*.git ]] || return 1
+  [[ -z "${_seen_paths[$_path]:-}" ]] || { error 'Duplicate dependency path'; return 1; }
+  _seen_paths[$_path]=1
+  if [[ "$_path" == . ]]; then
+    [[ "$_url" == https://github.com/ValveSoftware/gamescope.git ]] || return 1
+    _root_revision="$_revision"
+    continue
+  fi
+  [[ "$_path" =~ ^(src|subprojects|thirdparty)/[a-zA-Z0-9_-]+$ ]] || return 1
+  _dependency_revisions+=("$_revision")
+  _name="anland-dep-${#_dependency_names[@]}"
+  _dependency_paths+=("$_path")
+  _dependency_names+=("$_name")
+  source+=("$_name::git+$_url#commit=$_revision")
+  sha256sums+=('SKIP')
+done < "$startdir/dependencies.lock"
+[[ "$_root_revision" == fa0b4d3342078f01eadff0193e09c3b561f40c03 && ${#_dependency_names[@]} == 9 ]] || {
+  error 'Incomplete or incompatible Gamescope 3.16.28 dependency lock'; return 1;
+}
+unset _path _revision _url _extra _name _seen_paths
+
+prepare() {
+  local tree="$srcdir/gamescope-$pkgver" i destination
+  [[ -f "$tree/meson.build" ]] || return 1
+  for i in "${!_dependency_names[@]}"; do
+    destination="$tree/${_dependency_paths[i]}"
+    [[ $(git -C "$srcdir/${_dependency_names[i]}" rev-parse HEAD) == "${_dependency_revisions[i]}" ]] || return 1
+    if [[ -d "$destination" ]]; then rmdir "$destination" || return 1; fi
+    mkdir -p "$(dirname "$destination")"
+    cp -a "$srcdir/${_dependency_names[i]}" "$destination" || return 1
+  done
+  # Existing subproject trees need the wrap packagefiles overlays explicitly.
+  python3 - "$tree" <<'PY' || return 1
+import configparser, shutil, sys
+from pathlib import Path, PurePosixPath
+root = Path(sys.argv[1])/'subprojects'
+for wrap in sorted(root.glob('*.wrap')):
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(wrap)
+    if not config.has_section('wrap-git'):
+        continue
+    section = config['wrap-git']
+    overlay = section.get('patch_directory')
+    if not overlay:
+        continue
+    directory = section.get('directory', wrap.stem)
+    for name in (overlay, directory):
+        path = PurePosixPath(name)
+        if path.is_absolute() or '..' in path.parts:
+            raise ValueError('Unsafe overlay: '+name)
+    shutil.copytree(root/'packagefiles'/overlay, root/directory, dirs_exist_ok=True)
+PY
+  patch --batch --fuzz=0 -Np1 -d "$tree" -i "$srcdir/gamescope.patch" || return 1
+  mkdir -p "$tree/src/Backends/anland"
+  tar -xf "$srcdir/anland-overlay.tar" -C "$tree/src/Backends/anland" || return 1
+}
+
+build() {
+  meson setup "$srcdir/build" "$srcdir/gamescope-$pkgver" \
+    --prefix=/usr --libdir=lib --buildtype=release --wrap-mode=nodownload \
+    -Denable_openvr_support=false -Denable_tests=false -Dbenchmark=disabled || return 1
+  ninja -C "$srcdir/build" -j"${JOBS:-2}" src/gamescope src/gamescopereaper \
+    src/gamescopectl src/gamescope-type src/gamescopestream \
+    layer/libVkLayer_FROG_gamescope_wsi_aarch64.so
+}
+
+check() {
+  "$srcdir/build/src/gamescope" --version || return 1
+  ldd "$srcdir/build/src/gamescope" \
+    "$srcdir/build/layer/libVkLayer_FROG_gamescope_wsi_aarch64.so" > "$srcdir/build-ldd.log" || return 1
+  if grep -q 'not found' "$srcdir/build-ldd.log"; then
+    error 'Runtime library missing'; return 1
+  fi
+}
+
+package() {
+  local tree="$srcdir/gamescope-$pkgver" name
+  # Install into pkgdir only; preserve the SteamOS session assets.
+  for name in gamescope gamescopereaper gamescopectl gamescope-type gamescopestream; do
+    install -Dm755 "$srcdir/build/src/$name" "$pkgdir/usr/bin/$name"
+  done
+  install -Dm755 /usr/bin/steamos-session-shell "$pkgdir/usr/bin/steamos-session-shell"
+  mkdir -p "$pkgdir/usr/share/gamescope"
+  cp -a "$tree/scripts" "$tree/looks" /usr/share/gamescope/reshade "$pkgdir/usr/share/gamescope/"
+  install -Dm644 "$tree/LICENSE" "$pkgdir/usr/share/gamescope/LICENSE"
+  install -Dm755 "$srcdir/startup.sh" "$pkgdir/usr/lib/gamescope/anland-startup.sh"
+  install -Dm644 "$srcdir/build/layer/libVkLayer_FROG_gamescope_wsi_aarch64.so" \
+    "$pkgdir/usr/lib/libVkLayer_FROG_gamescope_wsi_aarch64.so"
+  mkdir -p "$pkgdir/usr/share/vulkan/implicit_layer.d"
+  python3 - "$srcdir/build/layer/VkLayer_FROG_gamescope_wsi.aarch64.json" \
+    "$pkgdir/usr/share/vulkan/implicit_layer.d/VkLayer_FROG_gamescope_wsi.aarch64.json" <<'PY'
+import json, sys
+from pathlib import Path
+source, destination = map(Path, sys.argv[1:])
+manifest = json.loads(source.read_text())
+manifest['layer']['library_path'] = '/usr/lib/libVkLayer_FROG_gamescope_wsi_aarch64.so'
+destination.write_text(json.dumps(manifest, indent=2)+'\n')
+PY
+  cat > "$pkgdir/usr/bin/steamos-anland-game-mode" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export GAMESCOPE_BIN="${GAMESCOPE_BIN:-/usr/bin/gamescope}"
+export GAMESCOPE_SCRIPT_PATH="${GAMESCOPE_SCRIPT_PATH:-/usr/share/gamescope/scripts}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+exec /usr/lib/gamescope/anland-startup.sh "$@"
+EOF
+  chmod 755 "$pkgdir/usr/bin/steamos-anland-game-mode"
+  mkdir -p "$pkgdir/usr/lib/systemd/user" "$pkgdir/usr/share/applications"
+  cat > "$pkgdir/usr/lib/systemd/user/steamos-anland-game-mode.service" <<'EOF'
+[Unit]
+Description=Steam Big Picture on Gamescope Anland
+After=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/steamos-anland-game-mode
+Restart=no
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$pkgdir/usr/share/applications/steamos-anland-game-mode.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Steam Big Picture
+Name[zh_CN]=Steam 大屏幕
+Comment=Open Steam Big Picture in the current desktop session
+Exec=/home/steamos/.local/share/Steam/steamrtarm64/steam -gamepadui
+Path=/home/steamos/.local/share/Steam
+Icon=steam
+Terminal=false
+Categories=Game;
+EOF
+  install -Dm644 "$srcdir/dependencies.lock" "$pkgdir/usr/share/doc/gamescope-anland/dependencies.lock"
+  find "$pkgdir" -type d -exec chmod 755 {} +
+  find "$pkgdir/usr/share" "$pkgdir/usr/lib/systemd" -type f -exec chmod 644 {} +
+  # Keep the installed-file verification manifest, excluding itself.
+  (cd "$pkgdir" && find . -type f ! -path './usr/share/doc/gamescope-anland/INSTALLED-SHA256SUMS' \
+    -print0 | sort -z | xargs -0 sha256sum | sed 's|  \./|  /|') \
+    > "$pkgdir/usr/share/doc/gamescope-anland/INSTALLED-SHA256SUMS"
+}

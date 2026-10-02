@@ -1,0 +1,198 @@
+Subject: [Smithay ff5fa7df] Backport compositor text-input helpers
+
+Backport only the text-injection helpers from Smithay commit
+be920fb5d41096bc3d57e432b7035f4bc2a4e58c (feat: add `ei_text` support),
+as used by the previously tested ANiri dependency 4cf0b62028039661477d482ec4758b687d8f4392.
+Adapt text-input request handling to the release's Dispatch API. Do not import
+the newer libei backend, unrelated APIs or any niri/Anland backend sources.
+
+This keeps the current adapter's Android text-input-v3 and keyboard fallback
+behavior on niri v26.04 without advancing its locked dependency versions.
+The compositor-input-method flag defaults to false for other backends.
+
+diff --git a/src/input/keyboard/mod.rs b/src/input/keyboard/mod.rs
+--- a/src/input/keyboard/mod.rs
++++ b/src/input/keyboard/mod.rs
+@@ -1201,6 +1201,103 @@
+     }
+ }
+ 
++#[cfg(feature = "wayland_frontend")]
++impl<D> KeyboardHandle<D>
++where
++    D: SeatHandler + 'static,
++    <D as SeatHandler>::KeyboardFocus: crate::wayland::seat::WaylandFocus,
++{
++    /// Inject a batch of keysyms as text into the currently focused client (KWin-style).
++    ///
++    /// This is a helper/fallback: a compositor should prefer delivering text through the
++    /// text-input protocol (`zwp_text_input_v3::commit_string`) when a text-input client is
++    /// focused, and fall back to this for clients that aren't (terminals, games, ...).
++    ///
++    /// Builds a throwaway keymap that binds each keysym to its own spare keycode at base level
++    /// (so no modifiers are ever needed), hands that keymap to clients, taps each keycode on the
++    /// focused client, then restores the seat keymap. The compositor's own seat xkb state is
++    /// **never** touched, so shortcut handling and physical-keyboard state are unaffected.
++    /// `modifiers(0)` accompanies the injection keymap so any modifier the seat currently holds
++    /// (e.g. a physically-held Shift) doesn't alter the injected characters.
++    pub fn inject_text_keysyms(&self, data: &mut D, keysyms: &[Keysym]) {
++        const FIRST: u32 = 9;
++        let mut keycode_decls = String::new();
++        let mut symbol_decls = String::new();
++        let mut codes = Vec::with_capacity(keysyms.len());
++        for (i, keysym) in keysyms.iter().enumerate() {
++            let code = FIRST + i as u32;
++            if code > 255 {
++                break;
++            }
++            let name = xkb::keysym_get_name(*keysym);
++            if name.is_empty() || name == "NoSymbol" {
++                continue;
++            }
++            keycode_decls.push_str(&format!("    <K{code}> = {code};\n"));
++            symbol_decls.push_str(&format!("    key <K{code}> {{ [ {name} ] }};\n"));
++            codes.push(Keycode::new(code));
++        }
++        if codes.is_empty() {
++            return;
++        }
++
++        let custom = format!(
++            "xkb_keymap {{\n\
++             xkb_keycodes \"custom\" {{\n    minimum = 8;\n    maximum = 255;\n{keycode_decls}}};\n\
++             xkb_types \"(custom)\" {{ include \"complete\" }};\n\
++             xkb_compatibility \"custom\" {{ include \"complete\" }};\n\
++             xkb_symbols \"custom\" {{\n{symbol_decls}}};\n\
++             }};\n"
++        );
++
++        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
++        let Some(keymap) = xkb::Keymap::new_from_string(
++            &context,
++            custom,
++            xkb::KEYMAP_FORMAT_TEXT_V1,
++            xkb::KEYMAP_COMPILE_NO_FLAGS,
++        ) else {
++            return;
++        };
++        let xkb = Mutex::new(Xkb {
++            state: xkb::State::new(&keymap),
++            keymap,
++            context,
++        });
++        let injection_keymap = KeymapFile::new(&xkb.lock().unwrap().keymap);
++
++        let seat = self.get_seat(data);
++        let mut guard = self.arc.internal.lock().unwrap();
++        if guard.focus.is_none() {
++            return;
++        }
++        let seat_mods = guard.mods_state;
++
++        // Switch the focused client to the injection keymap (with no modifiers), then tap keys.
++        {
++            let focus = guard.focus.as_mut().map(|(focus, _)| focus);
++            self.send_keymap(data, &focus, &injection_keymap, ModifiersState::default());
++        }
++        for keycode in codes {
++            let press = SERIAL_COUNTER.next_serial();
++            let release = SERIAL_COUNTER.next_serial();
++            if let Some((focus, _)) = guard.focus.as_mut() {
++                let handle = KeysymHandle { xkb: &xkb, keycode };
++                focus.key(&seat, data, handle, KeyState::Pressed, press, 0);
++            }
++            if let Some((focus, _)) = guard.focus.as_mut() {
++                let handle = KeysymHandle { xkb: &xkb, keycode };
++                focus.key(&seat, data, handle, KeyState::Released, release, 0);
++            }
++        }
++
++        // Restore the seat keymap (and the seat's real modifier state) to the client.
++        let seat_keymap = self.arc.keymap.lock().unwrap();
++        let focus = guard.focus.as_mut().map(|(focus, _)| focus);
++        self.send_keymap(data, &focus, &seat_keymap, seat_mods);
++    }
++}
++
+ impl<D> KeyboardHandle<D>
+ where
+     D: SeatHandler,
+diff --git a/src/wayland/seat/keyboard.rs b/src/wayland/seat/keyboard.rs
+--- a/src/wayland/seat/keyboard.rs
++++ b/src/wayland/seat/keyboard.rs
+@@ -252,8 +252,8 @@
+     // text-input global bound due to clients doing lazy global binding.
+     text_input.set_focus(Some(surface.clone()));
+ 
+-    // Only notify on `enter` once we have an actual IME.
+-    if input_method.has_instance() {
++    // Notify for a real IME or the compositor-provided Android input method.
++    if input_method.has_instance() || text_input.compositor_input_method() {
+         text_input.enter();
+     }
+ }
+@@ -280,6 +280,8 @@
+ 
+         if input_method.has_instance() {
+             input_method.deactivate_input_method(state);
++        }
++        if input_method.has_instance() || text_input.compositor_input_method() {
+             text_input.leave();
+         }
+ 
+diff --git a/src/wayland/text_input/text_input_handle.rs b/src/wayland/text_input/text_input_handle.rs
+--- a/src/wayland/text_input/text_input_handle.rs
++++ b/src/wayland/text_input/text_input_handle.rs
+@@ -19,6 +19,7 @@
+     instances: Vec<Instance>,
+     focus: Option<WlSurface>,
+     active_text_input_id: Option<ObjectId>,
++    compositor_input_method: bool,
+ }
+ 
+ impl TextInput {
+@@ -124,6 +125,33 @@
+         inner.with_focused_client_all_text_inputs(|text_input, focus, _| {
+             text_input.enter(focus);
+         });
++    }
++
++    /// Have the compositor act as the input method for this seat.
++    ///
++    /// While enabled, `enter` is delivered to the focused text-input even when no real
++    /// `zwp_input_method_v2` is bound, so the compositor can `commit_string` into it (e.g. for
++    /// remote-desktop text injection). Toggling this sends `enter`/`leave` for the current
++    /// focus immediately; subsequent focus changes are handled by the keyboard focus logic.
++    pub fn set_compositor_input_method(&self, active: bool) {
++        {
++            let mut inner = self.inner.lock().unwrap();
++            if inner.compositor_input_method == active {
++                return;
++            }
++            inner.compositor_input_method = active;
++        }
++        if active {
++            self.enter();
++        } else {
++            self.leave();
++        }
++    }
++
++    /// Whether the compositor is currently acting as the input method for this seat
++    /// (see [`set_compositor_input_method`](Self::set_compositor_input_method)).
++    pub fn compositor_input_method(&self) -> bool {
++        self.inner.lock().unwrap().compositor_input_method
+     }
+ 
+     /// The `discard_state` is used when the input-method signaled that
+@@ -208,8 +236,8 @@
+             data.handle.increment_serial(resource);
+         }
+ 
+-        // Discard requests without any active input method instance.
+-        if !data.input_method_handle.has_instance() {
++        // The compositor may supply committed Android text without a Wayland IME.
++        if !data.input_method_handle.has_instance() && !data.handle.compositor_input_method() {
+             debug!("discarding text-input request without IME running");
+             return;
+         }

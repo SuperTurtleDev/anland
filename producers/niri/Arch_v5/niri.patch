@@ -1,0 +1,308 @@
+Subject: [niri v26.04] Register the shared Anland backend
+
+Integration extracted from Celvra/ANiri 1a33594f42efef6415096de504214269d82c247d
+and reviewed through cfd31db9c79c681a11ebc1afdb80fa7b31c4f7e0. The fork starts
+with an imported tree, not upstream history. Rebase only the backend dispatch,
+ANLAND startup selection and clipboard callback onto official niri v26.04
+(8ed0da44d974c32c6877d2f4630c314da0717ecb).
+
+No src/backend/anland implementation, private transport, documentation, test
+snapshots, unrelated post-release features or dependency upgrades are included.
+The runtime adapter comes exclusively from the repository overlay. build.rs
+links the shared producer bridge. Smithay stays at the release-pinned revision;
+only its source location changes to the adjacent, separately patched archive.
+Cargo.lock changes only those two source identities, not dependency versions.
+
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,14 +27,12 @@
+ 
+ [workspace.dependencies.smithay]
+ # version = "0.4.1"
+-git = "https://github.com/Smithay/smithay.git"
+-rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
++path = "../smithay-ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
+ default-features = false
+ 
+ [workspace.dependencies.smithay-drm-extras]
+ # version = "0.1.0"
+-git = "https://github.com/Smithay/smithay.git"
+-rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
++path = "../smithay-ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef/smithay-drm-extras"
+ # path = "../smithay/smithay-drm-extras"
+ 
+ [package]
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3498,7 +3498,6 @@
+ [[package]]
+ name = "smithay"
+ version = "0.7.0"
+-source = "git+https://github.com/Smithay/smithay.git?rev=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef#ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
+ dependencies = [
+  "aliasable",
+  "appendlist",
+@@ -3573,7 +3572,6 @@
+ [[package]]
+ name = "smithay-drm-extras"
+ version = "0.1.0"
+-source = "git+https://github.com/Smithay/smithay.git?rev=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef#ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
+ dependencies = [
+  "drm",
+  "libdisplay-info",
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -7,4 +7,17 @@
+     {
+         println!("cargo:rustc-cfg=have_libinput_plugin_system")
+     }
++
++    // Use the single repository producer bridge, not ANiri's private C transport.
++    println!("cargo:rustc-check-cfg=cfg(have_anland_audio)");
++    if pkg_config::Config::new().probe("libpipewire-0.3").is_ok() {
++        println!("cargo:rustc-cfg=have_anland_audio");
++    }
++    let lib = std::env::var("ANLAND_NIRI_BRIDGE_BUILD")
++        .expect("build the shared Anland bridge first");
++    println!("cargo:rustc-link-search=native={lib}");
++    println!("cargo:rustc-link-search=native={lib}/common/libdisplay_producer");
++    println!("cargo:rustc-link-lib=dylib=anland_niri_bridge");
++    println!("cargo:rustc-link-lib=dylib=display_producer");
++    println!("cargo:rerun-if-env-changed=ANLAND_NIRI_BRIDGE_BUILD");
+ }
+diff --git a/src/backend/mod.rs b/src/backend/mod.rs
+--- a/src/backend/mod.rs
++++ b/src/backend/mod.rs
+@@ -20,11 +20,15 @@
+ pub mod headless;
+ pub use headless::Headless;
+ 
++pub mod anland;
++pub use anland::Anland;
++
+ #[allow(clippy::large_enum_variant)]
+ pub enum Backend {
+     Tty(Tty),
+     Winit(Winit),
+     Headless(Headless),
++    Anland(Anland),
+ }
+ 
+ #[derive(PartialEq, Eq)]
+@@ -61,6 +65,7 @@
+             Backend::Tty(tty) => tty.init(niri),
+             Backend::Winit(winit) => winit.init(niri),
+             Backend::Headless(headless) => headless.init(niri),
++            Backend::Anland(anland) => anland.init(niri),
+         }
+     }
+ 
+@@ -69,6 +74,7 @@
+             Backend::Tty(tty) => tty.seat_name(),
+             Backend::Winit(winit) => winit.seat_name(),
+             Backend::Headless(headless) => headless.seat_name(),
++            Backend::Anland(anland) => anland.seat_name(),
+         }
+     }
+ 
+@@ -80,6 +86,7 @@
+             Backend::Tty(tty) => tty.with_primary_renderer(f),
+             Backend::Winit(winit) => winit.with_primary_renderer(f),
+             Backend::Headless(headless) => headless.with_primary_renderer(f),
++            Backend::Anland(anland) => anland.with_primary_renderer(f),
+         }
+     }
+ 
+@@ -93,6 +100,7 @@
+             Backend::Tty(tty) => tty.render(niri, output, target_presentation_time),
+             Backend::Winit(winit) => winit.render(niri, output),
+             Backend::Headless(headless) => headless.render(niri, output),
++            Backend::Anland(anland) => anland.render(niri, output),
+         }
+     }
+ 
+@@ -105,7 +113,9 @@
+                     ModKey::Alt
+                 }
+             }),
+-            Backend::Tty(_) | Backend::Headless(_) => config.input.mod_key.unwrap_or(ModKey::Super),
++            Backend::Tty(_) | Backend::Headless(_) | Backend::Anland(_) => {
++                config.input.mod_key.unwrap_or(ModKey::Super)
++            }
+         }
+     }
+ 
+@@ -114,6 +124,7 @@
+             Backend::Tty(tty) => tty.change_vt(vt),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -122,6 +133,7 @@
+             Backend::Tty(tty) => tty.suspend(),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -130,6 +142,7 @@
+             Backend::Tty(tty) => tty.toggle_debug_tint(),
+             Backend::Winit(winit) => winit.toggle_debug_tint(),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -138,6 +151,7 @@
+             Backend::Tty(tty) => tty.import_dmabuf(dmabuf),
+             Backend::Winit(winit) => winit.import_dmabuf(dmabuf),
+             Backend::Headless(headless) => headless.import_dmabuf(dmabuf),
++            Backend::Anland(anland) => anland.import_dmabuf(dmabuf),
+         }
+     }
+ 
+@@ -146,6 +160,7 @@
+             Backend::Tty(tty) => tty.early_import(surface),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -154,6 +169,7 @@
+             Backend::Tty(tty) => tty.ipc_outputs(),
+             Backend::Winit(winit) => winit.ipc_outputs(),
+             Backend::Headless(headless) => headless.ipc_outputs(),
++            Backend::Anland(anland) => anland.ipc_outputs(),
+         }
+     }
+ 
+@@ -166,6 +182,7 @@
+             Backend::Tty(tty) => tty.primary_gbm_device(),
+             Backend::Winit(_) => None,
+             Backend::Headless(_) => None,
++            Backend::Anland(_) => None,
+         }
+     }
+ 
+@@ -174,6 +191,7 @@
+             Backend::Tty(tty) => tty.set_monitors_active(active),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -182,6 +200,7 @@
+             Backend::Tty(tty) => tty.set_output_on_demand_vrr(niri, output, enable_vrr),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -190,6 +209,7 @@
+             Backend::Tty(tty) => tty.update_ignored_nodes_config(niri),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -198,6 +218,7 @@
+             Backend::Tty(tty) => tty.on_output_config_changed(niri),
+             Backend::Winit(_) => (),
+             Backend::Headless(_) => (),
++            Backend::Anland(_) => (),
+         }
+     }
+ 
+@@ -232,4 +253,12 @@
+             panic!("backend is not Headless")
+         }
+     }
+-}
++
++    pub fn anland(&mut self) -> &mut Anland {
++        if let Self::Anland(v) = self {
++            v
++        } else {
++            panic!("backend is not Anland")
++        }
++    }
++}
+diff --git a/src/handlers/mod.rs b/src/handlers/mod.rs
+--- a/src/handlers/mod.rs
++++ b/src/handlers/mod.rs
+@@ -53,7 +53,7 @@
+ use smithay::wayland::selection::wlr_data_control::{
+     DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
+ };
+-use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
++use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
+ use smithay::wayland::session_lock::{
+     LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+ };
+@@ -72,6 +72,7 @@
+     delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
+ };
+ 
++use crate::backend::Backend;
+ pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
+ use crate::layout::workspace::WorkspaceId;
+ use crate::layout::ActivateWindow;
+@@ -284,6 +285,24 @@
+ 
+ impl SelectionHandler for State {
+     type SelectionUserData = Arc<[u8]>;
++    fn new_selection(
++        &mut self,
++        ty: SelectionTarget,
++        source: Option<SelectionSource>,
++        _seat: Seat<Self>,
++    ) {
++        // Forward a client-set clipboard to the Android consumer.
++        if ty == SelectionTarget::Clipboard {
++            if let Some(source) = source {
++                if source.mime_types().iter().any(|m| m == "text/plain") {
++                    if let Backend::Anland(anland) = &self.backend {
++                        let _ = anland.clipboard_selection_tx().send(());
++                    }
++                }
++            }
++        }
++    }
++
+ 
+     fn send_selection(
+         &mut self,
+diff --git a/src/niri.rs b/src/niri.rs
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -116,7 +116,7 @@
+ use crate::a11y::A11y;
+ use crate::animation::Clock;
+ use crate::backend::tty::SurfaceDmabufFeedback;
+-use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
++use crate::backend::{Anland, Backend, Headless, RenderResult, Tty, Winit};
+ use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
+ #[cfg(feature = "dbus")]
+ use crate::dbus::freedesktop_locale1::Locale1ToNiri;
+@@ -716,7 +716,10 @@
+             || env::var_os("WAYLAND_SOCKET").is_some()
+             || env::var_os("DISPLAY").is_some();
+ 
+-        let mut backend = if headless {
++        let mut backend = if env::var_os("ANLAND").is_some() {
++            let anland = Anland::new().context("error initializing the Anland backend")?;
++            Backend::Anland(anland)
++        } else if headless {
+             let headless = Headless::new();
+             Backend::Headless(headless)
+         } else if has_display {

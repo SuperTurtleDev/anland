@@ -1,0 +1,52 @@
+# SteamOS Deckard aarch64: KWin 6.2.5, native Anland backend.
+# Built for the currently installed SteamOS Qt/KF6 ABI; build-only by default.
+pkgname=kwin
+pkgver=6.2.5
+pkgrel=3.5
+pkgdesc='SteamOS KWin with native Anland backend'
+arch=('aarch64')
+url='https://invent.kde.org/plasma/kwin'
+license=('LGPL-2.0-or-later')
+# Avoid a second ~500 MiB debug package on the memory-constrained SteamOS host.
+options=(!debug)
+# Preserve the vendor KWin dependency set, rather than pulling 6.7+ Arch packages.
+# Keep a copy here so makepkg --syncdeps only resolves packages for this snapshot.
+depends=(
+  breeze gcc-libs glibc plasma-activities kauth kcmutils kcolorscheme kconfig
+  kconfigwidgets kcoreaddons kcrash kdbusaddons kdeclarative kdecoration
+  kglobalaccel kglobalacceld kguiaddons ki18n kidletime kirigami kitemmodels
+  knewstuff knotifications kpackage kquickcharts kscreenlocker kservice ksvg
+  kwayland kwidgetsaddons kwindowsystem kxmlgui lcms2 libcanberra
+  libdisplay-info libdrm libei libepoxy libinput libpipewire
+  libqaccessibilityclient-qt6 libx11 libxcb libxcvt libxi libxkbcommon
+  libxkbcommon-x11 mesa pipewire-session-manager libplasma qt6-5compat
+  qt6-base qt6-declarative qt6-multimedia qt6-sensors qt6-svg qt6-tools
+  qt6-wayland systemd-libs wayland xcb-util-cursor xcb-util-keysyms xcb-util-wm
+)
+makedepends=(cmake extra-cmake-modules kdoctools ninja pkgconf wayland-protocols
+             plasma-wayland-protocols vulkan-headers)
+source=('kwin-v6.2.5.zip::https://invent.kde.org/plasma/kwin/-/archive/v6.2.5/kwin-v6.2.5.zip?ref_type=tags'
+        'kwin.patch' 'anland-overlay.tar')
+noextract=('anland-overlay.tar')
+sha256sums=('9e9b8ec81f44c487aa6be141c0cd10f9980c0528186a819af55f4253aa1a4904'
+            'SKIP' 'SKIP')
+
+prepare() {
+  local tree="$srcdir/kwin-v6.2.5"
+  [[ -d "$tree" ]] || { error 'KWin 6.2.5 source missing'; return 1; }
+  tar -xf "$srcdir/anland-overlay.tar" -C "$tree/src/backends"
+  [[ -f "$tree/src/backends/anland/CMakeLists.txt" ]] || { error 'Anland overlay missing'; return 1; }
+  patch -Np1 -d "$tree" -i "$srcdir/kwin.patch"
+}
+
+build() {
+  cmake -S "$srcdir/kwin-v6.2.5" -B "$srcdir/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib -DKDE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build "$srcdir/build" --parallel "${JOBS:-2}"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}

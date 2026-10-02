@@ -59,9 +59,9 @@ ensure_deb_src() {
     if ! $SUDO grep -rqsE '^Types:.*deb-src|^deb-src ' \
             /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
         log "Enabling deb-src repositories"
-        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then
             $SUDO sed -i 's/^Types: deb$/Types: deb deb-src/' \
-                /etc/apt/sources.list.d/ubuntu.sources
+                /etc/apt/sources.list.d/debian.sources
         elif [ -f /etc/apt/sources.list ]; then
             $SUDO sed -i 's/^deb \(.*\)$/deb \1\ndeb-src \1/' /etc/apt/sources.list
         fi
@@ -93,20 +93,14 @@ build_pkg() {
         log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
         # -L dereferences the libdisplay_producer symlinks so the merged tree
         # is self-contained (relative links only resolve inside the checkout).
-        cp -aL "$overlay_dir/." "$tree/"
+        cp -aL "$overlay_dir/." "$tree/" \
+            || die "failed to stage the backend overlay for $src"
     fi
 
     log "Applying patch: $patch -> $tree"
-    if ( cd "$tree" && patch -p1 --forward --reject-file=- < "$patch" ); then
-        :
-    else
-        # already applied? verify by sentinel; otherwise fail
-        if [ -n "$sentinel" ] && grep -rqF "$sentinel" "$tree" 2>/dev/null; then
-            warn "patch looks already applied, continuing"
-        else
-            die "patch did not apply cleanly for $src"
-        fi
-    fi
+    ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
+        || die "patch did not apply cleanly for $src"
+
     log "Building '$src' (.deb, keeping official version)"
     # -d: don't re-check build-deps (already installed above)
     # -b -uc -us: binary only, unsigned. changelog untouched -> official version.
@@ -114,13 +108,17 @@ build_pkg() {
         dpkg-buildpackage -b -uc -us -d ) \
         || die "dpkg-buildpackage failed for $src"
 
+    if [ "${ANLAND_INSTALL:-0}" != 1 ]; then
+        log "Build only: not installing $src"
+        return 0
+    fi
     log "Installing built .deb(s) for '$src'"
     local debs
     debs="$(find "$WORKDIR/$src" -maxdepth 1 -name '*.deb' -type f)"
     [ -n "$debs" ] || die "no .deb produced for $src"
     printf '%s\n' "$debs"
     # shellcheck disable=SC2086
-    $SUDO dpkg -i $debs || warn "dpkg -i for $src reported issues (deps?)"
+    $SUDO dpkg -i $debs || die "dpkg -i for $src failed"
 }
 
 # ---------------------------------------------------------------------------
@@ -142,11 +140,18 @@ main() {
     build_pkg kwin     "$kwin_patch" "BackendType::Anland"
     build_pkg xwayland "$xwl_patch" "No usable linux-dmabuf main device"
 
-    sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment
+    if [ "${ANLAND_INSTALL:-0}" != 1 ]; then
+        log "Done. Built packages only; global environment unchanged."
+        return 0
+    fi
+    $SUDO sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment \
+        || die "failed to update /etc/environment"
 
-    $SUDO touch /etc/environment
-    $SUDO sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment
-    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' | $SUDO tee -a /etc/environment >/dev/null
+    $SUDO touch /etc/environment || die "failed to create /etc/environment"
+    $SUDO sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment \
+        || die "failed to update /etc/environment"
+    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' | $SUDO tee -a /etc/environment >/dev/null \
+        || die "failed to update /etc/environment"
 
     log "Done. Patched kwin and Xwayland built and installed."
     echo "Built packages are under: $WORKDIR/{kwin,xwayland}/"
