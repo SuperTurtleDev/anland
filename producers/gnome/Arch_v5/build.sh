@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build the Arch Linux ARM Anland Mutter 50.5 port as pacman split packages.
+# Build the Arch Linux ARM Anland Mutter and patched Xwayland packages.
 #
 # Usage:
 #   ./build.sh [--nocheck|--noconfirm|--log|--nosign|--force]
@@ -27,6 +27,9 @@ MUTTER_SRCDEST_DIR="$WORKDIR/sources"
 PKGDEST_DIR="$WORKDIR/packages"
 MUTTER_OVERLAY_ROOT="$WORKDIR/overlay"
 MUTTER_BUILDDIR="$WORKDIR/build"
+XWAYLAND_STAGE="$WORKDIR/xwayland-package"
+XWAYLAND_SRCDEST_DIR="$WORKDIR/xwayland-sources"
+XWAYLAND_BUILDDIR="$WORKDIR/xwayland-build"
 SOURCE_CACHE="${ANLAND_SOURCE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-review/arch-mutter}"
 INSTALL="${ANLAND_INSTALL:-${INSTALL:-0}}"
 export JOBS="${JOBS:-2}"
@@ -44,9 +47,18 @@ validate_environment() {
     [[ $(id -u) != 0 && $(uname -m) == aarch64 ]] || die 'Build as non-root on aarch64'
     [[ -d "$SCRIPT_DIR/mutter/src/backends/anland" && -f "$SCRIPT_DIR/mutter.patch" ]] \
         || die 'Shared backend or patch missing'
+    [[ -f "$SCRIPT_DIR/xorg-xwayland.PKGBUILD" && -f "$SCRIPT_DIR/xwayland.patch" ]] \
+        || die 'Patched Xwayland PKGBUILD or patch missing'
     for tool in makepkg tar patch sha512sum sha256sum bsdtar; do
         command -v "$tool" >/dev/null || die "Missing tool: $tool"
     done
+}
+
+prepare_xwayland_stage() {
+    log 'Preparing patched Xwayland makepkg staging directory'
+    mkdir -p "$XWAYLAND_STAGE" "$XWAYLAND_SRCDEST_DIR" "$PKGDEST_DIR" "$XWAYLAND_BUILDDIR"
+    cp "$SCRIPT_DIR/xorg-xwayland.PKGBUILD" "$XWAYLAND_STAGE/PKGBUILD"
+    cp "$SCRIPT_DIR/xwayland.patch" "$XWAYLAND_STAGE/"
 }
 
 prepare_mutter_stage() {
@@ -69,6 +81,13 @@ prepare_mutter_stage() {
     fi
 }
 
+run_xwayland_makepkg() (
+    cd "$XWAYLAND_STAGE"
+    export SRCDEST="$XWAYLAND_SRCDEST_DIR" PKGDEST="$PKGDEST_DIR" BUILDDIR="$XWAYLAND_BUILDDIR"
+    export MAKEFLAGS="-j$JOBS"
+    makepkg -s --needed --noconfirm --cleanbuild "$@"
+)
+
 run_makepkg() (
     cd "$MUTTER_STAGE"
     export SRCDEST="$MUTTER_SRCDEST_DIR" PKGDEST="$PKGDEST_DIR" BUILDDIR="$MUTTER_BUILDDIR"
@@ -77,11 +96,23 @@ run_makepkg() (
     makepkg -s --needed --noconfirm --cleanbuild "$@"
 )
 
+collect_xwayland_packages() {
+    local stamp="$1" pkg
+    mapfile -t xwayland_packages < <(cd "$XWAYLAND_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
+    [[ ${#xwayland_packages[@]} == 1 ]] || die "Expected one patched Xwayland package, found ${#xwayland_packages[@]}"
+    for pkg in "${xwayland_packages[@]}"; do
+        [[ -s "$pkg" && "$pkg" -nt "$stamp" ]] || die "Missing or stale package: $pkg"
+        bsdtar -tf "$pkg" >/dev/null
+        sha256sum "$pkg"
+    done
+    rm -f -- "$stamp"
+}
+
 collect_packages() {
     local stamp="$1" pkg
-    mapfile -t packages < <(cd "$MUTTER_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
-    [[ ${#packages[@]} == 3 ]] || die "Expected three split packages, found ${#packages[@]}"
-    for pkg in "${packages[@]}"; do
+    mapfile -t mutter_packages < <(cd "$MUTTER_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
+    [[ ${#mutter_packages[@]} == 3 ]] || die "Expected three split Mutter packages, found ${#mutter_packages[@]}"
+    for pkg in "${mutter_packages[@]}"; do
         [[ -s "$pkg" && "$pkg" -nt "$stamp" ]] || die "Missing or stale package: $pkg"
         bsdtar -tf "$pkg" >/dev/null
         sha256sum "$pkg"
@@ -90,22 +121,42 @@ collect_packages() {
 }
 
 install_packages() {
-    log 'Installing freshly built Mutter packages (explicitly requested)'
-    sudo pacman -U -- "$@"
+    log 'Installing freshly built Mutter and Xwayland packages (explicitly requested)'
+    local pacman_local_config="$WORKDIR/pacman-local.conf"
+    cp /etc/pacman.conf "$pacman_local_config"
+    if grep -q '^#LocalFileSigLevel = Optional$' "$pacman_local_config"; then
+        sed -i 's/^#LocalFileSigLevel = Optional$/LocalFileSigLevel = Optional/' "$pacman_local_config"
+    elif grep -qE '^[[:space:]]*LocalFileSigLevel[[:space:]]*=' "$pacman_local_config"; then
+        sed -i -E 's/^[[:space:]]*LocalFileSigLevel[[:space:]]*=.*/LocalFileSigLevel = Optional/' "$pacman_local_config"
+    elif grep -qE '^\[options\][[:space:]]*$' "$pacman_local_config"; then
+        sed -i '/^\[options\][[:space:]]*$/a LocalFileSigLevel = Optional' "$pacman_local_config"
+    else
+        rm -f -- "$pacman_local_config"
+        die 'pacman.conf has no [options] section'
+    fi
+    if ! sudo pacman --config "$pacman_local_config" -U --noconfirm "$@"; then
+        rm -f -- "$pacman_local_config"
+        die 'Failed to install the built Mutter/Xwayland packages'
+    fi
+    rm -f -- "$pacman_local_config"
 }
 
 main() {
     validate_environment "$@"
+    prepare_xwayland_stage
     prepare_mutter_stage
-    local stamp
-    local -a packages
-    stamp="$(mktemp "$MUTTER_STAGE/build-start.XXXXXX")"
+    local mutter_stamp xwayland_stamp
+    local -a mutter_packages xwayland_packages
+    xwayland_stamp="$(mktemp "$XWAYLAND_STAGE/build-start.XXXXXX")"
+    mutter_stamp="$(mktemp "$MUTTER_STAGE/build-start.XXXXXX")"
+    run_xwayland_makepkg "$@"
+    collect_xwayland_packages "$xwayland_stamp"
     run_makepkg "$@"
-    collect_packages "$stamp"
+    collect_packages "$mutter_stamp"
     if [[ "$INSTALL" == 1 ]]; then
-        install_packages "${packages[@]}"
+        install_packages "${xwayland_packages[@]}" "${mutter_packages[@]}"
     fi
-    log "Done. Package artifacts: $PKGDEST_DIR (INSTALL=$INSTALL)"
+    log "Done. Mutter and Xwayland package artifacts: $PKGDEST_DIR (INSTALL=$INSTALL)"
 }
 
 main "$@"

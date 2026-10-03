@@ -1,0 +1,109 @@
+--- a/hw/xwayland/xwayland-glamor-gbm.c
++++ b/hw/xwayland/xwayland-glamor-gbm.c
+@@ -590,8 +590,17 @@
+             return NULL;
+     }
+ 
++    /* An implicit-modifier buffer (DRM_FORMAT_MOD_INVALID) is never listed in
++     * the compositor's advertised modifier set, so the regular support check
++     * fails. On the kgsl/turnip stack — where the buffer is allocated on the
++     * display node but composited by turnip — that left both the dmabuf and
++     * the (absent) wl_drm path unusable, so no wl_buffer was created and the
++     * X11 window stayed black. Per the linux-dmabuf protocol, INVALID means
++     * "let the compositor infer the layout", so submit it through the dmabuf
++     * path directly instead of rejecting it. */
+     if (xwl_screen->dmabuf &&
+-        xwl_glamor_is_modifier_supported(xwl_screen, format, modifier)) {
++        (modifier == DRM_FORMAT_MOD_INVALID ||
++         xwl_glamor_is_modifier_supported(xwl_screen, format, modifier))) {
+         struct zwp_linux_buffer_params_v1 *params;
+ 
+         params = zwp_linux_dmabuf_v1_create_params(xwl_screen->dmabuf);
+@@ -773,6 +782,15 @@
+         strides[0] < width * bpp / 8)
+        goto error;
+ 
++    /* Some freedreno/kgsl mesa builds (the on-device dev tree) rewrite a
++     * LINEAR modifier (0) to a bogus 1274 (0x4FA) in the loader_dri3
++     * pixmap_from_buffers path. 1274 is not a valid DRM modifier, so the
++     * gbm_bo_import() below rejects it and the X11 GL client gets BadAlloc
++     * (dri3_alloc_render_buffer -> pixmap_from_buffer[s] failed -> segfault).
++     * The buffer is really linear, so map the bogus value back to LINEAR. */
++    if (modifier == 1274ULL)
++        modifier = DRM_FORMAT_MOD_LINEAR;
++
+     if (xwl_gbm->dmabuf_capable && modifier != DRM_FORMAT_MOD_INVALID) {
+ #ifdef GBM_BO_WITH_MODIFIERS
+        struct gbm_import_fd_modifier_data data;
+@@ -1665,27 +1683,37 @@
+ xwl_glamor_gbm_init_main_dev(struct xwl_screen *xwl_screen)
+ {
+     struct xwl_gbm_private *xwl_gbm = xwl_gbm_get(xwl_screen);
+-    drmDevice *main_dev;
++    drmDevice *main_dev = NULL;
+ 
+-    while (!xwl_screen->default_feedback.feedback_done) {
+-        if (wl_display_dispatch(xwl_screen->display) < 0) {
+-            ErrorF("Failed to dispatch Wayland display\n");
+-            return FALSE;
++    /* linux-dmabuf feedback (and thus a main device) only exists from protocol
++     * version 4. On the kgsl/turnip stack the compositor only speaks v3, so
++     * there is no feedback to wait for — skip the wait and go straight to the
++     * fallback render node below instead of blocking forever on feedback_done. */
++    if (xwl_screen->dmabuf_protocol_version >= 4) {
++        while (!xwl_screen->default_feedback.feedback_done) {
++            if (wl_display_dispatch(xwl_screen->display) < 0) {
++                ErrorF("Failed to dispatch Wayland display\n");
++                return FALSE;
++            }
+         }
++        main_dev = xwl_screen->default_feedback.main_dev;
+     }
+ 
+-    main_dev = xwl_screen->default_feedback.main_dev;
+-    if (!main_dev) {
+-        ErrorF("No main linux-dmabuf device advertised by compositor\n");
+-        return FALSE;
+-    }
+-
+-    if (!(main_dev->available_nodes & (1 << DRM_NODE_RENDER))) {
+-        ErrorF("Main linux-dmabuf device has no render node\n");
+-        return FALSE;
++    /* On the kgsl-backed turnip stack the compositor advertises no usable DRM
++     * render node (the GPU is exposed through kgsl, not a standard DRM node),
++     * so main_dev is NULL or render-node-less. Rather than dereferencing NULL
++     * (-> crash) or bailing out, fall back to a default render node, which the
++     * patched freedreno mesa redirects to /dev/kgsl-3d0 for native GL. */
++    if (!main_dev || !(main_dev->available_nodes & (1 << DRM_NODE_RENDER))) {
++        const char *fallback = getenv("XWAYLAND_GBM_DEVICE");
++        if (!fallback)
++            fallback = "/dev/dri/renderD128";
++        ErrorF("No usable linux-dmabuf main device, falling back to %s\n",
++               fallback);
++        xwl_gbm->device_name = strdup(fallback);
++    } else {
++        xwl_gbm->device_name = strdup(main_dev->nodes[DRM_NODE_RENDER]);
+     }
+-
+-    xwl_gbm->device_name = strdup(main_dev->nodes[DRM_NODE_RENDER]);
+     if (!xwl_gbm->device_name) {
+         return FALSE;
+     }
+--- a/hw/xwayland/xwayland-glamor.c
++++ b/hw/xwayland/xwayland-glamor.c
+@@ -123,6 +123,15 @@
+ {
+     if (!xwl_glamor_has_wl_drm(xwl_screen) &&
+         xwl_screen->dmabuf_protocol_version < 4) {
++        /* No wl_drm and no linux-dmabuf feedback (v4). On the kgsl/turnip stack
++         * the compositor exposes neither (the GPU lives behind /dev/kgsl-3d0,
++         * not a DRM render node, so there is no main device to advertise), but
++         * it does speak linux-dmabuf v3. We can still bring glamor up by opening
++         * a fallback render node directly (see xwl_glamor_gbm_init_main_dev) and
++         * submitting buffers over dmabuf v3, so keep glamor available as long as
++         * v3 is present. */
++        if (xwl_screen->dmabuf_protocol_version >= 3)
++            return TRUE;
+         LogMessageVerb(X_INFO, 3, "glamor: 'wl_drm' not supported and linux-dmabuf v4 not supported\n");
+         return FALSE;
+     }

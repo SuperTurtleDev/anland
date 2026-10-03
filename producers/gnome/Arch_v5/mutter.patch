@@ -979,7 +979,7 @@ index 535cb57112..e5e1d6f504 100644
    if (display_number_override != -1)
      display = display_number_override;
    else if (g_getenv ("RUNNING_UNDER_GDM"))
-@@ -1100,13 +1115,15 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
+@@ -1100,14 +1115,16 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
  
    if (!manager->public_connection.name)
      {
@@ -997,3 +997,4 @@ index 535cb57112..e5e1d6f504 100644
          return FALSE;
        manager->private_connection.name =
          g_strdup_printf ("unix:%s%d", X11_TMP_UNIX_PATH,
+                          manager->private_connection.display_index);
