@@ -17,10 +17,13 @@ static anland_device *device(anland_niri_bridge *b)
 
 anland_niri_bridge *anland_niri_open(const char *endpoint)
 {
-    anland_present_config_t present;
-    if (anland_present_config_from_environment(&present, endpoint, NULL) != 0 ||
-        present.backend != ANLAND_PRESENT_BACKEND_LEGACY)
-        return NULL;
+    /* Arch_v5 niri is the legacy producer. Do not let an inherited global
+     * backend selection redirect it to AWL or make daemon startup fail. */
+    anland_present_config_t present = {
+        .backend = ANLAND_PRESENT_BACKEND_LEGACY,
+        .endpoint = endpoint,
+        .runtime_dir = NULL,
+    };
     anland_de_backend_config_t cfg = { .present = present, .name = "niri" };
     anland_niri_bridge *b = calloc(1, sizeof(*b));
     if (!b)

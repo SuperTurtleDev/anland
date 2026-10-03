@@ -51,7 +51,7 @@ impl Client {
         let raw = unsafe { ffi::anland_niri_open(socket.as_ptr()) };
         NonNull::new(raw)
             .map(Self)
-            .ok_or_else(|| failed("open (AWL is unsupported)"))
+            .ok_or_else(|| failed("open legacy daemon backend"))
     }
 
     pub fn pump(&mut self) -> io::Result<()> {

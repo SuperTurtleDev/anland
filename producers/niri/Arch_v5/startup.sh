@@ -18,6 +18,7 @@ command -v xwayland-satellite >/dev/null 2>&1 || {
 }
 # Select the Anland backend explicitly; do not rely on a login-shell variable.
 export ANLAND=1
+export ANLAND_PRESENT_BACKEND=legacy
 export ANLAND_SOCKET="$SOCK"
 # Same KGSL/Turnip defaults as the legacy Arch producer launcher.
 export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-kgsl}"
