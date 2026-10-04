@@ -16,6 +16,22 @@
 
 #define AWL_XDG_VERSION 3
 
+/* Configure serial policy (daemon config "next_serial", default on).
+ * xdg_surface.configure carries a serial the client acks; a client that
+ * validates it drops the event without acking, so its first buffer is never
+ * committed and the window never maps (the daemon creates the Android window
+ * at map time -> no window at all). wl_display_get_serial() returns the last
+ * serial the display *generated*, which is 0 until some input event allocated
+ * one — a freshly started daemon therefore sent serial 0 to its first client
+ * (Qt/KDE wayland clients reject it; the toplevel resize path below always
+ * used the fresh-serial call, which is why a window that already existed kept
+ * working). Default on = allocate a fresh serial per configure; the legacy
+ * call stays reachable as an escape hatch. */
+static inline uint32_t awl_configure_serial(void) {
+    return awl_cfg_next_serial() ? wl_display_next_serial(g_srv.display)
+                                 : wl_display_get_serial(g_srv.display);
+}
+
 /* caller holds s->ev_lock */
 static void send_configure_locked(struct awl_surface* s,
                                   int32_t w, int32_t h,
@@ -26,7 +42,7 @@ static void send_configure_locked(struct awl_surface* s,
         uint32_t* p = wl_array_add(&arr, nstates * sizeof(uint32_t));
         if (p) memcpy(p, states, nstates * sizeof(uint32_t));
     }
-    uint32_t serial = wl_display_get_serial(g_srv.display);
+    uint32_t serial = awl_configure_serial();
     s->u.xdg.conf_w = w;
     s->u.xdg.conf_h = h;
     s->configured = 1;
@@ -550,7 +566,7 @@ static void xdg_surface_get_popup(struct wl_client* c, struct wl_resource* res,
     s->sub_y = y + pgy;
     s->configured = 1;
     xdg_popup_send_configure(pr, x, y, sw, sh);
-    xdg_surface_send_configure(res, wl_display_get_serial(g_srv.display));
+    xdg_surface_send_configure(res, awl_configure_serial());
     pthread_mutex_unlock(&s->ev_lock);
     LOGI("popup %llu of %llu at %d,%d %dx%d",
             (unsigned long long)s->id, (unsigned long long)parent->id,

@@ -34,4 +34,6 @@
     <string name="auto_attach">自动 attach 新窗口</string>
     <string name="sc_backend_tip">合成后端（开 = SC/HWC: wayland 图层交由 SurfaceFlinger 合成, 允许时零拷贝扫描输出; 关 = 回退逐窗口 GL 渲染。对之后 attach 的窗口生效）:</string>
     <string name="sc_backend">SC 合成后端（HWC）</string>
+    <string name="next_serial_tip">configure 序列号（开 = 每次 configure 分配新的 wayland serial；Qt/KDE 的 wayland 客户端会校验该值，守护进程刚启动、还没处理过输入时发出的 serial=0 会被直接丢弃，导致第一个应用不出现窗口。关 = 沿用旧行为）:</string>
+    <string name="next_serial">configure 使用新序列号</string>
 </resources>

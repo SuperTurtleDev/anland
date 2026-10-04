@@ -34,4 +34,6 @@
     <string name="init_size_h">Height</string>
     <string name="sc_backend_tip">Compositor backend (on = SC/HWC: wayland layers are composed by SurfaceFlinger, zero-copy scanout when possible; off = per-window GL renderer fallback. Applies to windows attached from now on):</string>
     <string name="sc_backend">SC compositor backend (HWC)</string>
+    <string name="next_serial_tip">Configure serial (on = allocate a fresh wayland serial for every configure; Qt/KDE wayland clients ignore the serial-0 configure a daemon without prior input otherwise sends, leaving the first app without a window. Off = legacy behaviour):</string>
+    <string name="next_serial">Fresh configure serial</string>
 </resources>

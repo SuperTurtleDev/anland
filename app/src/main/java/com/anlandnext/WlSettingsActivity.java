@@ -311,6 +311,27 @@ public class WlSettingsActivity extends Activity {
         scSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("sc_enabled", on ? 1 : 0));
         root.addView(scSw);
 
+        /* ---- Configure serial (daemon config next_serial: on = every
+         *      xdg_surface.configure carries a freshly allocated wayland
+         *      serial. Qt/KDE wayland clients validate it and silently
+         *      drop a serial-0 configure — which is what a daemon that has
+         *      not handled any input yet used to send, leaving the first
+         *      app without an Android window. Off = legacy behaviour.) */
+        android.widget.Space gap5 = new android.widget.Space(this);
+        gap5.setMinimumHeight(64);
+        root.addView(gap5);
+
+        TextView nsTip = new TextView(this);
+        nsTip.setText(R.string.next_serial_tip);
+        root.addView(nsTip);
+
+        android.widget.Switch nsSw = new android.widget.Switch(this);
+        nsSw.setText(R.string.next_serial);
+        int gotNs = WlBinder.configGet("next_serial");
+        nsSw.setChecked(gotNs != 0);   /* daemon down / unknown → on (the daemon default) */
+        nsSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("next_serial", on ? 1 : 0));
+        root.addView(nsSw);
+
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.setFillViewport(true);
         scroll.addView(root);

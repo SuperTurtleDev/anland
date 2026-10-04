@@ -732,4 +732,12 @@ void awl_surface_layer_uv(struct awl_surface* s, float* u0, float* v0,
  * it there too. Thread contract: wl_client_set_event_loop in wayland-server.c. */
 void awl_client_maybe_migrate(struct wl_client* client);
 
+/* next_serial (daemon config, default on) — the configure-serial policy
+ * awl_xdg.c reads when it sends xdg_surface.configure: 1 = allocate a
+ * fresh serial per configure (wl_display_next_serial; non-zero, which
+ * is what clients that validate the serial need), 0 = the legacy
+ * wl_display_get_serial, which is 0 until some input event has
+ * allocated one. Defined in waylandbridge.cpp. */
+bool awl_cfg_next_serial(void);
+
 #endif

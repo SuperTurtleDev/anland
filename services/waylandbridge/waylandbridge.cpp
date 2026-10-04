@@ -76,6 +76,16 @@ static std::atomic<bool> g_cfg_sc{true};
  * fractional-scale-v1, so its X window is resized to the zoom-adjusted
  * physical size and the existing stretch path scales it back to Android. */
 static std::atomic<bool> g_cfg_xwayland_scale{true};
+/* next_serial (daemon config, default on): the configure-serial policy
+ * awl_xdg.c reads when it sends xdg_surface.configure — 1 = a fresh
+ * wl_display_next_serial per configure, 0 = the legacy
+ * wl_display_get_serial. Read on every configure (hot path), so it is an
+ * atomic like g_cfg_sc; a flip takes effect on the next configure. */
+static std::atomic<bool> g_cfg_next_serial{true};
+
+bool awl_cfg_next_serial(void) {
+    return g_cfg_next_serial.load(std::memory_order_relaxed);
+}
 /* Both backends are keyed by window id and mutually exclusive per id: an
  * attach first clears the id from BOTH (unknown id = no-op — a config flip
  * between detach and re-attach must not leave the window in the old
@@ -1209,6 +1219,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "xwayland_scale") { *lo = 0; *hi = 1; return true; }
     if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
     if (key == "sc_enabled") { *lo = 0; *hi = 1; return true; }
+    if (key == "next_serial") { *lo = 0; *hi = 1; return true; }
     return false;
 }
 
@@ -1270,10 +1281,12 @@ static void cfg_save_locked(void) {
     fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
                "  \"scale_mode\": %d,\n  \"xwayland_scale\": %d,\n"
                "  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
+               "  \"next_serial\": %d,\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
             g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
+            g_cfg_next_serial.load(std::memory_order_relaxed) ? 1 : 0,
             rt, sl);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
@@ -1378,6 +1391,14 @@ static void cfg_load_and_apply(void) {
     } else if (sc != -1) {
         LOGE("config: sc_enabled=%d out of range (0..1), ignored", sc);
     }
+    int ns = cfg_parse_int(buf, "next_serial");
+    if (ns == 0 || ns == 1) {
+        g_cfg_next_serial.store(ns != 0, std::memory_order_relaxed);
+        LOGI("config: next_serial=%s (applied at startup — configures from now on)",
+             ns ? "true (fresh serial per configure)" : "false (legacy get_serial)");
+    } else if (ns != -1) {
+        LOGE("config: next_serial=%d out of range (0..1), ignored", ns);
+    }
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -1445,6 +1466,14 @@ static int cfg_set(const std::string& key, int32_t val) {
             cfg_save_locked();
         }
         LOGI("config set sc_enabled=%d (new attaches + persisted)", val);
+    } else if (key == "next_serial") {
+        /* effective on the next configure sent — nothing live to apply */
+        g_cfg_next_serial.store(val != 0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            cfg_save_locked();
+        }
+        LOGI("config set next_serial=%d (applied + persisted)", val ? 1 : 0);
     }
     return 0;
 }
@@ -2037,6 +2066,8 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             v = g_cfg_auto_attach ? 1 : 0;
         }
         else if (key == "sc_enabled") v = g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0;
+        else if (key == "next_serial")
+            v = g_cfg_next_serial.load(std::memory_order_relaxed) ? 1 : 0;
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;
