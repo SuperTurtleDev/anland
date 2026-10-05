@@ -3,14 +3,12 @@
 anland_inc = include_directories('.', 'common', 'libdisplay_producer')
 anland_public = static_library('gamescope-anland-public',
   'common/socket_utils.c',
-  'common/anland_present_ipc.c',
   'libdisplay_producer/display_producer.c',
   'libdisplay_producer/anland_device.c',
   'libdisplay_producer/anland_scene.c',
   'libdisplay_producer/anland_scene_legacy.c',
   'libdisplay_producer/anland_present.c',
-  'libdisplay_producer/anland_present_legacy.c',
-  'libdisplay_producer/anland_present_awl.c',
+  # One scene/device presentation path; no extra presentation service.
   'libdisplay_producer/anland_buffer_registry.c',
   'libdisplay_producer/anland_window_map.c',
   'libdisplay_producer/anland_de_backend.c',

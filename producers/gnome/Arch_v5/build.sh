@@ -69,7 +69,8 @@ prepare_mutter_stage() {
     mkdir -p "$MUTTER_OVERLAY_ROOT/src/backends/anland"
     cp -aL "$SCRIPT_DIR/mutter/src/backends/anland/." "$MUTTER_OVERLAY_ROOT/src/backends/anland/"
     [[ -f "$MUTTER_OVERLAY_ROOT/src/backends/anland/libdisplay_producer/anland_device.c" &&
-       -f "$MUTTER_OVERLAY_ROOT/src/backends/anland/common/anland_present_ipc.c" ]] || die 'Incomplete staged backend'
+       -f "$MUTTER_OVERLAY_ROOT/src/backends/anland/libdisplay_producer/anland_present.c" &&
+       -f "$MUTTER_OVERLAY_ROOT/src/backends/anland/common/socket_utils.c" ]] || die 'Incomplete staged backend'
     tar -czf "$MUTTER_STAGE/mutter-overlay.tar.gz" -C "$MUTTER_OVERLAY_ROOT" src
     cp "$SCRIPT_DIR/PKGBUILD" "$SCRIPT_DIR/mutter.patch" "$MUTTER_STAGE/"
     # makepkg verifies cached and downloaded archives against the PKGBUILD SHA512.

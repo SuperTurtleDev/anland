@@ -368,7 +368,7 @@ diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
-@@ -1587,18 +1587,44 @@
+@@ -1587,18 +1587,60 @@
  
  void MouseCursor::UpdatePosition()
  {
@@ -377,18 +377,34 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
 +	wlserver_lock();
 +	int root_x = wlserver.mouse_surface_cursorx;
 +	int root_y = wlserver.mouse_surface_cursory;
++	const bool hidden = wlserver.bCursorHidden;
 +	wlserver_unlock();
-+	Window root_ret, child_ret;
-+	int win_x = 0, win_y = 0;
-+	unsigned int mask = 0;
-+	if ( !XQueryPointer( m_ctx->dpy, DefaultRootWindow( m_ctx->dpy ),
-+	                    &root_ret, &child_ret, &root_x, &root_y,
-+	                    &win_x, &win_y, &mask ) )
++	// XQueryPointer is a blocking Xwayland round trip. Hidden sprites need only
++	// a 50ms poll; still apply pointer constraints on every UpdatePosition().
++	const uint64_t now = get_time_in_nanos();
++	const bool query = !hidden || m_ulLastPointerQuery == 0 ||
++	                   now - m_ulLastPointerQuery >= 50000000ull;
++	if ( !query )
 +	{
-+		wlserver_lock();
-+		root_x = wlserver.mouse_surface_cursorx;
-+		root_y = wlserver.mouse_surface_cursory;
-+		wlserver_unlock();
++		// Do not snap back to wlserver's stale XTest cache between X queries.
++		root_x = m_x;
++		root_y = m_y;
++	}
++	else
++	{
++		m_ulLastPointerQuery = now;
++		Window root_ret, child_ret;
++		int win_x = 0, win_y = 0;
++		unsigned int mask = 0;
++		if ( !XQueryPointer( m_ctx->dpy, DefaultRootWindow( m_ctx->dpy ),
++		                    &root_ret, &child_ret, &root_x, &root_y,
++		                    &win_x, &win_y, &mask ) )
++		{
++			wlserver_lock();
++			root_x = wlserver.mouse_surface_cursorx;
++			root_y = wlserver.mouse_surface_cursory;
++			wlserver_unlock();
++		}
 +	}
 +
  	wlserver_lock();
@@ -417,7 +433,7 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
  	}
  	wlserver_unlock();
  }
-@@ -3793,6 +3819,23 @@
+@@ -3793,6 +3835,23 @@
  found:;
  	}
  
@@ -441,7 +457,7 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
  	if ( !focus && ( !globalFocus || !controlledFocus ) )
  	{
  		if ( !vecPossibleFocusWindows.empty() )
-@@ -6726,6 +6769,14 @@
+@@ -6726,6 +6785,14 @@
  		{
  			g_ColorMgmt.pending.outputVirtualWhite.x = santitize_float( bit_cast<float>( user_vec[0] ) );
  			g_ColorMgmt.pending.outputVirtualWhite.y = santitize_float( bit_cast<float>( user_vec[1] ) );
@@ -456,7 +472,7 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
  		}
  		else
  		{
-@@ -6783,9 +6834,17 @@
+@@ -6783,9 +6850,17 @@
  		}
  
  		nightmode_t nightmode;
@@ -474,3 +490,9 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
  
  		if ( set_color_nightmode( nightmode ) )
  			hasRepaint = true;
+
+diff --git a/src/steamcompmgr.hpp b/src/steamcompmgr.hpp
+--- a/src/steamcompmgr.hpp
++++ b/src/steamcompmgr.hpp
+@@ -108,0 +109,1 @@
++	uint64_t m_ulLastPointerQuery = 0;

@@ -58,6 +58,10 @@ struct anland_scene_legacy {
 
     /* Flipped, awaiting the consumer's acknowledgement. */
     uint64_t inflight_commit;
+    /* Buffer ids retained per physical slot until that slot is selected again.
+     * A new target proves only that selected slot is writable, not the old one. */
+    uint64_t retained[ANLAND_DEVICE_MAX_BUFS][ANLAND_SCENE_MAX_LAYERS];
+    size_t retained_count[ANLAND_DEVICE_MAX_BUFS];
     /* Buffers the in-flight frame used; released once the consumer rotated away
      * from them (see pump()). */
     uint64_t inflight_buffers[ANLAND_SCENE_MAX_LAYERS];
@@ -70,6 +74,11 @@ struct anland_scene_legacy {
     /* True between a successful connect and the next session teardown. Keeps
      * drop_session() from invalidating an already-dead session over and over. */
     bool session_valid;
+    /* Old identities/events must retire before a handshake can reuse buffer ids. */
+    bool retirement_pending;
+    /* eventfd ACK was consumed, but slot release/publication may need a retry. */
+    bool ready_pending;
+    int ready_slot;
 
     anland_device_output_t output;
     bool have_output;
@@ -87,7 +96,8 @@ static int legacy_submit(void *ud, const anland_scene_snapshot_t *snap)
 
     /* No consumer: there is nobody to present to. Rejecting here is what turns
      * into COMMIT_DROPPED(BACKEND_ERROR) for the DE. */
-    if (!anland_device_is_connected(b->dev))
+    if (!b->session_valid || b->ready_pending || b->retirement_pending ||
+        !anland_device_is_connected(b->dev))
         return -1;
 
     /* One frame at a time — the transport's own back-pressure. */
@@ -230,27 +240,65 @@ static void drop_pending(struct anland_scene_legacy *b)
     b->pending_buffer_count = 0;
 }
 
-/* Abandon everything the current consumer session was carrying.
- *
- * This is the session boundary, so it MUST invalidate even when no frame happens
- * to be in flight: a disconnect while idle still ends one session, and the next
- * one has to be distinguishable from it. `session_valid` is what keeps that from
- * firing repeatedly once the session is already gone. */
+/* Remove all aliases only after a release was queued successfully (or the
+ * scene itself retires a live commit during invalidation). */
+static void forget_retained(struct anland_scene_legacy *b, uint64_t buffer)
+{
+    for (size_t slot = 0; slot < ANLAND_DEVICE_MAX_BUFS; ++slot) {
+        size_t n = 0;
+        for (size_t i = 0; i < b->retained_count[slot]; ++i)
+            if (b->retained[slot][i] != buffer)
+                b->retained[slot][n++] = b->retained[slot][i];
+        b->retained_count[slot] = n;
+    }
+}
+
+/* Failed publications leave their identities intact. No allocations are needed
+ * to remember this debt: retained[] already owns every handed-off buffer. */
+static int retry_retirement(struct anland_scene_legacy *b)
+{
+    for (size_t slot = 0; slot < ANLAND_DEVICE_MAX_BUFS; ++slot) {
+        while (b->retained_count[slot]) {
+            uint64_t buffer = b->retained[slot][b->retained_count[slot] - 1];
+            if (anland_scene_backend_release_buffer(b->scene, buffer, -1) != 0)
+                return -1;
+            forget_retained(b, buffer);
+        }
+    }
+    return 0;
+}
+
+/* End a session exactly once. Submission outcome and buffer retirement are
+ * separate: a cancelled handed-off commit no longer exists in the scene but
+ * its retained[] entry still owes a release. */
 static void drop_session(struct anland_scene_legacy *b)
 {
-    const bool had_work = b->pending_commit != 0 || b->inflight_commit != 0 ||
-                          b->pending_fence >= 0;
+    if (b->session_valid || b->pending_commit || b->inflight_commit) {
+        /* Only commits that STILL exist will be released by invalidate(). A
+         * cancelled handed-off commit must remain in retained[] for retry. */
+        if (anland_scene_commit_is_pending(b->scene, b->pending_commit)) {
+            for (size_t i = 0; i < b->pending_buffer_count; ++i)
+                forget_retained(b, b->pending_buffers[i]);
+        }
+        if (anland_scene_commit_is_pending(b->scene, b->inflight_commit)) {
+            for (size_t i = 0; i < b->inflight_buffer_count; ++i)
+                forget_retained(b, b->inflight_buffers[i]);
+        }
 
-    if (!had_work && !b->session_valid)
-        return;
-
-    drop_pending(b);
-    b->inflight_commit = 0;
-    b->inflight_buffer_count = 0;
-    b->session_valid = false;
-    b->have_output = false;
-    memset(&b->output, 0, sizeof(b->output));
-    anland_scene_invalidate(b->scene);
+        /* invalidate() uses the headroom reserved for the live commit, including
+         * handed-off commits. It must run only once, not once per retry. */
+        anland_scene_invalidate(b->scene);
+        drop_pending(b);
+        b->inflight_commit = 0;
+        b->inflight_buffer_count = 0;
+        b->session_valid = false;
+        b->retirement_pending = true;
+        b->ready_pending = false;
+        b->have_output = false;
+        memset(&b->output, 0, sizeof(b->output));
+    }
+    if (b->retirement_pending)
+        (void)retry_retirement(b);
 }
 
 /* ---- lifecycle ---- */
@@ -311,6 +359,12 @@ bool anland_scene_legacy_connected(anland_scene_legacy *b)
     return b && anland_device_is_connected(b->dev);
 }
 
+bool anland_scene_legacy_target_available(anland_scene_legacy *b)
+{
+    return b && b->session_valid && !b->ready_pending &&
+           !b->retirement_pending && anland_device_is_connected(b->dev);
+}
+
 int anland_scene_legacy_reconnect(anland_scene_legacy *b)
 {
     if (!b)
@@ -325,16 +379,17 @@ int anland_scene_legacy_reconnect(anland_scene_legacy *b)
         return 0;
     }
 
+    /* Retire the old session BEFORE connecting. Even successfully queued
+     * releases must be delivered before a new session may reuse the same ids. */
+    drop_session(b);
+    if (b->retirement_pending) {
+        if (retry_retirement(b) != 0 || anland_scene_pending_events(b->scene) != 0)
+            return -1;
+        b->retirement_pending = false;
+    }
     if (anland_device_connect(b->dev) != 0)
         return -1;
-
     b->reconnects++;
-
-    /* The consumer is a different session than whatever we were talking to:
-     * any accepted/flipped frame belongs to the old one and will never complete.
-     * Drop it (the DE gets COMMIT_DROPPED + BUFFER_RELEASED) before announcing
-     * the new geometry. Layers survive — their identity is the DE's. */
-    drop_session(b);
 
     /* This session's identity: every publication below is stamped with it, and a
      * publication from a session that has already ended is refused by the scene. */
@@ -368,6 +423,7 @@ int anland_scene_legacy_reopen(anland_scene_legacy *b, const char *socket_path)
     /* Close any adapter-owned fence and invalidate scene work before replacing
      * the transport context. The scene/layer objects deliberately survive. */
     drop_session(b);
+    anland_device_force_fallback(b->dev);
     if (anland_device_reopen(b->dev, socket_path) != 0)
         return -1;
 
@@ -397,7 +453,20 @@ int anland_scene_legacy_present(anland_scene_legacy *b)
         return -1;
     if (b->pending_commit == 0)
         return -1; /* nothing accepted, or already flipped */
-    if (!anland_device_is_connected(b->dev))
+    if (!b->session_valid || b->ready_pending ||
+        !anland_device_is_connected(b->dev))
+        return -1;
+
+    /* Scene operations are serialized with this adapter by its caller. A layer
+     * destroyed before handoff has already dropped and released this commit. */
+    if (!anland_scene_commit_is_pending(b->scene, b->pending_commit)) {
+        drop_pending(b);
+        return -1;
+    }
+
+    const int slot = anland_device_current_fb_raw(b->dev);
+    if (slot < 0 || slot >= anland_device_fb_count(b->dev) ||
+        slot >= ANLAND_DEVICE_MAX_BUFS || b->retained_count[slot] != 0)
         return -1;
 
     /* Clear the consumer's pre-flip signal so the NEXT one is unambiguously the
@@ -414,9 +483,17 @@ int anland_scene_legacy_present(anland_scene_legacy *b)
     const int fence = b->pending_fence;
     b->pending_fence = -1;
 
-    if (anland_device_pageflip(b->dev, fence, NULL, NULL) != 0)
+    if (anland_device_pageflip(b->dev, fence, NULL, NULL) != 0) {
+        const uint64_t failed = b->pending_commit;
+        drop_pending(b);
+        anland_scene_backend_dropped(b->scene, failed, ANLAND_SCENE_DROP_BACKEND_ERROR);
         return -1;
+    }
 
+    anland_scene_backend_handed_off(b->scene, b->pending_commit);
+    memcpy(b->retained[slot], b->pending_buffers,
+           b->pending_buffer_count * sizeof(uint64_t));
+    b->retained_count[slot] = b->pending_buffer_count;
     b->inflight_commit = b->pending_commit;
     memcpy(b->inflight_buffers, b->pending_buffers,
            b->pending_buffer_count * sizeof(b->inflight_buffers[0]));
@@ -442,56 +519,49 @@ int anland_scene_legacy_pump(anland_scene_legacy *b, int timeout_ms)
         return 0;
     }
 
-    const int fd = anland_device_buffer_ready_fd(b->dev);
-    if (fd < 0)
-        return 0;
+    if (!b->ready_pending) {
+        const int fd = anland_device_buffer_ready_fd(b->dev);
+        if (fd < 0)
+            return 0;
+        struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
+        if (poll(&p, 1, timeout_ms) <= 0 || !(p.revents & POLLIN))
+            return 0;
+        eventfd_t v;
+        if (eventfd_read(fd, &v) != 0)
+            return 0;
 
-    struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
-    if (poll(&p, 1, timeout_ms) <= 0)
-        return 0;
-    if (!(p.revents & POLLIN))
-        return 0;
-
-    eventfd_t v;
-    if (eventfd_read(fd, &v) != 0)
-        return 0;
-
-    /* Order matters: report the completion first, then release the buffer the frame
-     * used, then publish the new render target.
-     *
-     * PRESENTED and RELEASED are separate facts (see anland_scene.h). This adapter
-     * is the one that knows the legacy release condition: the consumer raised
-     * buffer-ready again, which means it consumed the frame and rotated away from
-     * that buffer. A future DRM backend would instead release on its retire or
-     * release fence — the scene does not need to know the difference. */
-    if (b->inflight_commit != 0) {
-        const uint64_t done = b->inflight_commit;
-        uint64_t done_buffers[ANLAND_SCENE_MAX_LAYERS];
-        const size_t done_count = b->inflight_buffer_count;
-
-        memcpy(done_buffers, b->inflight_buffers,
-               done_count * sizeof(done_buffers[0]));
-        b->inflight_commit = 0;
-        b->inflight_buffer_count = 0;
-
-        if (anland_scene_backend_presented(b->scene, done, 0) == 0)
-            b->frames_acked++;
-
-        /* Release AFTER the presentation is reported, and once per distinct
-         * buffer: each one was in use by this frame and is only now free. */
-        for (size_t i = 0; i < done_count; i++)
-            anland_scene_backend_release_buffer(b->scene, done_buffers[i], -1);
+        /* Remember the consumed ACK before any fallible release publication.
+         * Subsequent pump() calls retry without waiting for another eventfd. */
+        b->ready_pending = true;
+        b->ready_slot = anland_device_current_fb_raw(b->dev);
+        if (b->inflight_commit != 0) {
+            const uint64_t done = b->inflight_commit;
+            b->inflight_commit = 0;
+            b->inflight_buffer_count = 0;
+            if (anland_scene_backend_presented(b->scene, done, 0) == 0)
+                b->frames_acked++;
+        }
     }
-
-    /* A corrupt index means the session is unusable: drop it rather than let the
-     * DE keep rendering into a buffer the consumer did not select. The DE gets
-     * COMMIT_DROPPED + BUFFER_RELEASED from drop_session() and reconnects
-     * explicitly. */
+    const int slot = b->ready_slot;
+    if (slot < 0 || slot >= anland_device_fb_count(b->dev) ||
+        slot >= ANLAND_DEVICE_MAX_BUFS ||
+        slot != anland_device_current_fb_raw(b->dev)) {
+        drop_session(b);
+        anland_device_force_fallback(b->dev);
+        return -1;
+    }
+    while (b->retained_count[slot] != 0) {
+        size_t i = b->retained_count[slot] - 1;
+        if (anland_scene_backend_release_buffer(b->scene, b->retained[slot][i], -1) != 0)
+            return -1;
+        b->retained_count[slot]--;
+    }
     if (publish_target_ready(b) != 0) {
         drop_session(b);
         anland_device_force_fallback(b->dev);
         return -1;
     }
+    b->ready_pending = false;
     return 0;
 }
 

@@ -1,8 +1,8 @@
 /*
  * anland_window_map.h -- stable DE layer to presentation-window mapping.
  *
- * Layer ids belong to anland_scene and presentation ids belong to the selected
- * backend. The map is deliberately independent of KWin, Mutter and AWL.
+ * Layer ids belong to anland_scene; window ids belong to the WM adapter.
+ * This producer-local map is independent of any WM or wire protocol.
  */
 #ifndef ANLAND_WINDOW_MAP_H
 #define ANLAND_WINDOW_MAP_H

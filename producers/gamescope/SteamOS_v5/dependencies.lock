@@ -4,7 +4,6 @@
 src/reshade 696b14cd6006ae9ca174e6164450619ace043283 https://github.com/Joshua-Ashton/reshade.git
 subprojects/libdisplay-info 47a5590e9c4eb35d67651b8c05a55f1a48259329 https://gitlab.freedesktop.org/emersion/libdisplay-info.git
 subprojects/libliftoff 8b08dc1c14fd019cc90ddabe34ad16596b0691f4 https://gitlab.freedesktop.org/emersion/libliftoff.git
-subprojects/openvr ff87f683f41fe26cc9353dd9d9d7028357fd8e1a https://github.com/ValveSoftware/openvr.git
 subprojects/vkroots 5106d8a0df95de66cc58dc1ea37e69c99afc9540 https://github.com/Joshua-Ashton/vkroots.git
 subprojects/wlroots d783533489e1f75d6886c2ab5c5960090ef268f8 https://gitlab.freedesktop.org/wlroots/wlroots.git
 thirdparty/SPIRV-Headers d790ced752b5bfc06b6988baadef6eb2d16bdf96 https://github.com/KhronosGroup/SPIRV-Headers.git

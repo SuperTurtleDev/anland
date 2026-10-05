@@ -15,10 +15,7 @@ anland_device *anland_gamescope_session_device(anland_gamescope_session *s)
 
 anland_gamescope_session *anland_gamescope_session_open(const char *endpoint)
 {
-    anland_present_config_t present;
-    if (anland_present_config_from_environment(&present, endpoint, NULL) != 0 ||
-        present.backend != ANLAND_PRESENT_BACKEND_LEGACY)
-        return NULL;
+    const anland_present_config_t present = { .endpoint = endpoint };
     anland_gamescope_session *s = calloc(1, sizeof(*s));
     if (!s)
         return NULL;
@@ -72,8 +69,8 @@ int anland_gamescope_session_target(anland_gamescope_session *s,
     target->buffer.fd = -1;
     if (!s || anland_de_backend_get_target(s->backend, &target->selection) != 0)
         return -1;
-    /* Legacy exposes its consumer buffers through the public device API;
-     * its presentation registry deliberately does not implement get_buffer(). */
+    /* Consumer framebuffers are device resources exposed by the shared device
+     * API, not remote window submissions or a second presentation protocol. */
     anland_device_fb_t fb = {.fd = -1};
     if (anland_device_get_fb(anland_gamescope_session_device(s),
             (int)target->selection.index, &fb) != 0)

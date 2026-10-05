@@ -28,8 +28,8 @@ typedef struct anland_niri_input {
     uint32_t payload_size, resource_type, fd_count;
 } anland_niri_input;
 
-/* Explicit legacy-only entry. A requested AWL session is rejected, not silently
- * changed to legacy. May exist while no consumer is connected. */
+/* Shared in-process presentation lifecycle over the daemon transport.
+ * May exist while no consumer is connected. */
 anland_niri_bridge *anland_niri_open(const char *endpoint);
 void anland_niri_close(anland_niri_bridge *bridge);
 int anland_niri_pump(anland_niri_bridge *bridge, int timeout_ms);

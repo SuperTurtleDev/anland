@@ -30,14 +30,11 @@ target_sources(kwin PRIVATE
     libdisplay_producer/anland_scene.c
     libdisplay_producer/anland_scene_legacy.c
     libdisplay_producer/anland_present.c
-    libdisplay_producer/anland_present_legacy.c
-    libdisplay_producer/anland_present_awl.c
     libdisplay_producer/anland_buffer_registry.c
     libdisplay_producer/anland_window_map.c
     libdisplay_producer/anland_de_backend.c
-    common/anland_present_ipc.c
     libdisplay_producer/display_producer.c
-    libdisplay_producer/socket_utils.c
+    common/socket_utils.c
 )
 target_include_directories(kwin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

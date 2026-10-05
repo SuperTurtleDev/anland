@@ -28,7 +28,7 @@
  * way to cancel a commit that a presentation backend has already started using.
  * Keep the scene contract at the same depth so the two never disagree. A wider
  * pipeline can be added when a backend with an explicit retire/cancel path
- * exists (e.g. AWL/DRM); until then, submitting a second frame is backpressure
+ * exists (e.g. a DRM device); until then, a second frame is backpressure
  * (the caller keeps its buffer and retries after PRESENTED/COMMIT_DROPPED). */
 #define ANLAND_SCENE_INFLIGHT_MAX 1
 
@@ -49,6 +49,7 @@ struct layer_slot {
 
 struct inflight {
     bool used;
+    bool handed_off;
     anland_scene_snapshot_t snapshot;
 };
 
@@ -70,13 +71,13 @@ struct anland_scene {
     anland_scene_event_t events[ANLAND_SCENE_EVENT_QUEUE];
     size_t qhead;
     size_t qcount;
-
     /* Release notifications are resource-lifetime events and must not be
-     * discarded when diagnostic/output events fill the main queue. The reserve
-     * matches the main queue so a burst of explicit backend releases is also
-     * covered. */
-    anland_scene_event_t release_events[ANLAND_SCENE_EVENT_QUEUE];
+     * discarded when diagnostic/output events fill the main queue. This queue
+     * grows on demand because release events carry ownership of caller fds. */
+    anland_scene_event_t *release_events;
     size_t release_count;
+    size_t release_capacity;
+
 
     int event_fd;
 };
@@ -92,18 +93,34 @@ static void signal_event_fd_locked(anland_scene *s)
     }
 }
 
+/* Reserve before accepting work; teardown must not allocate to release it. */
+static int reserve_releases_locked(anland_scene *s, size_t extra)
+{
+    if (extra > SIZE_MAX - s->release_count)
+        return -1;
+    size_t needed = s->release_count + extra;
+    if (needed > ANLAND_SCENE_RELEASE_QUEUE_MAX)
+        return -1;
+    if (needed <= s->release_capacity)
+        return 0;
+    size_t capacity = needed > ANLAND_SCENE_EVENT_QUEUE ? needed : ANLAND_SCENE_EVENT_QUEUE;
+    if (capacity > SIZE_MAX / sizeof(*s->release_events))
+        return -1;
+    void *events = realloc(s->release_events, capacity * sizeof(*s->release_events));
+    if (!events)
+        return -1;
+    s->release_events = events;
+    s->release_capacity = capacity;
+    return 0;
+}
+
 static void queue_event_locked(anland_scene *s, const anland_scene_event_t *ev)
 {
     if (ev->type == ANLAND_SCENE_EVENT_BUFFER_RELEASED) {
-        if (s->release_count < ANLAND_SCENE_MAX_LAYERS) {
-            s->release_events[s->release_count++] = *ev;
-            signal_event_fd_locked(s);
-            return;
-        }
-        /* This indicates a broken caller contract: one scene cannot have more
-         * than ANLAND_SCENE_MAX_LAYERS unreleased buffers from one commit. Do
-         * not silently close/drop the fence; retain the event in the main queue
-         * if capacity remains, otherwise leave the queue state unchanged. */
+        /* Capacity was reserved by submit() or explicit release reporting. */
+        s->release_events[s->release_count++] = *ev;
+        signal_event_fd_locked(s);
+        return;
     }
 
     /* A render-target publication is superseded state, not a history entry: only
@@ -114,19 +131,30 @@ static void queue_event_locked(anland_scene *s, const anland_scene_event_t *ev)
      * The compaction runs through a scratch buffer because the queue is a ring:
      * with a non-zero head, writing compacted entries back in place would overwrite
      * slots that have not been read yet. */
-    if (ev->type == ANLAND_SCENE_EVENT_RENDER_TARGET_READY && s->qcount > 0) {
+    if ((ev->type == ANLAND_SCENE_EVENT_RENDER_TARGET_READY ||
+         ev->type == ANLAND_SCENE_EVENT_OUTPUT_CHANGED) && s->qcount > 0) {
         anland_scene_event_t kept[ANLAND_SCENE_EVENT_QUEUE];
         size_t n = 0;
         for (size_t i = 0; i < s->qcount; i++) {
             const anland_scene_event_t *src =
                 &s->events[(s->qhead + i) % ANLAND_SCENE_EVENT_QUEUE];
-            if (src->type == ANLAND_SCENE_EVENT_RENDER_TARGET_READY)
+            if (src->type == ev->type)
                 continue;
             kept[n++] = *src;
         }
         s->qhead = 0;
         s->qcount = n;
         memcpy(s->events, kept, n * sizeof(s->events[0]));
+    }
+
+    /* State publications cannot consume the slot reserved for a live outcome. */
+    if (ev->type == ANLAND_SCENE_EVENT_OUTPUT_CHANGED ||
+        ev->type == ANLAND_SCENE_EVENT_RENDER_TARGET_READY) {
+        bool live = false;
+        for (size_t i = 0; i < ANLAND_SCENE_INFLIGHT_MAX; i++)
+            live |= s->inflight[i].used;
+        if (live && s->qcount >= ANLAND_SCENE_EVENT_QUEUE - 1)
+            return;
     }
 
     if (s->qcount == ANLAND_SCENE_EVENT_QUEUE) {
@@ -276,11 +304,12 @@ static void complete_commit_locked(anland_scene *s, struct inflight *fl,
     else
         queue_dropped_locked(s, commit_id, reason);
 
-    if (!presented) {
+    if (!presented && !fl->handed_off) {
         release_snapshot_buffers_locked(s, fl);
     }
 
     fl->used = false;
+    fl->handed_off = false;
     memset(&fl->snapshot, 0, sizeof(fl->snapshot));
 }
 
@@ -383,6 +412,8 @@ void anland_scene_destroy(anland_scene *s)
         }
     }
 
+    free(s->release_events);
+
     if (s->ops.destroy)
         s->ops.destroy(s->userdata);
 
@@ -444,6 +475,17 @@ int anland_scene_invalidate(anland_scene *s)
     pthread_mutex_lock(&s->lock);
     for (size_t i = 0; i < ANLAND_SCENE_INFLIGHT_MAX; i++) {
         if (s->inflight[i].used) {
+            /* A handed-off commit is normally retired by the backend when the
+             * consumer rotates the slot. A session teardown removes the
+             * consumer entirely: nothing can still be scanning out, so the
+             * buffers must be retired HERE. The legacy adapter leaves live
+             * commits to this path and retries only identities no longer owned
+             * by the scene. Releasing them before complete_commit_locked()
+             * keeps exactly one BUFFER_RELEASED per
+             * distinct buffer, because complete_commit_locked() skips its own
+             * release for handed-off commits. */
+            if (s->inflight[i].handed_off)
+                release_snapshot_buffers_locked(s, &s->inflight[i]);
             complete_commit_locked(s, &s->inflight[i], false, 0,
                                    ANLAND_SCENE_DROP_INVALIDATED);
         }
@@ -613,6 +655,17 @@ int anland_scene_commit_submit(anland_scene *s,
         }
     }
 
+    /* Each accepted or backend-rejected transaction owes one outcome. */
+    if (s->qcount >= ANLAND_SCENE_EVENT_QUEUE) {
+        pthread_mutex_unlock(&s->lock);
+        return -1;
+    }
+    /* Keep capacity for all accepted buffers, including invalidation/drop. */
+    if (reserve_releases_locked(s, ANLAND_SCENE_MAX_LAYERS) != 0) {
+        pthread_mutex_unlock(&s->lock);
+        return -1;
+    }
+
     /* ---- phase 2: build the snapshot (still no visible change) ---- */
     struct inflight *fl = alloc_inflight_locked(s);
     if (!fl) {
@@ -691,6 +744,17 @@ int anland_scene_commit_submit(anland_scene *s,
     return 0;
 }
 
+/* Serialized adapter calls mark handoff before cancellation can occur. */
+int anland_scene_backend_handed_off(anland_scene *s, uint64_t commit_id)
+{
+    if (!s) return -1;
+    pthread_mutex_lock(&s->lock);
+    struct inflight *fl = find_inflight_locked(s, commit_id);
+    if (fl) fl->handed_off = true;
+    pthread_mutex_unlock(&s->lock);
+    return fl ? 0 : -1;
+}
+
 int anland_scene_backend_presented(anland_scene *s, uint64_t commit_id,
                                    uint64_t presentation_ns)
 {
@@ -748,6 +812,13 @@ int anland_scene_backend_release_buffer(anland_scene *s, uint64_t buffer_id,
         return -1;
     }
 
+    /* Preserve space for the live commit's eventual drop as well. */
+    if (reserve_releases_locked(s, ANLAND_SCENE_MAX_LAYERS + 1) != 0) {
+        if (release_fence_fd >= 0)
+            close(release_fence_fd);
+        pthread_mutex_unlock(&s->lock);
+        return -1;
+    }
     queue_released_locked(s, buffer_id, release_fence_fd);
     pthread_mutex_unlock(&s->lock);
     return 0;

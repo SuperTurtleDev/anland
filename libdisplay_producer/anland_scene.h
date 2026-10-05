@@ -17,7 +17,7 @@
  *        │  anland_scene_*           ← this file: stable C ABI
  *   anland_scene                    state machine (atomic commit, in-flight
  *        │                          tracking, release/complete events)
- *   anland_scene_backend_ops        presentation backend (legacy / AWL / future DRM)
+ *   anland_scene_backend_ops        device presentation (legacy / future DRM)
  *
  * Three things are kept strictly separate, because conflating them is what made
  * the legacy path unable to report real presentation:
@@ -50,6 +50,8 @@ extern "C" {
 #define ANLAND_SCENE_MAX_DAMAGE 8
 #define ANLAND_SCENE_MAX_NAME 64
 #define ANLAND_SCENE_EVENT_QUEUE 64
+/* Hard bound for owned release notifications; callers must drain before retry. */
+#define ANLAND_SCENE_RELEASE_QUEUE_MAX 1024
 
 /* Layer ids are opaque, stable for the lifetime of the layer, and never reused
  * within a scene. 0 is reserved to mean "none". */
@@ -132,9 +134,9 @@ typedef enum anland_scene_event_type {
      * (anland_scene_backend_release_buffer) or when a commit was dropped, so
      * "may be reused" is a statement the backend actually made.
      *
-     * Exactly one release is published per presented non-zero buffer: a duplicate
-     * or a stale release from a previous session is refused, because a DE that
-     * saw two releases for one buffer could recycle it twice. */
+     * The backend reports once per distinct buffer used by a completed frame.
+     * Buffer ids alone do not encode session identity: the backend must discard
+     * stale session work before reporting releases. */
     ANLAND_SCENE_EVENT_BUFFER_RELEASED = 2,
     /* Commit will never be presented (superseded / invalidated / backend error). */
     ANLAND_SCENE_EVENT_COMMIT_DROPPED = 3,
@@ -241,7 +243,7 @@ anland_scene *anland_scene_create(const anland_scene_backend_ops_t *ops,
 void anland_scene_destroy(anland_scene *scene);
 
 /* Reconnect / teardown: any in-flight commit is dropped (the DE receives
- * COMMIT_DROPPED + BUFFER_RELEASED for its buffers) and the generation is bumped
+ * COMMIT_DROPPED; unhanded buffers are released immediately) and the generation is bumped
  * so a backend holding stale work discards it. Layers survive: their identity is
  * the DE's, not the transport's. */
 int anland_scene_invalidate(anland_scene *scene);
@@ -254,8 +256,8 @@ uint64_t anland_scene_generation(const anland_scene *scene);
  * for it would tell the peer about a frame that no longer exists.
  *
  * Serialization: this is a point-in-time query, not a reservation. It is only
- * conclusive while scene calls are serialized by the caller (the AWL adapter's
- * documented single-threaded contract). A concurrent invalidate() can still
+ * conclusive while scene calls are serialized by the presentation adapter.
+ * A concurrent invalidate() can still
  * race the check; supporting cross-thread cancellation needs a state
  * transition primitive, not a query. */
 bool anland_scene_commit_is_pending(anland_scene *scene, uint64_t commit_id);
@@ -267,8 +269,8 @@ int anland_scene_layer_create(anland_scene *scene,
                               const anland_layer_desc_t *desc,
                               anland_layer_id *out_id);
 
-/* Destroy a layer. Any in-flight commit referencing it is dropped first, so the
- * DE always learns its buffers were released. */
+/* Destroy a layer. Referencing commits are dropped. Already handed-off buffers
+ * remain owned by the backend until explicit retirement. */
 int anland_scene_layer_destroy(anland_scene *scene, anland_layer_id id);
 /* Update mutable layer metadata without changing layer identity. */
 int anland_scene_layer_update(anland_scene *scene,
@@ -294,9 +296,14 @@ int anland_scene_commit_submit(anland_scene *scene,
 
 /* ---- backend → scene reporting ---- */
 
+/* Mark successful transport handoff. A later cancellation reports the outcome
+ * but does not release buffers still owned by the display backend. Serialized
+ * with submit/present/cancellation by the adapter caller. */
+int anland_scene_backend_handed_off(anland_scene *scene, uint64_t commit_id);
+
 /* The consumer acknowledged the frame (legacy: buffer rotation; not proof of
  * physical scanout — see the event enum comment). Completes the in-flight commit
- * and releases its buffers (one BUFFER_RELEASED event per distinct buffer). */
+ * ONLY. The backend reports buffer release separately when reuse is safe. */
 int anland_scene_backend_presented(anland_scene *scene, uint64_t commit_id,
                                    uint64_t presentation_ns);
 
@@ -304,8 +311,9 @@ int anland_scene_backend_presented(anland_scene *scene, uint64_t commit_id,
 int anland_scene_backend_dropped(anland_scene *scene, uint64_t commit_id,
                                  anland_scene_drop_reason_t reason);
 
-/* Release a buffer the scene is not tracking anymore (e.g. imported but never
- * committed). Takes ownership of release_fence_fd. */
+/* Report buffer reuse separately from presentation, including imported buffers
+ * never committed. Rejects buffers still referenced by an in-flight commit.
+ * Takes ownership of release_fence_fd on all paths. */
 int anland_scene_backend_release_buffer(anland_scene *scene, uint64_t buffer_id,
                                         int release_fence_fd);
 

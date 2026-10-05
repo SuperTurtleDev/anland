@@ -13,26 +13,12 @@ extern "C" {
 
 typedef struct anland_de_backend anland_de_backend;
 
-typedef struct anland_de_backend_buffer {
-    anland_buffer_desc_t desc;
-    int fd;
-    void *native_image;
-} anland_de_backend_buffer_t;
-
-typedef struct anland_de_backend_ops {
-    int (*import_buffer)(void *userdata,
-                         const anland_buffer_desc_t *desc,
-                         int fd,
-                         anland_de_backend_buffer_t *out);
-    void (*release_buffer)(void *userdata,
-                           anland_de_backend_buffer_t *buffer);
-    void *userdata;
-} anland_de_backend_ops_t;
+/* WM-specific native image imports stay in the renderer. The shared device
+ * owns the consumer buffer set and exposes caller-owned duplicate fds. */
 
 typedef struct anland_de_backend_config {
     anland_present_config_t present;
     const char *name;
-    anland_de_backend_ops_t ops;
 } anland_de_backend_config_t;
 
 /* The buffer the DE should render into next, as published by the presentation
@@ -59,8 +45,7 @@ typedef struct anland_de_target {
 int anland_de_backend_get_target(const anland_de_backend *backend,
                                  anland_de_target_t *out);
 
-/* Complete current output description for a live session. Legacy returns the
- * device description; AWL does not advertise an output until it has one. */
+/* Complete current device output description for a live session. */
 int anland_de_backend_get_output(const anland_de_backend *backend,
                                  anland_device_output_t *out);
 
@@ -87,9 +72,8 @@ int anland_de_backend_remove_window(anland_de_backend *backend,
 int anland_de_backend_update_window(anland_de_backend *backend,
                                     uint64_t window_id,
                                     const anland_layer_desc_t *desc);
-/* Return the layer created by the AWL channel for an already announced window.
- * AWL owns WINDOW_CREATE/WINDOW_DESTROY layer lifetime; callers must not create
- * a second layer for the same window. */
+/* Look up the producer-local layer for a WM window. No wire window messages
+ * or Android per-window Surface are involved. */
 int anland_de_backend_lookup_window_layer(const anland_de_backend *backend,
                                           uint64_t window_id,
                                           uint64_t *out_layer_id);
@@ -100,8 +84,9 @@ int anland_de_backend_commit(anland_de_backend *backend,
                              uint64_t *out_commit_id);
 int anland_de_backend_present(anland_de_backend *backend);
 
-/* Dispatch scene events and retire imported native buffers only after the scene
- * reports PRESENTED, BUFFER_RELEASED, or COMMIT_DROPPED. */
+/* Dispatch scene events unchanged. WMs retain their native framebuffer set
+ * for the session; BUFFER_RELEASED permits reuse, not framebuffer destruction.
+ * Release-fence fds in returned events are owned by the caller. */
 int anland_de_backend_dispatch(anland_de_backend *backend,
                                anland_scene_event_t *events,
                                size_t capacity,

@@ -40,8 +40,8 @@ while read -r _path _revision _url _extra || [[ -n "$_path" ]]; do
   source+=("$_name::git+$_url#commit=$_revision")
   sha256sums+=('SKIP')
 done < "$startdir/dependencies.lock"
-[[ "$_root_revision" == fa0b4d3342078f01eadff0193e09c3b561f40c03 && ${#_dependency_names[@]} == 9 ]] || {
-  error 'Incomplete or incompatible Gamescope 3.16.28 dependency lock'; return 1;
+[[ "$_root_revision" == fa0b4d3342078f01eadff0193e09c3b561f40c03 && ${#_dependency_names[@]} == 8 ]] || {
+  error 'Incomplete or incompatible Gamescope 3.16.28 dependency lock'; return 1
 }
 unset _path _revision _url _extra _name _seen_paths
 

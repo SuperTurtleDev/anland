@@ -26,8 +26,8 @@
  *
  * What it DOES give the DE:
  *   - one stable contract (submit / presented / released) that every DE adapter
- *     speaks, so the presentation backend underneath can be swapped (AWL, a
- *     future virtual DRM device) without touching any DE adapter;
+ *     speaks, allowing a future virtual DRM device implementation without
+ *     changing the DE contract;
  *   - honest frame accounting: submit, flip and consumer acknowledgement are
  *     three distinct events, instead of one pageflip() call that claims success
  *     before the consumer has done anything;
@@ -77,12 +77,15 @@ anland_device *anland_scene_legacy_device(anland_scene_legacy *b);
 
 /* True once a consumer session is up. */
 bool anland_scene_legacy_connected(anland_scene_legacy *b);
+/* False while a consumed ACK still owes slot retirement. Session may stay up. */
+bool anland_scene_legacy_target_available(anland_scene_legacy *b);
 
 /* Attempt to leave fallback; returns 0 when connected. Safe to call repeatedly
  * (this is what a DE reconnect timer drives). On a successful transition any
  * in-flight commit is invalidated, OUTPUT_CHANGED is reported, and the first
  * RENDER_TARGET_READY is published so the DE can start its frame loop.
- * Returns -1 when the session cannot be used; the caller retries. */
+ * Old release/outcome notifications must drain before a new handshake.
+ * Returns -1 when the session cannot be used; the caller drains and retries. */
 int anland_scene_legacy_reconnect(anland_scene_legacy *b);
 
 /* Replace a dead/restarted daemon connection without replacing the scene or its
@@ -115,7 +118,8 @@ int anland_scene_legacy_present(anland_scene_legacy *b);
  * and the call returns 0; the DE re-establishes the session with
  * anland_scene_legacy_reconnect() so it can re-import the new dmabuf set and
  * rebuild its event sources before rendering resumes. Returns -1 when the
- * current session proved unusable (the caller must reconnect).
+ * current session proved unusable, or release publication needs retry. Drain
+ * events and call pump() again; consumed ACKs are retried without a new signal.
  *
  * The DE then drains the scene with anland_scene_dispatch(). */
 int anland_scene_legacy_pump(anland_scene_legacy *b, int timeout_ms);

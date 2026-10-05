@@ -3,7 +3,7 @@
 # Usage: ./build.sh [3.16.28] [--nocheck|--noconfirm|--log|--nosign]
 # INSTALL=1 explicitly installs; default INSTALL=0, never restarts services.
 # BUILD_XWAYLAND=0 builds Gamescope only. JOBS=2 controls parallelism.
-# Release ZIP is downloaded with curl; makepkg fetches pinned Git dependencies.
+# Release ZIP via curl; pinned Git dependencies are fetched shallow (one commit).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION=3.16.28
@@ -44,7 +44,54 @@ exec 9>"$WORKDIR/.build.lock"
 flock -n 9 || { echo 'Another Gamescope build is active' >&2; exit 1; }
 RUN="$(mktemp -d "$WORKDIR/build-3.16.28.XXXXXX")"
 STAGE="$RUN/stage"
-mkdir -p "$STAGE" "$RUN/srcdest"
+# Pinned Git dependencies live in a persistent shallow cache: one commit each,
+# no history. The previous full mirror clone pulled ~600 MB (openvr alone was
+# 533 MB of pure history) and repeated that download on every run.
+DEPCACHE="${DEPCACHE:-$WORKDIR/depcache}"
+mkdir -p "$STAGE" "$DEPCACHE"
+DEPCACHE="$(cd "$DEPCACHE" && pwd)"
+prefetch_dependencies() {
+    local -a rows=()
+    local line row path revision url name dir attempt ok cache_state index=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        rows+=("$line")
+    done < "$HERE/dependencies.lock"
+    for row in "${rows[@]}"; do
+        read -r path revision url _ <<< "$row"
+        [[ "$path" == . ]] && continue
+        name="anland-dep-$index"
+        index=$((index + 1))
+        dir="$DEPCACHE/$name"
+        if git -C "$dir" cat-file -e "$revision^{commit}" 2>/dev/null; then
+            cache_state=cached
+        else
+            rm -rf -- "$dir"
+            git init -q --bare "$dir" || return 1
+            git -C "$dir" remote add origin "$url" || return 1
+            ok=0
+            for attempt in 1 2 3 4 5; do
+                if git -C "$dir" fetch -q --depth 1 origin "$revision" </dev/null &&
+                    git -C "$dir" cat-file -e "$revision^{commit}" 2>/dev/null; then
+                    ok=1
+                    break
+                fi
+                printf '  -> retry %s for %s\n' "$attempt" "$name" >&2
+                sleep 5
+            done
+            [[ "$ok" == 1 ]] || { echo "Failed to fetch $name from $url" >&2; return 1; }
+            cache_state=fetched
+        fi
+        # A branch ref and HEAD keep makepkg's shared clone from seeing an empty repo.
+        # Repair them on cache hits too, including an interrupted initial fetch.
+        git -C "$dir" update-ref refs/heads/anland-pinned "$revision" || return 1
+        git -C "$dir" symbolic-ref HEAD refs/heads/anland-pinned || return 1
+        printf '  -> %s %s (%s)\n' "$name" "$cache_state" "$path"
+    done
+}
+printf 'Resolving pinned dependencies into %s\n' "$DEPCACHE"
+prefetch_dependencies || exit 1
+printf 'Dependency cache size: %s\n' "$(du -sh "$DEPCACHE" | cut -f1)"
 for name in PKGBUILD gamescope.patch dependencies.lock startup.sh; do
     cp "$HERE/$name" "$STAGE/"
 done
@@ -67,6 +114,10 @@ trap 'exit 143' TERM
 # Fetch the release atomically before dependency installation or compilation.
 fetch_source() (
     local destination="$1" url="$2" temporary
+    if [[ -s "$destination" ]] && bsdtar -tf "$destination" >/dev/null 2>&1; then
+        printf 'Reusing cached %s\n' "${destination##*/}"
+        return 0
+    fi
     temporary="$(mktemp "${destination}.part.XXXXXX")"
     trap 'rm -f -- "$temporary"' EXIT
     curl --fail --location --retry 3 --connect-timeout 20 --max-time 600 \
@@ -74,10 +125,10 @@ fetch_source() (
     bsdtar -tf "$temporary" >/dev/null
     mv -- "$temporary" "$destination"
 )
-fetch_source "$RUN/srcdest/gamescope-$VERSION.zip" \
+fetch_source "$DEPCACHE/gamescope-$VERSION.zip" \
     "https://github.com/ValveSoftware/gamescope/archive/refs/tags/$VERSION.zip"
 # Pin all non-VCS inputs in this run's staged recipe, not in the main repository.
-python3 - "$STAGE" "$RUN/srcdest/gamescope-$VERSION.zip" <<'PY'
+python3 - "$STAGE" "$DEPCACHE/gamescope-$VERSION.zip" <<'PY'
 from pathlib import Path
 import hashlib, sys
 stage, archive = map(Path, sys.argv[1:])
@@ -101,8 +152,10 @@ collect_packages() {
 # Build Gamescope first, so an unavailable release download fails before Xwayland work.
 (
     cd "$STAGE"
-    export SRCDEST="$RUN/srcdest" PKGDEST="$PACKAGES"
-    makepkg --force --cleanbuild --syncdeps --needed "$@"
+    # SRCDEST is the persistent shallow cache; --holdver stops makepkg from
+    # "updating" those single-commit repos back into full-history fetches.
+    export SRCDEST="$DEPCACHE" PKGDEST="$PACKAGES"
+    makepkg --force --cleanbuild --syncdeps --needed --holdver "$@"
 )
 collect_packages "$STAGE" "$RUN/.gamescope-packagelist"
 if [[ "$BUILD_XWAYLAND" == 1 ]]; then

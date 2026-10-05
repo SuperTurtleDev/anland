@@ -3,6 +3,7 @@
 #ifndef ANLAND_GAMESCOPE_SESSION_H
 #define ANLAND_GAMESCOPE_SESSION_H
 #include "anland_de_backend.h"
+#include "anland_buffer_registry.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,7 +14,7 @@ typedef struct anland_gamescope_target {
     anland_buffer_desc_t buffer; /* fd is caller-owned; initialize/close it */
 } anland_gamescope_target;
 
-/* First implementation is explicitly legacy-only, never silently downgrades AWL. */
+/* Uses the shared presentation lifecycle over the existing fullscreen transport. */
 anland_gamescope_session *anland_gamescope_session_open(const char *endpoint);
 void anland_gamescope_session_close(anland_gamescope_session *session);
 int anland_gamescope_session_pump(anland_gamescope_session *session, int timeout_ms);

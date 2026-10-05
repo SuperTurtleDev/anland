@@ -31,14 +31,13 @@ mutter_sources += [
   # Mutter-specific.
   'backends/anland/libdisplay_producer/anland_device.c',
   'backends/anland/libdisplay_producer/display_producer.c',
-  'backends/anland/libdisplay_producer/socket_utils.c',
+  'backends/anland/common/socket_utils.c',
   'backends/anland/libdisplay_producer/anland_scene.c',
   'backends/anland/libdisplay_producer/anland_scene_legacy.c',
   'backends/anland/libdisplay_producer/anland_present.c',
-  'backends/anland/libdisplay_producer/anland_present_legacy.c',
-  'backends/anland/libdisplay_producer/anland_present_awl.c',
+  # One scene/device presentation path; no extra presentation service.
   'backends/anland/libdisplay_producer/anland_buffer_registry.c',
   'backends/anland/libdisplay_producer/anland_window_map.c',
   'backends/anland/libdisplay_producer/anland_de_backend.c',
-  'backends/anland/common/anland_present_ipc.c',
+  # Wire framing stays in common/protocol.h and the producer transport.
 ]

@@ -141,20 +141,14 @@ AnlandBackend::~AnlandBackend()
 
 bool AnlandBackend::initialize()
 {
-    const QByteArray presentMode = qgetenv("ANLAND_PRESENT_BACKEND");
-    if (!presentMode.isEmpty() && presentMode != QByteArrayLiteral("legacy")) {
-        qCWarning(KWIN_ANLAND)
-            << "AWL presentation was requested, but KWin window-level EGL import is not wired yet";
-        return false;
-    }
     anland_de_backend_config_t backendConfig{};
-    backendConfig.present.backend = ANLAND_PRESENT_BACKEND_LEGACY;
+    // Presentation uses the shared scene/device lifecycle and existing transport.
     /* The endpoint must outlive the create() call: toLocal8Bit() returns a
      * temporary QByteArray, so binding .constData() directly would leave a
      * dangling pointer here. Keep the storage in this scope. */
     const QByteArray presentEndpoint = m_socketPath.toLocal8Bit();
     backendConfig.present.endpoint = presentEndpoint.constData();
-    backendConfig.present.runtime_dir = nullptr;
+    // No separate runtime presentation endpoint.
     backendConfig.name = "kwin";
     m_presentBackend = anland_de_backend_create(&backendConfig);
     if (!m_presentBackend) {
@@ -764,8 +758,12 @@ void AnlandBackend::onReconnectTimer()
         return;
     }
 
+    // Old-session retirement can exceed one dispatch batch or need a retry.
+    // Keep delivering those events while rendering is inhibited; reconnect
+    // deliberately refuses to reuse buffer identities before they are drained.
+    dispatchSceneEvents();
     if (anland_de_backend_reconnect(m_presentBackend) != 0) {
-        return; // still down, keep retrying
+        return; // still down; the next tick drains any remaining retirement debt
     }
 
     // try_exit_fallback() received a fresh dmabuf set. Do not leave fallback
