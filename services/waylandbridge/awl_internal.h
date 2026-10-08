@@ -76,6 +76,7 @@ struct awl_buffer {
                                       * identity without a per-frame fstat
                                       * (0 = fstat failed here, consumers
                                       * fall back to their own) */
+    uint64_t modifier;               /* DRM format modifier from linux-dmabuf */
     uint32_t width, height, stride;  /* stride: bytes */
     uint32_t drm_format;
 };

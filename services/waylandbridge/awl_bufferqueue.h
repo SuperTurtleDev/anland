@@ -68,6 +68,7 @@ struct awl_bq_buffer {
     int release_fd;        /* merged consumer fences (awl_bufferqueue_put);
                             * valid inside the release callback only */
     uint64_t ino;          /* dma-buf inode: render-side identity (0 = unknown) */
+    uint64_t modifier;     /* DRM format modifier; CPU readers must require LINEAR */
     uint32_t width, height, stride;   /* stride in bytes */
     uint32_t format;       /* DRM fourcc */
     uint64_t seq;          /* process-wide frame sequence, stamped by push:

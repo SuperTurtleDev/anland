@@ -63,6 +63,7 @@ static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
                                         * carries it, the render side compares
                                         * inodes with no per-frame fstat */
     b->ino = fstat(fd, &st) == 0 ? (uint64_t)st.st_ino : 0;
+    b->modifier = modifier;
     b->width = w;
     b->height = h;
     b->stride = stride;

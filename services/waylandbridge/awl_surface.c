@@ -200,6 +200,7 @@ void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
     e.acquire_fd = acquire_fd >= 0 ? acquire_fd : awl_dmabuf_export_sync_file(b->dmabuf_fd);
     e.release_fd = -1;
     e.ino = b->ino;
+    e.modifier = b->modifier;
     e.width = b->width;
     e.height = b->height;
     e.stride = b->stride;
