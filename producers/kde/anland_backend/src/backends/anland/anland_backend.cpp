@@ -29,9 +29,11 @@
 #include "window.h"
 #include "workspace.h"
 
+#include <QElapsedTimer>
 #include <QMimeData>
 #include <QScopeGuard>
 #include <QSocketNotifier>
+#include <QThread>
 #include <QThreadPool>
 #include <QTimer>
 
@@ -150,12 +152,28 @@ bool AnlandBackend::initialize()
     backendConfig.present.endpoint = presentEndpoint.constData();
     // No separate runtime presentation endpoint.
     backendConfig.name = "kwin";
-    m_presentBackend = anland_de_backend_create(&backendConfig);
-    if (!m_presentBackend) {
-        qCWarning(KWIN_ANLAND) << "failed to connect to display daemon"
-                               << (m_socketPath.isEmpty() ? QStringLiteral("(no socket found)")
-                                                          : m_socketPath);
-        return false;
+    QElapsedTimer retryLogTimer;
+    bool waitingForDaemon = false;
+    while (!m_presentBackend) {
+        m_presentBackend = anland_de_backend_create(&backendConfig);
+        if (m_presentBackend) {
+            break;
+        }
+
+        if (!waitingForDaemon) {
+            qCWarning(KWIN_ANLAND) << "display daemon is not available at"
+                                   << (m_socketPath.isEmpty() ? QStringLiteral("(auto discovery)")
+                                                              : m_socketPath)
+                                   << "; waiting for it to start";
+            waitingForDaemon = true;
+            retryLogTimer.start();
+        } else if (retryLogTimer.elapsed() >= 5000) {
+            qCWarning(KWIN_ANLAND) << "still waiting for display daemon at"
+                                   << (m_socketPath.isEmpty() ? QStringLiteral("(auto discovery)")
+                                                              : m_socketPath);
+            retryLogTimer.restart();
+        }
+        QThread::msleep(s_reconnectIntervalMs);
     }
     m_scene = anland_de_backend_scene(m_presentBackend);
     m_device = anland_de_backend_device(m_presentBackend);
