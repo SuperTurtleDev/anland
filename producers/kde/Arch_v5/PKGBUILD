@@ -19,7 +19,7 @@ depends=(
   libinput libpipewire libqaccessibilityclient-qt6 libstdc++ libxcb libxcvt
   libxkbcommon mesa milou pipewire-session-manager libplasma qt6-5compat
   qt6-base qt6-declarative qt6-svg qt6-tools systemd-libs vulkan-icd-loader
-  wayland xcb-util-keysyms xcb-util-wm
+  wayland 'wireplumber>=0.5.18' xcb-util-keysyms xcb-util-wm
 )
 makedepends=(
   cmake extra-cmake-modules kdoctools krunner ninja plasma-wayland-protocols
