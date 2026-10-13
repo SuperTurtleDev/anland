@@ -2,14 +2,14 @@
 # Official niri v26.04 plus the single repository Anland backend.
 pkgname=niri-anland
 pkgver=26.4.0
-pkgrel=5
+pkgrel=6
 pkgdesc='Scrollable-tiling Wayland compositor with the common Anland producer backend'
 arch=('aarch64')
 url='https://github.com/niri-wm/niri'
 license=('GPL-3.0-or-later')
 _upstream_version=26.04
 _smithay_rev=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef
-depends=(glibc gcc-libs mesa libdrm libinput seatd libdisplay-info libxkbcommon pixman wayland pango cairo pipewire libpipewire systemd-libs xwayland-satellite xorg-xwayland)
+depends=(glibc gcc-libs mesa libdrm libinput seatd libdisplay-info libxkbcommon pixman wayland pango cairo pipewire libpipewire systemd-libs 'wireplumber>=0.5.18' xwayland-satellite xorg-xwayland)
 makedepends=(cargo rust cmake make gcc clang pkgconf patch tar unzip)
 source=(
   "niri-${_upstream_version}.zip::https://github.com/niri-wm/niri/archive/refs/tags/v${_upstream_version}.zip"
@@ -83,4 +83,8 @@ package() {
   install -Dm755 "$srcdir/bridge-build/common/libdisplay_producer/libdisplay_producer.so" "$pkgdir/usr/lib/libdisplay_producer.so"
   install -Dm644 "$tree/resources/default-config.kdl" "$pkgdir/usr/share/doc/$pkgname/default-config.kdl"
   install -Dm644 "$tree/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # Give each producer its own package-owned filename: KDE/GNOME/Niri may
+  # coexist, and repeated device.disabled rules are harmless.
+  install -Dm644 "$srcdir/anland-overlay/libdisplay_producer/wireplumber/50-anland-android-camera.conf" \
+    "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/50-anland-niri-android-camera.conf"
 }
