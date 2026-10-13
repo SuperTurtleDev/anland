@@ -444,6 +444,46 @@ printf '%s\n' "$ANLAND_SOCKET"
 2. Droidspaces：检查当前版本要求的 `noseccomp` 设置。
 3. 如果怀疑 SELinux 拦截，先检查 AVC 日志并修复对应权限；不要长期保持 permissive 模式。
 
+### 桌面正常，但应用没有声音
+
+legacy 分支的 Anland producer 会创建 `anland-speaker` PipeWire 输出设备。WirePlumber 将应用播放流连接到该设备，再由 Android 应用播放收到的音频。请用启动桌面的 Linux 用户检查：
+
+```sh
+systemctl --user status pipewire.service wireplumber.service
+wpctl status
+```
+
+确认两个服务均在运行、`anland-speaker` 已出现，且播放应用正在使用它。也请检查 Android 媒体音量和 Anland 的音频播放设置。若已有 `PULSE_SERVER` 指向其他音频服务器，应用可能会绕过 Anland 播放。
+
+部分高通 Android 内核的 `/dev/video*` 包含名为 `cam_req_mgr` 或 `cam_sync` 的摄像头控制设备，以及 VIDC 编解码器设备，它们不是 Linux 摄像头。将宿主设备映射进 chroot 或 Droidspaces 容器后，WirePlumber 的 V4L2 监视器可能在探测这些设备时卡住，使音频策略无法继续连接应用播放流。此时即使能看到 `anland-speaker`，应用仍可能没有声音。
+
+Anland 共享的 [Android V4L2 过滤配置](../../libdisplay_producer/wireplumber/50-anland-android-camera.conf) 在摄像头初始化前，根据 `device.sysfs.path` 匹配这些控制和编解码器设备。它不依赖重启后可能变化的 `/dev/videoN` 编号。使用同一套 PipeWire/WirePlumber 服务的 KDE、GNOME、Niri 等 producer 均适用。USB 摄像头和 Anland 直接在 PipeWire 中创建的远程摄像头来源仍可使用。
+
+此配置使用 WirePlumber 0.5 语法。**未修补的 WirePlumber 0.5.16 和 0.5.17 必须升级，或使用发行版回移了[提交 65519a1](https://github.com/PipeWire/wireplumber/commit/65519a1ff7cecebc0622fc4a2badec830ee67d7d)的版本**：这些版本的异步 V4L2 设备 hook 在 `device.disabled` 跳过设备时没有继续推进，因此仅安装过滤配置仍可能卡住音频策略。建议使用 0.5.18 或更高版本。0.5.8、0.5.12、0.5.15 等较早的 0.5 版本使用同步 hook，没有这一特定回归，不需要仅为此问题升级。
+
+本修复仅改变 Anland 仓库中的配置、producer 打包流程和文档；使用发行版官方 PipeWire 和 WirePlumber，不需要编译或替换它们的库。手动安装过滤配置无需编译；重新发布 producer 软件包时按原有脚本打包。Anland 已有的 PipeWire 自动重连逻辑保持不变。
+
+包含此修复的 producer 软件包会安装过滤配置，并通过依赖约束 WirePlumber 版本。Arch 和 SteamOS 软件包要求 0.5.18 或更高版本；Debian、Ubuntu 和 Fedora 软件包允许较早的 0.5 版本，同时排除 0.5.16 和 0.5.17。若发行版回移修复后仍保留被排除的版本号，维护者需要在确认修复后调整软件包依赖。
+
+为现有安装手动应用过滤配置时，请先确认上述 WirePlumber 版本要求，再在 Linux 环境内，从 Anland 仓库根目录运行：
+
+```sh
+sudo install -Dm644 \
+  libdisplay_producer/wireplumber/50-anland-android-camera.conf \
+  /usr/share/wireplumber/wireplumber.conf.d/50-anland-android-camera.conf
+```
+
+如果以前添加过设置 `hardware.video-capture = disabled` 的配置片段，请从自己创建的文件中移除这项设置，或将该配置片段移出配置目录。检查 `/etc/wireplumber/wireplumber.conf.d/` 和 `~/.config/wireplumber/wireplumber.conf.d/` 两处，保留其他无关设置和文件。关闭整个功能也会停止发现真正的 V4L2 摄像头，设备过滤配置用于替代这种全面禁用的临时方案。
+
+然后以桌面用户身份重启 WirePlumber，不要加 `sudo`；必要时重新打开播放应用：
+
+```sh
+systemctl --user restart wireplumber.service
+wpctl status
+```
+
+确认应用已连接到 `anland-speaker`，且 Android 实际播放了音频。过滤配置可避免这种控制设备探测故障；Android 音频路由、音量和 consumer 断连仍可能造成其他故障。能看到摄像头来源不等于已验证视频捕获：若需要使用摄像头，请先授予 Anland Android 摄像头权限，再用应用测试实际捕获。接入 USB 摄像头时，也请单独测试其视频捕获。
+
 ### 前台调度没有生效
 
 逐项确认：

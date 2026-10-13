@@ -450,6 +450,46 @@ Check these items in order:
 2. With Droidspaces, check the `noseccomp` setting required by your version.
 3. If SELinux may be blocking access, inspect AVC logs and fix the specific permission. Do not leave SELinux in permissive mode.
 
+### The desktop works but applications have no sound
+
+The legacy Anland producer creates an `anland-speaker` PipeWire sink. WirePlumber connects application playback streams to that sink, and the Android app plays the received audio. Run these checks as the Linux user who started the desktop:
+
+```sh
+systemctl --user status pipewire.service wireplumber.service
+wpctl status
+```
+
+Confirm that both services are running, `anland-speaker` is present, and the playback application is using it. Also check the Android media volume and Anland's playback setting. An existing `PULSE_SERVER` pointing to a different audio server can route applications away from Anland.
+
+On some Qualcomm Android kernels, `/dev/video*` includes camera control devices named `cam_req_mgr` or `cam_sync`, and VIDC codec devices. These are not Linux webcams. When the host devices are exposed inside a chroot or Droidspaces container, WirePlumber's V4L2 monitor can stall while probing them. Its audio policy then stops connecting application streams, even though `anland-speaker` is visible.
+
+Anland's shared [Android V4L2 filter](../../libdisplay_producer/wireplumber/50-anland-android-camera.conf) matches the control and codec devices by `device.sysfs.path` before camera initialization. It does not depend on their `/dev/videoN` numbers, which can change after a reboot. The filter applies to KDE, GNOME, Niri, and other producers using the same PipeWire/WirePlumber services. It leaves USB webcams and the remote camera sources created by Anland directly in PipeWire available.
+
+The configuration uses WirePlumber 0.5 syntax. **Unpatched WirePlumber 0.5.16 and 0.5.17 require an upgrade or a distribution backport of [commit 65519a1](https://github.com/PipeWire/wireplumber/commit/65519a1ff7cecebc0622fc4a2badec830ee67d7d)**: their asynchronous V4L2 device hook does not advance when `device.disabled` skips a device, so installing the filter alone can still block audio policy. Prefer 0.5.18 or later. Older 0.5 releases such as 0.5.8, 0.5.12, and 0.5.15 use a synchronous hook and do not have this particular regression; they do not need an upgrade solely for this issue.
+
+This fix changes only configuration, producer packaging, and documentation in the Anland repository. It uses official distribution PipeWire and WirePlumber libraries; neither library needs to be compiled or replaced. Installing the filter manually requires no compilation. New producer releases use the existing packaging scripts. Anland's existing PipeWire reconnection code is unchanged.
+
+Producer packages built with this fix include the filter and enforce a WirePlumber version dependency. Arch and SteamOS packages require 0.5.18 or later. Debian, Ubuntu, and Fedora packages permit the earlier 0.5 releases while excluding 0.5.16 and 0.5.17. A distribution backport that retains an excluded version number still needs its package dependency adjusted by the maintainer after confirming the fix.
+
+To apply the filter manually to an existing installation, first confirm the WirePlumber version requirements above, then run the following from the Anland repository root inside the Linux environment:
+
+```sh
+sudo install -Dm644 \
+  libdisplay_producer/wireplumber/50-anland-android-camera.conf \
+  /usr/share/wireplumber/wireplumber.conf.d/50-anland-android-camera.conf
+```
+
+If you previously added a drop-in that sets `hardware.video-capture = disabled`, remove that setting from the file you created, or move that specific drop-in outside the configuration directory. Check both `/etc/wireplumber/wireplumber.conf.d/` and `~/.config/wireplumber/wireplumber.conf.d/`. Keep unrelated settings and files. Disabling the whole feature also prevents real V4L2 webcams from being discovered; the device filter replaces that broad workaround.
+
+Then restart WirePlumber as the desktop user, without `sudo`, and reopen the playback application if necessary:
+
+```sh
+systemctl --user restart wireplumber.service
+wpctl status
+```
+
+Confirm that the application connects to `anland-speaker` and that Android plays its audio. The filter prevents this control-device discovery failure; Android audio routing, volume, and consumer disconnections can still cause separate faults. Camera sources remaining visible does not verify video capture: grant Anland Android camera permission and test capture with an application if you use that feature. Test USB webcam capture separately when a webcam is attached.
+
 ### Foreground scheduling has no effect
 
 Check each requirement:
