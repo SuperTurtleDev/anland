@@ -1,5 +1,9 @@
 # One backend and one public producer foundation, shared by all version overlays.
 # common/ and libdisplay_producer/ are links to the repository's canonical sources.
+install_data('libdisplay_producer/wireplumber/50-anland-android-camera.conf',
+  install_dir: get_option('datadir') / 'wireplumber/wireplumber.conf.d',
+  rename: '50-anland-gamescope-android-camera.conf')
+
 anland_inc = include_directories('.', 'common', 'libdisplay_producer')
 anland_public = static_library('gamescope-anland-public',
   'common/socket_utils.c',
