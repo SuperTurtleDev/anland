@@ -21,7 +21,7 @@ depends=(
   libqaccessibilityclient-qt6 libx11 libxcb libxcvt libxi libxkbcommon
   libxkbcommon-x11 mesa pipewire-session-manager libplasma qt6-5compat
   qt6-base qt6-declarative qt6-multimedia qt6-sensors qt6-svg qt6-tools
-  qt6-wayland systemd-libs wayland xcb-util-cursor xcb-util-keysyms xcb-util-wm
+  qt6-wayland systemd-libs wayland 'wireplumber>=0.5.18' xcb-util-cursor xcb-util-keysyms xcb-util-wm
 )
 makedepends=(cmake extra-cmake-modules kdoctools ninja pkgconf wayland-protocols
              plasma-wayland-protocols vulkan-headers)
