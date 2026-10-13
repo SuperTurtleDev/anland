@@ -151,6 +151,19 @@ build_pkg() {
         die "patch did not apply cleanly for $src"
     fi
 
+    if [ "$src" = mutter ]; then
+        # Mutter's shared package is also installed by GNOME Shell consumers.
+        local manifest="$tree/debian/mutter-common.install"
+        local camera_rule='usr/share/wireplumber/wireplumber.conf.d/50-anland-mutter-android-camera.conf'
+        [ -f "$manifest" ] || die "missing Mutter common package manifest"
+        grep -Fxq "$camera_rule" "$manifest" || printf '\n%s\n' "$camera_rule" >> "$manifest" \
+            || die "failed to package the Anland WirePlumber rule"
+        command -v python3 >/dev/null 2>&1 || die "Python 3 is required to prepare package dependencies"
+        python3 "$SCRIPT_DIR/../../../libdisplay_producer/wireplumber/package-dependency.py" \
+            debian "$tree/debian/control" mutter-common \
+            || die "failed to protect the Mutter package from affected WirePlumber versions"
+    fi
+
     log "Building '$src' $source_label (.deb)"
     # -d: don't re-check build-deps (already installed above)
     # -b -uc -us: binary only, unsigned. changelog untouched -> official version.
