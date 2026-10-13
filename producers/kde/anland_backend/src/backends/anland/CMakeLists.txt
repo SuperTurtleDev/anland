@@ -43,3 +43,10 @@ target_include_directories(kwin PRIVATE
 )
 # PkgConfig::PipeWire is already resolved at the top level for the screencast plugin.
 target_link_libraries(kwin PRIVATE Libdrm::Libdrm PkgConfig::PipeWire)
+
+# Ship the shared Android camera-control filter with the producer package.
+# Each producer uses a distinct filename so compositor packages can coexist.
+install(FILES libdisplay_producer/wireplumber/50-anland-android-camera.conf
+    DESTINATION ${KDE_INSTALL_DATADIR}/wireplumber/wireplumber.conf.d
+    RENAME 50-anland-kwin-android-camera.conf
+)
