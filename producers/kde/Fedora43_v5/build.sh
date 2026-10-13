@@ -120,6 +120,10 @@ build_pkg_rpm() {
     # Only accept the layout reviewed for Fedora 43. Fail on a changed SRPM.
     if [ "$src" = kwin ]; then
         [ "$(grep -c '^%autosetup -p1$' "$spec")" = 1 ] || die "unsupported KWin %prep layout"
+        command -v python3 >/dev/null 2>&1 || die "Python 3 is required to prepare package dependencies"
+        python3 "$SCRIPT_DIR/../../../libdisplay_producer/wireplumber/package-dependency.py" \
+            rpm "$spec" common \
+            || die "failed to protect the KWin package from affected WirePlumber versions"
     else
         grep -q '^%autosetup -S git_am -n ' "$spec" || die "unsupported Xwayland %prep layout"
     fi
@@ -139,6 +143,12 @@ build_pkg_rpm() {
         # %autosetup already changed into the source root. RPM 6 adds another
         # build-subdirectory level; do not reconstruct it from %{_builddir}.
         sed -i '/^%autosetup -p1$/a mkdir -p src/backends/anland \&\& tar xf %{_sourcedir}/anland-overlay.tar -C src/backends/anland' "$spec" || die "overlay insertion failed"
+
+        # Claim the CMake-installed rule in the runtime common RPM.
+        [ "$(grep -Ec '^%files common([[:space:]]|$)' "$spec")" = 1 ] \
+            || die "unsupported KWin common %files layout"
+        sed -i -E '/^%files common([[:space:]]|$)/a %{_datadir}/wireplumber/wireplumber.conf.d/50-anland-kwin-android-camera.conf' "$spec" \
+            || die "WirePlumber rule file-list insertion failed"
     fi
 
     local first_source_line patch_num
