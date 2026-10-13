@@ -13,6 +13,10 @@
 #
 # 'libdisplay_producer' and 'common' are symlinks to the repository top level.
 
+install_data('libdisplay_producer/wireplumber/50-anland-android-camera.conf',
+  install_dir: get_option('datadir') / 'wireplumber/wireplumber.conf.d',
+  rename: '50-anland-mutter-android-camera.conf')
+
 mutter_sources += [
   # Backend + DE-side bridges.
   'backends/anland/meta-backend-anland.c',
