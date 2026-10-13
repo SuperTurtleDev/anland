@@ -6,7 +6,7 @@ pkgdesc='Native Gamescope with Anland backend and Steam Big Picture launcher'
 arch=('aarch64')
 url='https://github.com/ValveSoftware/gamescope'
 license=('MIT')
-depends=('xorg-xwayland' 'libavif' 'aom' 'rav1e' 'libxres' 'xcb-util-errors' 'freerdp' 'xcb-util-wm' 'libxcomposite' 'pixman' 'libinput' 'seatd' 'pipewire' 'libxmu' 'libxcursor' 'libdecor' 'libei' 'luajit' 'libdrm' 'steam' 'bash' 'util-linux')
+depends=('xorg-xwayland' 'libavif' 'aom' 'rav1e' 'libxres' 'xcb-util-errors' 'freerdp' 'xcb-util-wm' 'libxcomposite' 'pixman' 'libinput' 'seatd' 'pipewire' 'wireplumber>=0.5.18' 'libxmu' 'libxcursor' 'libdecor' 'libei' 'luajit' 'libdrm' 'steam' 'bash' 'util-linux')
 makedepends=('meson' 'ninja' 'git' 'python' 'pkgconf' 'gcc' 'glslang' 'vulkan-headers' 'wayland-protocols' 'cmake' 'patch')
 conflicts=('gamescope-anland')
 replaces=('gamescope-anland')
@@ -109,6 +109,9 @@ package() {
   mkdir -p "$pkgdir/usr/share/gamescope"
   cp -a "$tree/scripts" "$tree/looks" /usr/share/gamescope/reshade "$pkgdir/usr/share/gamescope/"
   install -Dm644 "$tree/LICENSE" "$pkgdir/usr/share/gamescope/LICENSE"
+  # This package copies the selected Meson outputs instead of meson install.
+  install -Dm644 "$tree/src/Backends/anland/libdisplay_producer/wireplumber/50-anland-android-camera.conf" \
+    "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/50-anland-gamescope-android-camera.conf"
   install -Dm755 "$srcdir/startup.sh" "$pkgdir/usr/lib/gamescope/anland-startup.sh"
   install -Dm644 "$srcdir/build/layer/libVkLayer_FROG_gamescope_wsi_aarch64.so" \
     "$pkgdir/usr/lib/libVkLayer_FROG_gamescope_wsi_aarch64.so"
