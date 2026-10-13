@@ -72,6 +72,7 @@ depends=(
   startup-notification
   systemd-libs
   wayland
+  'wireplumber>=0.5.18'
   xorg-xwayland
 )
 makedepends=(
