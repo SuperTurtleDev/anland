@@ -101,6 +101,19 @@ build_pkg() {
     ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
         || die "patch did not apply cleanly for $src"
 
+    if [ "$src" = kwin ]; then
+        # dh_install only packages paths claimed by a binary package manifest.
+        local manifest="$tree/debian/kwin-common.install"
+        local camera_rule='usr/share/wireplumber/wireplumber.conf.d/50-anland-kwin-android-camera.conf'
+        [ -f "$manifest" ] || die "missing KWin common package manifest"
+        grep -Fxq "$camera_rule" "$manifest" || printf '\n%s\n' "$camera_rule" >> "$manifest" \
+            || die "failed to package the Anland WirePlumber rule"
+        command -v python3 >/dev/null 2>&1 || die "Python 3 is required to prepare package dependencies"
+        python3 "$SCRIPT_DIR/../../../libdisplay_producer/wireplumber/package-dependency.py" \
+            debian "$tree/debian/control" kwin-common \
+            || die "failed to protect the KWin package from affected WirePlumber versions"
+    fi
+
     log "Building '$src' (.deb, keeping official version)"
     # -d: don't re-check build-deps (already installed above)
     # -b -uc -us: binary only, unsigned. changelog untouched -> official version.
