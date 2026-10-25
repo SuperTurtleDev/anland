@@ -1195,6 +1195,42 @@ public class SettingsActivity extends Activity {
         touchpadHint.setPadding(0, dp(4), 0, dp(12));
         root.addView(touchpadHint);
 
+        Switch tapSwitch = new Switch(this);
+        tapSwitch.setText(R.string.pad_tap);
+        tapSwitch.setChecked(prefs.getBoolean("pad_tap", true));
+        tapSwitch.setOnCheckedChangeListener((v, checked) ->
+                prefs.edit().putBoolean("pad_tap", checked).apply());
+        root.addView(tapSwitch);
+
+        TextView padHint = new TextView(this);
+        padHint.setText(R.string.pad_tip);
+        padHint.setTextSize(12);
+        root.addView(padHint);
+
+        TextView guardValue = new TextView(this);
+        int guard = Math.max(0, Math.min(1000, prefs.getInt("pad_scroll_guard_ms", 0)));
+        guardValue.setText(getString(R.string.pad_guard, guard));
+        root.addView(guardValue);
+        SeekBar guardSeek = new SeekBar(this);
+        guardSeek.setMax(20);
+        guardSeek.setProgress(guard / 50);
+        guardSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                guardValue.setText(getString(R.string.pad_guard, progress * 50));
+                if (fromUser) prefs.edit().putInt("pad_scroll_guard_ms", progress * 50).apply();
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) { }
+            @Override public void onStopTrackingTouch(SeekBar bar) { }
+        });
+        root.addView(guardSeek);
+
+        Switch padDebug = new Switch(this);
+        padDebug.setText(R.string.pad_debug);
+        padDebug.setChecked(prefs.getBoolean("pad_debug", false));
+        padDebug.setOnCheckedChangeListener((v, checked) ->
+                prefs.edit().putBoolean("pad_debug", checked).apply());
+        root.addView(padDebug);
+
         // External mouse pointer capture.  This is opt-in because it changes
         // Android's mouse event mode from absolute coordinates to relative motion.
         Switch pointerCaptureSwitch = new Switch(this);

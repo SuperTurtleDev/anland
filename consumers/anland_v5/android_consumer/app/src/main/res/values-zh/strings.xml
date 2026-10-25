@@ -227,4 +227,8 @@
         <item>屏幕 × 0.5</item>
         <item>屏幕 × 0.25</item>
     </string-array>
+    <string name="pad_tap">外接触摸板：轻触点击</string>
+    <string name="pad_tip">默认保留单指及双指轻击，仅抑制滚动手势产生的误点击。返回桌面后对指针捕获及沉浸模式的触摸板生效，屏幕触摸板不受影响。</string>
+    <string name="pad_guard">滚动结束后 %1$d ms 内忽略外接触摸板轻击（0 = 关闭）</string>
+    <string name="pad_debug">触摸板调试日志（AnlandTouchpad）</string>
 </resources>

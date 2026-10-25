@@ -243,4 +243,8 @@
         <item>Screen × 0.5</item>
         <item>Screen × 0.25</item>
     </string-array>
+    <string name="pad_tap">External touchpad: tap to click</string>
+    <string name="pad_tip">Keep single-finger and two-finger taps while suppressing clicks from scrolling. Applies to captured and immersive touchpads when returning to the desktop; the on-screen touchpad is unchanged.</string>
+    <string name="pad_guard">Suppress external touchpad taps for %1$d ms after scrolling (0 = off)</string>
+    <string name="pad_debug">Touchpad debug log (AnlandTouchpad)</string>
 </resources>

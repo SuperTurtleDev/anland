@@ -880,6 +880,12 @@ public class MainActivity extends Activity
     private void applyTouchpadPrefs(SharedPreferences prefs, Touchpad pad) {
         if (pad == null)
             return;
+        // Physical pads retain taps by default. Only a stream committed to
+        // scrolling (or explicitly disabled taps) suppresses synthetic clicks.
+        if (pad != screenTouchpad)
+            pad.setTapFilter(prefs.getBoolean("pad_tap", true),
+                    prefs.getInt("pad_scroll_guard_ms", 0),
+                    prefs.getBoolean("pad_debug", false));
         pad.setAccelStrength(Math.max(0.5f,
                 Math.min(10.0f, prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f))));
         pad.setScrollSpeed(prefs.getFloat(KEY_SCROLL_SPEED,
