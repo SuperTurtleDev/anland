@@ -5,9 +5,6 @@
     <!-- Titles / section headers -->
     <string name="settings_title">Settings</string>
     <string name="section_virtual_keyboard">Soft Keyboard Toggle Key</string>
-    <string name="section_extra_keys">Extra Keys Bar</string>
-    <string name="section_custom_layout">Custom Extra Keys Layout</string>
-    <string name="section_touchpad">Touchpad Settings</string>
     <string name="section_connection">Connection</string>
     <string name="section_resolution">Display Resolution</string>
     <string name="section_notification">Settings Notification</string>
@@ -15,7 +12,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ Back</string>
     <string name="cat_keyboard_title">Keyboard &amp; Keys</string>
-    <string name="cat_keyboard_subtitle">Key binding, accessibility &amp; extra keys bar</string>
+    <string name="cat_keyboard_subtitle">Key binding, accessibility, virtual keyboard &amp; HUD controls</string>
     <string name="cat_touchpad_title">Touchpad &amp; Mouse</string>
     <string name="cat_touchpad_subtitle">Touchpad mode, pointer capture &amp; sensitivity</string>
     <string name="cat_connection_subtitle">Socket, root, mic, camera &amp; audio latency</string>
@@ -34,8 +31,100 @@
 
     <!-- Bind key -->
     <string name="bind_key_button">Bind Soft Keyboard Toggle Key</string>
+    <string name="landscape_split_keyboard">Use split arc keyboard in landscape</string>
+    <string name="landscape_split_keyboard_hint">Separates letter keys into left and right thumb clusters when the screen is landscape.</string>
+    <string name="customize_keyboard_wings">Customize thumb wings…</string>
+    <string name="keyboard_layer_to_keyboard">Edit keyboard</string>
+    <string name="keyboard_layer_to_hud">Back to HUD</string>
+    <string name="keyboard_layer_settings">Keyboard settings</string>
+    <string name="keyboard_wings_title">Customize thumb wings</string>
+    <string name="keyboard_wings_left">Left wing</string>
+    <string name="keyboard_wings_right">Right wing</string>
+    <string name="keyboard_wings_picker_title">Choose key action</string>
+    <string name="keyboard_wings_use_default">Use default key</string>
+    <string name="keyboard_wings_reset">Reset defaults</string>
+    <string name="keyboard_wings_done">Done</string>
+    <string name="keyboard_handedness">Keyboard handedness</string>
+    <string-array name="keyboard_handedness_options">
+        <item>Left-handed</item>
+        <item>Right-handed</item>
+    </string-array>
+    <string name="keyboard_theme">Key appearance</string>
+    <string-array name="keyboard_theme_options">
+        <item>Filled</item>
+        <item>Outlined</item>
+        <item>Transparent</item>
+    </string-array>
+    <string name="keyboard_haptic_feedback">Vibrate on virtual key press</string>
     <string name="raise_desktop_for_soft_keyboard">Raise desktop when soft keyboard opens</string>
     <string name="raise_desktop_for_soft_keyboard_hint">When on, the desktop shrinks and moves up so you can see what you type.</string>
+    <string name="hud_controls_switch">Show floating HUD controls</string>
+    <string name="hud_controls_hint">Show editable touchpad, D-pad, stick and shortcut controls.</string>
+    <string name="hud_edit_layout">Edit floating control layout</string>
+    <string name="hud_export_layout">Export HUD layout…</string>
+    <string name="hud_import_layout">Import HUD layout…</string>
+    <string name="hud_export_done">HUD layout exported</string>
+    <string name="hud_export_failed">Could not export HUD layout</string>
+    <string name="hud_export_empty">No HUD layout to export yet</string>
+    <string name="hud_import_done">HUD layout imported</string>
+    <string name="hud_import_failed">Could not import that layout file</string>
+    <string name="hud_overlay_saved">Layout Saved</string>
+    <string name="hud_overlay_hidden_on">HUD hidden — hold the KB key to bring it back</string>
+    <string name="hud_overlay_hidden_off">HUD restored</string>
+    <string name="hud_overlay_save_error">Error saving layout</string>
+    <string name="hud_overlay_changes_discarded">Changes Discarded</string>
+    <string name="hud_overlay_exit_title">EXIT HUD EDITOR</string>
+    <string name="hud_overlay_exit_message">Save layout changes before exiting?</string>
+    <string name="hud_overlay_save_and_exit">SAVE &amp; EXIT</string>
+    <string name="hud_overlay_discard">DISCARD</string>
+    <string name="hud_overlay_cancel">CANCEL</string>
+    <string name="hud_overlay_orientation_title">ORIENTATION NOTICE</string>
+    <string name="hud_overlay_orientation_message">Portrait and Landscape layouts are stored independently.\n\nRotate your device to customize buttons and dock positions for each orientation separately.</string>
+    <string name="hud_overlay_got_it">GOT IT</string>
+    <string name="hud_overlay_snap_on">Snap to Grid: ON</string>
+    <string name="hud_overlay_snap_off">Snap to Grid: OFF</string>
+    <string name="hud_overlay_copy_portrait_here">Copy Portrait Layout Here</string>
+    <string name="hud_overlay_copy_landscape_here">Copy Landscape Layout Here</string>
+    <string name="hud_overlay_productivity_preset">Desktop / Productivity Preset (10% Inset)</string>
+    <string name="hud_overlay_user_portrait_hotkeys_layout">User Portrait Hotkeys Layout</string>
+    <string name="hud_overlay_clear_active_layout">Clear Active Layout</string>
+    <string name="hud_overlay_layout_options_title">Layout Options &amp; Presets</string>
+    <string name="hud_overlay_copied">Layout Copied</string>
+    <string name="hud_overlay_productivity_preset_loaded">Desktop / Productivity Preset (10% Inset) Loaded</string>
+    <string name="hud_overlay_user_portrait_layout_loaded">User Portrait Layout Loaded</string>
+    <string name="hud_overlay_layout_cleared">Layout Cleared</string>
+    <string name="hud_overlay_add_standard_key_button">Standard Key Button</string>
+    <string name="hud_overlay_add_super_gesture_nub">Super Gesture Nub</string>
+    <string name="hud_overlay_add_trackpoint">TrackPoint (Mouse / Scroll)</string>
+    <string name="hud_overlay_add_steam_deck_trackpad">Steam Deck Trackpad (Touchpad / Mouse)</string>
+    <string name="hud_overlay_add_scroll_bar">Scroll Bar (Vertical / Horizontal)</string>
+    <string name="hud_overlay_add_dpad">D-Pad (Sliding Cross)</string>
+    <string name="hud_overlay_add_group">Group container</string>
+    <string name="hud_widget_group">GROUP</string>
+    <string name="hud_group_children">Child keys</string>
+    <string name="hud_group_add_key">Add key to group</string>
+    <string name="hud_group_empty">No keys in this group yet</string>
+    <string name="hud_group_add_existing">Move existing key in</string>
+    <string name="hud_group_detach">Take out</string>
+    <string name="hud_group_drop_hint">Drop keys here</string>
+    <string name="hud_group_moved_in">Key moved into group</string>
+    <string name="hud_group_detached">Key taken out of group</string>
+    <string name="hud_group_no_candidates">No standalone keys on screen</string>
+    <string name="hud_group_move_in_title">Move key into group</string>
+    <string name="hud_overlay_add_widget_title">Add Widget</string>
+    <string name="hud_overlay_daemon_connected">DAEMON CONNECTED</string>
+    <string name="hud_overlay_daemon_offline">DAEMON OFFLINE</string>
+    <string name="hud_overlay_toolbar_save">SAVE</string>
+    <string name="hud_overlay_toolbar_add">ADD</string>
+    <string name="hud_overlay_toolbar_snap">SNAP</string>
+    <string name="hud_overlay_toolbar_layout">LAYOUT</string>
+    <string name="hud_overlay_toolbar_exit">EXIT</string>
+    <string name="hud_overlay_label_key">KEY</string>
+    <string name="hud_overlay_label_super">SUPER</string>
+    <string name="hud_overlay_label_mouse">MOUSE</string>
+    <string name="hud_overlay_label_touchpad">TOUCHPAD</string>
+    <string name="hud_overlay_label_scroll">SCROLL</string>
+    <string name="hud_overlay_label_dpad">D-PAD</string>
     <string name="listening_countdown">Listening… (%1$ds)</string>
     <string name="status_current_none">Current: None</string>
     <string name="status_current">Current: %1$s</string>
@@ -47,10 +136,11 @@
     <string name="section_immersive">Immersive Mode</string>
     <string name="immersive_switch">Enable Immersive Mode</string>
     <string name="immersive_hint">Sends touch, keyboard, mouse and gamepad input directly to the Linux desktop, keeping Android gestures out of the way. Requires root. Set a toggle key below: press it once to enter and again to exit. The mode also ends when you switch apps.</string>
+    <string name="immersive_hud_touch_switch">Touch HUD controls in immersive mode</string>
+    <string name="immersive_hud_touch_hint">Keeps the on-screen HUD keys, d-pad and touchpad working while the panel is grabbed. Turn it off to send every touch straight to the desktop, leaving the HUD display-only.</string>
     <string name="immersive_oplus_refresh_rate_switch">Keep OnePlus refresh rate fixed</string>
     <string name="immersive_oplus_refresh_rate_hint">Prevents refresh-rate drops on some OnePlus devices when input events are not received.</string>
     <string name="bind_immersive_key_button">Bind Immersive Mode Key</string>
-    <string name="immersive_entering">Immersive mode: all input goes to the desktop. Press %1$s again to leave.</string>
     <string name="immersive_exited">Immersive mode off</string>
     <string name="immersive_no_scancode">Bind a key for immersive mode first</string>
     <string name="immersive_failed">Could not start immersive mode: root was denied or is unavailable</string>
@@ -115,22 +205,7 @@
     <string name="accessibility_hint">Intercept function keys (Fn, F1-F12 etc.) via AccessibilityService and convert tablet-keyboard Back/Browser Back to ESC. Enable this if external keyboard Fn combos or ESC don\'t reach the desktop correctly. Requires Accessibility permission granted in system Settings &gt; Accessibility (one-time).</string>
 
     <!-- Extra keys bar -->
-    <string name="extra_keys_mode_label">Extra keys bar mode</string>
-    <string name="extra_keys_mode_hint">Controls when the Termux-style bottom bar with ESC/TAB/CTRL/ALT/arrows/PgUp etc. is shown. Takes effect on next return to the desktop view.</string>
-    <string-array name="extra_keys_mode_options">
-        <item>Always show</item>
-        <item>Never show</item>
-        <item>Show with soft keyboard</item>
-    </string-array>
-    <string name="back_opens_switch">Back key quickly toggles extra keys bar</string>
-    <string name="back_opens_hint">When ON, pressing Back while the extra keys bar is hidden shows it; pressing Back again hides it.</string>
     <!-- Custom layout editor -->
-    <string name="btn_load_default">Load default template</string>
-    <string name="btn_load_file">Load from file…</string>
-    <string name="layout_hint">Define the extra-keys bar as JSON: \"rows\" is an array of rows, each an array of keys. A key has a \"label\" and a \"type\" (key/text/modifier/keyboard/vkeyboard/settings). \"key\"/\"modifier\" take an evdev \"code\"; \"text\" takes \"text\"; any key may add \"repeat\":true or a nested \"popup\". Invalid JSON falls back to the default. Takes effect on next return to the desktop.</string>
-    <string name="layout_status_default">Using built-in default layout</string>
-    <string name="layout_status_valid">✓ Valid layout</string>
-    <string name="layout_status_invalid">✗ %1$s</string>
 
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">Touchpad Mode (relative movement)</string>
@@ -251,4 +326,78 @@
     <string name="pad_tip">Controls single- and two-finger taps plus long-press drag on captured and immersive external touchpads. Physical buttons still work when disabled. The on-screen touchpad is unchanged.</string>
     <string name="pad_guard">Ignore external touchpad taps for %1$d ms after scrolling (0 = off)</string>
     <string name="pad_debug">Touchpad debug log (AnlandTouchpad)</string>
+
+    <!-- HUD editor -->
+    <string name="hud_delete_short">DEL</string>
+    <string name="hud_duplicate_short">DUP</string>
+    <string name="hud_delete_confirm">CONFIRM?</string>
+    <string name="hud_title_button_properties">BUTTON PROPERTIES</string>
+    <string name="hud_properties_title">%1$s PROPERTIES</string>
+    <string name="hud_dock_button_properties">DOCK BUTTON PROPERTIES</string>
+    <string name="hud_widget_button">BUTTON</string>
+    <string name="hud_widget_super_gesture">SUPER GESTURE</string>
+    <string name="hud_widget_trackpoint">TRACKPOINT</string>
+    <string name="hud_widget_touchpad">TOUCHPAD</string>
+    <string name="hud_widget_scrollbar">SCROLLBAR</string>
+    <string name="hud_widget_dpad">D-PAD</string>
+    <string name="hud_display_label">Display Label</string>
+    <string name="hud_width_dp">Width (dp):</string>
+    <string name="hud_height_dp">Height (dp):</string>
+    <string name="hud_corner_dp">Corner (dp):</string>
+    <string name="hud_opacity_percent">Opacity (%):</string>
+    <string name="hud_action_mapping">Action Mapping:</string>
+    <string name="hud_main_action">Main Action</string>
+    <string name="hud_popup_swipe_up">Popup (Swipe Up)</string>
+    <string name="hud_swipe_actions">Direction actions</string>
+    <string name="hud_direction_left">Left</string>
+    <string name="hud_direction_right">Right</string>
+    <string name="hud_direction_up">Up</string>
+    <string name="hud_direction_down">Down</string>
+    <string name="hud_trackpoint_mode">TrackPoint Mode:</string>
+    <string name="hud_mode">Mode</string>
+    <string name="hud_mode_mouse">MOUSE</string>
+    <string name="hud_mode_scroll">SCROLL</string>
+    <string name="hud_orientation_vertical">VERTICAL</string>
+    <string name="hud_orientation_horizontal">HORIZONTAL</string>
+    <string name="hud_sensitivity_x10">Sensitivity (x10):</string>
+    <string name="hud_deadzone_dp">Deadzone (dp):</string>
+    <string name="hud_color_theme">Color Theme:</string>
+    <string name="hud_haptic_feedback">Haptic Feedback</string>
+    <string name="hud_hold_to_repeat">Repeat while held</string>
+    <string name="hud_nudge_position">Fine-tune Position (Nudge):</string>
+    <string name="hud_unassigned">Unassigned</string>
+    <string name="hud_text_action">Text: %1$s</string>
+    <string name="hud_system_action">System: %1$s</string>
+    <string name="hud_key_code">Key %1$d</string>
+    <string-array name="hud_color_theme_names">
+        <item>Slate</item>
+        <item>Cyan</item>
+        <item>Crimson</item>
+        <item>Amber</item>
+        <item>Emerald</item>
+        <item>Stealth</item>
+    </string-array>
+
+    <string name="hud_picker_back">BACK</string>
+    <string name="hud_picker_title">SELECT KEY / ACTION</string>
+    <string name="hud_picker_search">Search keys…</string>
+    <string name="hud_tab_keys">KEYS</string>
+    <string name="hud_tab_mods_system">MODS &amp; SYS</string>
+    <string name="hud_tab_combo">COMBO</string>
+    <string name="hud_none">None</string>
+    <string name="hud_system_soft_keyboard">Soft Keyboard</string>
+    <string name="hud_system_virtual_keyboard">Virtual Keyboard</string>
+    <string name="hud_system_settings">Settings</string>
+    <string name="hud_system_mouse_left">Mouse Left</string>
+    <string name="hud_system_mouse_right">Mouse Right</string>
+    <string name="hud_system_mouse_middle">Mouse Middle</string>
+    <string name="hud_system_scroll_up">Scroll Up</string>
+    <string name="hud_system_scroll_down">Scroll Down</string>
+    <string name="hud_system_steam_deck_mode">Steam Deck Mode</string>
+    <string name="hud_system_exit_deck_mode">Exit Deck Mode</string>
+    <string name="hud_combo_slot">Slot %1$d</string>
+    <string name="hud_combo_builder_hint">Pick up to 3 keys. Active slot is highlighted; pick a key to fill it.</string>
+    <string name="hud_combo_clear_all">CLEAR ALL</string>
+    <string name="hud_combo_apply">APPLY COMBO</string>
+    <string name="hud_combo_empty">(empty)</string>
 </resources>

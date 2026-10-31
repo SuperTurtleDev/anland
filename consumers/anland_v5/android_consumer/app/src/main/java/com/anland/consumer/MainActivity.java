@@ -20,6 +20,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.Display;
@@ -41,10 +42,12 @@ import android.util.DisplayMetrics;   // ADDED
 
 import java.nio.charset.StandardCharsets;
 
-
 public class MainActivity extends Activity
         implements SurfaceHolder.Callback, SystemIME.Host, ImmersiveMode.Host {
     private static final String TAG = "Anland";
+    private static final String KEY_USE_HUD_OVERLAY = "use_hud_overlay";
+    private static final String KEY_HUD_LAYOUT_PROFILE = "hud_layout_profile_v2";
+    private static final String KEY_STEAM_DECK_MODE = "steam_deck_mode";
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
@@ -55,6 +58,12 @@ public class MainActivity extends Activity
     private int customScreenHeight = 0;
     private int viewWidth = 0;
     private int viewHeight = 0;
+    private static final long RECONNECT_DEBOUNCE_MS = 350L;
+    private static final long RECONNECT_COOLDOWN_MS = 1200L;
+    private Runnable pendingReconnect;
+    private long lastReconnectTimeMs;
+    private int connectedW;
+    private int connectedH;
     private static final String KEY_BOUND_KEYCODE = "bound_keycode";
     private static final String KEY_SOCKET_PATH = "socket_path";
     private static final String KEY_USE_ROOT = "use_root";
@@ -109,13 +118,9 @@ public class MainActivity extends Activity
     // (no pipeline was ever initialized). Makes onPause/onResume no-op-and-exit.
     private boolean mForceSettings = false;
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
-    private static final String KEY_EXTRA_KEYS_MODE = "extra_keys_mode";
-    private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
-    private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
     // Linux input-event-codes.h: KEY_BACK (the browser-back key).
-    // When on, the IME and extra-keys bar float over the display instead of
-    // shrinking it: the bar rides up with the keyboard but the surface keeps
-    // its full size. See relayout() and buildExtraKeysBar().
+    // When on, the soft keyboard floats over the display instead of shrinking
+    // it, so the surface keeps its full size. See relayout().
     private static final String KEY_KEYBOARD_FLOATING = "keyboard_floating";
     private boolean mKeyboardFloating = false;
     // Persistent "tap to open Settings" notification, toggleable in Settings > General.
@@ -128,12 +133,16 @@ public class MainActivity extends Activity
     // System soft-keyboard bridge: hidden input, text forwarding and toggle.
     private SystemIME systemIme;
     private int mImeBottom = 0;   // last IME bottom inset
-    private int mBarHeight = 0;   // extra-keys bar height in px
-    private ExtraKeysBar extraKeysBar;
-    private FrameLayout mRoot;    // content root, host of the extra-keys bar
+    private com.anland.consumer.hud.HudOverlayView mHudOverlay;
+    private FrameLayout mRoot;    // content root, host of the HUD overlay
+    // Pointer ids of the grabbed evdev stream that belong to the HUD or the
+    // floating keyboard rather than to the desktop.
+    private final java.util.HashSet<Integer> grabbedOverlayPointers = new java.util.HashSet<>();
+    // Cached "immersive_hud_touch" preference: read once per session instead of
+    // once per evdev frame.
+    private boolean immersiveHudTouch = ImmersiveMode.DEFAULT_HUD_TOUCH;
     private float mDensity = 1f;
     // Layout JSON the current bar was built from; used to detect edits on resume.
-    private String mAppliedLayoutJson = "";
 
     public static MainActivity sInstance;
 
@@ -311,6 +320,7 @@ public class MainActivity extends Activity
             lifecycleHandler.postDelayed(delayedFocusStop, FOCUS_STOP_DELAY_MS);
         }
         if (!hasFocus) {
+            cancelOverlayTouches();
             stylusTouching = false;
             stylusHoverScroll.reset();
             releaseAllMouseButtons();
@@ -382,7 +392,81 @@ public class MainActivity extends Activity
             finish();
             return;
         }
+        if (viewWidth > 0 && viewHeight > 0)
+            mNative.setScreenSize(viewWidth, viewHeight);
         mNative.start(surface, clipboard, this);
+        connectedW = viewWidth;
+        connectedH = viewHeight;
+        lastReconnectTimeMs = android.os.SystemClock.uptimeMillis();
+    }
+
+    private void cancelPendingReconnect() {
+        if (pendingReconnect != null) {
+            lifecycleHandler.removeCallbacks(pendingReconnect);
+            pendingReconnect = null;
+        }
+    }
+
+    private void stopNativePipeline() {
+        cancelOverlayTouches();
+        cancelPendingReconnect();
+        if (mNative != null)
+            mNative.stop();
+        connectedW = 0;
+        connectedH = 0;
+    }
+
+    private void scheduleReconnect(SurfaceHolder holder) {
+        final android.view.Surface surface = holder.getSurface();
+        if (surface == null || !surface.isValid())
+            return;
+        cancelPendingReconnect();
+        pendingReconnect = () -> {
+            pendingReconnect = null;
+            reconnectNow(surface);
+        };
+        if (connectedW == 0 && connectedH == 0)
+            lifecycleHandler.post(pendingReconnect);
+        else
+            lifecycleHandler.postDelayed(pendingReconnect, RECONNECT_DEBOUNCE_MS);
+    }
+
+    private void reconnectNow(android.view.Surface surface) {
+        if (!surfaceReady || mNative == null || surface == null || !surface.isValid())
+            return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (viewWidth == connectedW && viewHeight == connectedH
+                && now - lastReconnectTimeMs < RECONNECT_COOLDOWN_MS)
+            return;
+
+        updateDisplayRotation();
+        ensurePointerPosition();
+        applyCameraState();
+        releaseScreenTouches();
+        mNative.stop();
+        connectedW = 0;
+        connectedH = 0;
+        applyConnectionConfig();
+        startNative(surface);
+        pushRefreshRate();
+        applyMicState();
+        applyAudioLatency();
+        applyAudioKeepalive();
+    }
+
+    private void syncScreenSizeToSurface() {
+        if (!surfaceReady || mNative == null || surfaceView == null)
+            return;
+        int width = surfaceView.getWidth();
+        int height = surfaceView.getHeight();
+        if (width <= 0 || height <= 0 || (width == viewWidth && height == viewHeight))
+            return;
+        viewWidth = width;
+        viewHeight = height;
+        mNative.setScreenSize(width, height);
+        updateDisplayRotation();
+        updateTouchpadBounds(null);
+        scheduleReconnect(surfaceView.getHolder());
     }
 
     // True only when `path` exists and is a unix-domain socket. In root mode the
@@ -632,26 +716,83 @@ public class MainActivity extends Activity
         // 1x1 so the IME target never overlaps the surface and steals touches.
         root.addView(systemIme.getInputView(), new FrameLayout.LayoutParams(1, 1));
 
-        // Bottom extra-keys bar (Termux-style). Hidden by default; toggled by the
-        // settings switch and synced in onResume. The layout (and thus the row
-        // count / height) comes from the user's JSON config; see buildExtraKeysBar.
         mRoot = root;
         mDensity = getResources().getDisplayMetrics().density;
         mKeyboardFloating = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getBoolean(KEY_KEYBOARD_FLOATING, false);
-        buildExtraKeysBar();
+
+        SharedPreferences hudPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        mHudOverlay = new com.anland.consumer.hud.HudOverlayView(this, hudPrefs,
+                new com.anland.consumer.hud.HudOverlayView.HudHost() {
+            @Override public void sendKey(int action, int evdevCode) {
+                if (mNative != null) mNative.sendKey(action, evdevCode);
+            }
+            @Override public void sendTextInput(byte[] utf8) {
+                if (mNative != null) mNative.sendTextInput(utf8);
+            }
+            @Override public void sendMouseMotion(float dx, float dy) {
+                sendCapturedTouchpadMotion(dx, dy);
+            }
+            @Override public void sendMouseButton(int button, boolean pressed) {
+                if (mNative != null) mNative.sendMouseButton(button, pressed);
+            }
+
+            @Override public void sendMouseScroll(int axis, float value) {
+                if (mNative != null) mNative.sendMouseScroll(axis, value);
+            }
+            @Override public void toggleSystemKeyboard() {
+                if (systemIme != null) systemIme.toggleSystemKeyboard();
+            }
+            @Override public void toggleVirtualKeyboard() {
+                MainActivity.this.toggleVirtualKeyboard();
+            }
+            @Override public void openSettings() {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+            }
+            @Override public void toggleSteamDeckMode() {
+                setHudSteamDeckMode(!hudPrefs.getBoolean(KEY_STEAM_DECK_MODE, false));
+            }
+            @Override public void exitSteamDeckMode() {
+                setHudSteamDeckMode(false);
+            }
+            @Override public void onLayoutSaved() {
+                if (mRoot != null) relayout();
+            }
+            @Override public boolean isNativeReady() {
+                return mNative != null && surfaceReady;
+            }
+            @Override public void onEditModeExited() {}
+        });
+        root.addView(mHudOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        mHudOverlay.post(() -> {
+            if (mHudOverlay != null) mHudOverlay.rebuildActiveLayout();
+        });
 
         // ADDED: Create VirtualKeyboardView (hidden initially)
         virtualKeyboardView = new VirtualKeyboardView(this);
         virtualKeyboardView.setVisibility(View.GONE);
+        // Hiding the keyboard hands the floating layer back to the HUD.
+        virtualKeyboardView.setOnDismissListener(this::applyHudVisibility);
         virtualKeyboardView.setOnKeyEventListener(new VirtualKeyboardView.OnKeyEventListener() {
             @Override
             public void onKeyDown(int scanCode) {
-                mNative.sendKey(0, scanCode);
+                if (mNative != null) mNative.sendKey(0, scanCode);
             }
             @Override
             public void onKeyUp(int scanCode) {
-                mNative.sendKey(1, scanCode);
+                if (mNative != null) mNative.sendKey(1, scanCode);
+            }
+            @Override
+            public void onTextInput(String text) {
+                if (mNative != null && text != null && !text.isEmpty()) {
+                    mNative.sendTextInput(text.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            @Override
+            public void onScroll(float dy) {
+                if (mNative != null) mNative.sendMouseScroll(0, -dy * 0.5f);
             }
         });
         // Add to root with no gravity – we will position manually.
@@ -683,8 +824,7 @@ public class MainActivity extends Activity
 
         setContentView(root);
         // Establish a focused descendant after attachment so the DecorView routes
-        // captured-pointer events through our content root even when the extra-keys
-        // bar is hidden.
+        // captured-pointer events through our content root.
         surfaceView.requestFocus();
         surfaceView.getHolder().addCallback(this);
 
@@ -763,7 +903,34 @@ public class MainActivity extends Activity
 
     // ADDED: Helper to position virtual keyboard at bottom-center
     private void positionVirtualKeyboard() {
-        if (virtualKeyboardView == null) return;
+        if (virtualKeyboardView == null || mRoot == null) return;
+        virtualKeyboardView.updateScreenSize();
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams)
+                virtualKeyboardView.getLayoutParams();
+        if (lp == null) return;
+
+        if (virtualKeyboardView.isSplitArcMode()) {
+            if (lp.width != FrameLayout.LayoutParams.MATCH_PARENT
+                    || lp.height != FrameLayout.LayoutParams.MATCH_PARENT) {
+                lp.width = FrameLayout.LayoutParams.MATCH_PARENT;
+                lp.height = FrameLayout.LayoutParams.MATCH_PARENT;
+                virtualKeyboardView.setLayoutParams(lp);
+            }
+            virtualKeyboardView.setTranslationX(0f);
+            virtualKeyboardView.setTranslationY(0f);
+            return;
+        }
+
+        if (lp.width != FrameLayout.LayoutParams.WRAP_CONTENT
+                || lp.height != FrameLayout.LayoutParams.WRAP_CONTENT) {
+            lp.width = FrameLayout.LayoutParams.WRAP_CONTENT;
+            lp.height = FrameLayout.LayoutParams.WRAP_CONTENT;
+            virtualKeyboardView.setLayoutParams(lp);
+            if (virtualKeyboardView.getVisibility() == View.VISIBLE)
+                virtualKeyboardView.post(this::positionVirtualKeyboard);
+            return;
+        }
+
         int w = virtualKeyboardView.getMeasuredWidth();
         int h = virtualKeyboardView.getMeasuredHeight();
         if (w <= 0 || h <= 0) {
@@ -792,8 +959,8 @@ public class MainActivity extends Activity
         // Clamp to visible area.
         x = Math.max(0, Math.min(x, parentW - w));
         y = Math.max(0, Math.min(y, parentH - h));
-        virtualKeyboardView.setX(x);
-        virtualKeyboardView.setY(y);
+        virtualKeyboardView.setTranslationX(x);
+        virtualKeyboardView.setTranslationY(y);
         Log.d("VirtualKeyboard", "positionVirtualKeyboard: x=" + x + ", y=" + y
                 + " parent=" + parentW + "x" + parentH + " view=" + w + "x" + h);
     }
@@ -1577,6 +1744,10 @@ public class MainActivity extends Activity
     protected void onResume() {
         super.onResume();
         mResumed = true;
+        // Cached while the screen is up: the immersive routing must never read
+        // shared preferences from an evdev frame.
+        immersiveHudTouch = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(ImmersiveMode.KEY_HUD_TOUCH, ImmersiveMode.DEFAULT_HUD_TOUCH);
 
         // Bounced to Settings from onCreate (socket missing): nothing was set up, so
         // just exit this window instead of running the connect logic.
@@ -1584,6 +1755,8 @@ public class MainActivity extends Activity
             finish();
             return;
         }
+
+        applyOrientation();
 
         requestMediaAudioFocus();
 
@@ -1607,23 +1780,18 @@ public class MainActivity extends Activity
 
         // If the user edited the layout JSON in Settings, rebuild the bar so the
         // change takes effect on return to the desktop.
-        String layoutJson = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString(KEY_EXTRA_KEYS_LAYOUT, "");
-        if (!layoutJson.equals(mAppliedLayoutJson))
-            rebuildExtraKeysBar();
 
         // Pick up a Keyboard-floating toggle made in Settings: update the bar's
         // backdrop and re-run the layout so the surface margin tracks the new mode.
         mKeyboardFloating = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getBoolean(KEY_KEYBOARD_FLOATING, false);
-        if (extraKeysBar != null)
-            extraKeysBar.setFloating(mKeyboardFloating);
+        refreshHudOverlay();
+        if (virtualKeyboardView != null) {
+            virtualKeyboardView.refreshKeyboardPreferences();
+            if (virtualKeyboardView.getVisibility() == View.VISIBLE)
+                virtualKeyboardView.post(this::positionVirtualKeyboard);
+        }
         relayout();
-
-        // Sync extra-keys bar visibility with the settings switches. With auto-show
-        // ON the bar tracks the keyboard (hidden now if the IME isn't up); with it
-        // OFF the master switch decides. See shouldShowBar.
-        setExtraKeysBarVisible(shouldShowBar(systemIme.isImeVisible()));
 
         setupFullscreen();
         DisplayManager dm = getSystemService(DisplayManager.class);
@@ -1636,9 +1804,17 @@ public class MainActivity extends Activity
         // later reconnect. Idempotent, so safe to call on every resume.
         applyCameraState();
         if (surfaceReady) {
-            mNative.stop();
-            applyConnectionConfig();
-            startNative(surfaceView.getHolder().getSurface());
+            int width = surfaceView.getWidth();
+            int height = surfaceView.getHeight();
+            if (width > 0 && height > 0) {
+                viewWidth = width;
+                viewHeight = height;
+                mNative.setScreenSize(width, height);
+            }
+            if (connectedW != viewWidth || connectedH != viewHeight) {
+                cancelPendingReconnect();
+                reconnectNow(surfaceView.getHolder().getSurface());
+            }
             pushRefreshRate();
             applyMicState();
             applyAudioLatency();
@@ -1673,7 +1849,7 @@ public class MainActivity extends Activity
     @Override
     protected void onPause() {
         super.onPause();
-        Log.i(TAG, "onPause: stopping native and immersive input");
+        Log.i(TAG, "onPause: releasing immersive input");
         mResumed = false;
         stylusHoverScroll.reset();
         lifecycleHandler.removeCallbacks(delayedFocusStop);
@@ -1692,18 +1868,27 @@ public class MainActivity extends Activity
         releaseScreenTouches();
         clearPointerCaptureBackTracking();
         releasePointerCapture(false);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (mForceSettings) return;
+        // IMEs can pause the activity while remaining visible. Keep the display
+        // pipeline alive until the whole window leaves the screen.
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(NOTIFICATION_ID);
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
             dm.unregisterDisplayListener(displayListener);
-        mNative.stop();
+        stopNativePipeline();
         abandonMediaAudioFocus();
     }
 
     @Override
     protected void onDestroy() {
         Log.i(TAG, "onDestroy: releasing native and immersive input");
+        cancelPendingReconnect();
         lifecycleHandler.removeCallbacks(delayedFocusStop);
         lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         mResumed = false;
@@ -1826,24 +2011,19 @@ public class MainActivity extends Activity
         lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         viewWidth = width;
         viewHeight = height;
+        if (width > 0 && height > 0)
+            mNative.setScreenSize(width, height);
         updateDisplayRotation();
         ensurePointerPosition();
         surfaceReady = true;
-        // Same ordering guarantee as onResume: camera service settled before connect.
-        applyCameraState();
-        releaseScreenTouches();
-        mNative.stop();
-        applyConnectionConfig();
-        startNative(holder.getSurface());
-        pushRefreshRate();
-        applyMicState();
-        applyAudioLatency();
-        applyAudioKeepalive();
+        scheduleReconnect(holder);
 
         // ===== 更新屏幕尺寸并重置平滑状态 =====
         updateTouchpadBounds(null);
-        if (mRoot != null)
+        if (mRoot != null) {
             mRoot.post(this::syncPointerCapture);
+            mRoot.postDelayed(this::syncScreenSizeToSurface, 500L);
+        }
     }
 
     @Override
@@ -1860,12 +2040,38 @@ public class MainActivity extends Activity
             releaseScreenTouches();
         }
         releasePointerCapture(false);
-        mNative.stop();
+        stopNativePipeline();
     }
 
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        updateDisplayRotation();
+        if (mRoot != null) {
+            mRoot.post(() -> {
+                WindowInsets insets = mRoot.getRootWindowInsets();
+                if (insets != null)
+                    applyImeInset(insets);
+                else
+                    relayout();
+                updateTouchpadBounds(null);
+                if (mHudOverlay != null)
+                    mHudOverlay.rebuildActiveLayout();
+                if (virtualKeyboardView != null)
+                    virtualKeyboardView.updateScreenSize();
+                if (virtualKeyboardView != null
+                        && virtualKeyboardView.getVisibility() == View.VISIBLE) {
+                    positionVirtualKeyboard();
+                }
+            });
+            mRoot.postDelayed(this::syncScreenSizeToSurface, 400L);
+        } else {
+            relayout();
+        }
+    }
 
-    // Shrink the surface to the area above the keyboard (and the extra-keys bar,
-    // if shown) by giving it a bottom margin. The size change flows through
+    // Shrink the surface to the area above the soft keyboard by giving it a
+    // bottom margin. The size change flows through
     // surfaceChanged -> nativeStart and the producer's resize path, so the
     // focused window relayouts into the upper region instead of hiding behind
     // the keyboard. Reset when the IME goes away.
@@ -1875,41 +2081,52 @@ public class MainActivity extends Activity
         boolean wasImeVisible = mImeBottom > 0;
     
         mImeBottom = newImeBottom;
+        // The HUD is a floating layer: it deliberately does NOT follow the IME,
+        // so its controls stay where the user placed them.
+        if (mHudOverlay != null) {
+            mHudOverlay.applySystemInsets(insets);
+        }
     
-        // Only "with_keyboard" mode tracks the IME; "always"/"never"
-        // let the user's manual toggle (back key) stay untouched.
-        String mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getString(KEY_EXTRA_KEYS_MODE, "always");
-        if (imeVisible != wasImeVisible && "with_keyboard".equals(mode))
-            setExtraKeysBarVisible(imeVisible);
-
         relayout();
     }
 
-    // Desired extra-keys bar visibility for the current keyboard state. The
-    // single three-way preference replaces the old two-switch pair:
-    //   "always"       – bar always visible
-    //   "never"        – bar always hidden
-    //   "with_keyboard" – bar tracks the soft keyboard (default)
-    private boolean shouldShowBar(boolean imeVisible) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        String mode = prefs.getString(KEY_EXTRA_KEYS_MODE, "always");
-        switch (mode) {
-            case "always":   return true;
-            case "never":    return false;
-            default:         return imeVisible;
-        }
+    private void refreshHudOverlay() {
+        if (mHudOverlay == null) return;
+        mHudOverlay.loadProfile();
+        mHudOverlay.rebuildActiveLayout();
+        applyHudVisibility();
     }
 
-    // Recompute the surface bottom margin and the bar position from the current
-    // IME inset and bar visibility. The surface ends above the bar, which sits
-    // directly on top of the IME: "surface / extra-keys bar / IME" bottom-up.
+    /**
+     * The floating keyboard gets its own HUD layer instead of burying the main
+     * one: while the keyboard is up the overlay switches to the keyboard layout,
+     * which holds whatever the user put next to the keys (modifiers, arrows, …)
+     * and is empty until they add something.
+     */
+    private void applyHudVisibility() {
+        if (mHudOverlay == null) return;
+        boolean keyboardUp = virtualKeyboardView != null
+                && virtualKeyboardView.getVisibility() == View.VISIBLE;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        boolean wantHud = prefs.getBoolean(KEY_USE_HUD_OVERLAY, true)
+                || prefs.getBoolean(KEY_STEAM_DECK_MODE, false);
+        mHudOverlay.setLayer(keyboardUp
+                ? com.anland.consumer.hud.HudOverlayView.LAYER_KEYBOARD
+                : com.anland.consumer.hud.HudOverlayView.LAYER_HUD);
+        int next = wantHud ? View.VISIBLE : View.GONE;
+        if (next == View.GONE && mHudOverlay.getVisibility() != View.GONE) {
+            // A widget hidden under the finger never sees its ACTION_UP, so the
+            // gesture has to be cancelled here instead of ending in limbo.
+            cancelOverlayTouches();
+        }
+        mHudOverlay.setVisibility(next);
+    }
+
+    // Recompute the surface bottom margin from the current IME inset.
+    // Floating mode: the soft keyboard overlays the display, so the surface
+    // keeps its full size (target 0). Default mode: shrink it above the IME.
     private void relayout() {
-        boolean barVisible = extraKeysBar != null && extraKeysBar.getVisibility() == View.VISIBLE;
-        int barH = barVisible ? mBarHeight : 0;
-        // Floating mode: keyboard + bar overlay the display, so the surface keeps
-        // its full size (target 0). Default mode: shrink the surface above both.
-        int target = mKeyboardFloating ? 0 : (mImeBottom + barH);
+        int target = mKeyboardFloating ? 0 : mImeBottom;
 
         FrameLayout.LayoutParams lp =
             (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
@@ -1929,8 +2146,6 @@ public class MainActivity extends Activity
             adjustSurfaceViewLayout(lp);
         }
         
-        if (extraKeysBar != null)
-            extraKeysBar.setTranslationY(-mImeBottom);
     }
     
     private void adjustSurfaceViewLayout(FrameLayout.LayoutParams lp) {
@@ -1977,79 +2192,23 @@ public class MainActivity extends Activity
         surfaceScale = (float) surfaceW / customScreenWidth;
     }
 
-    // Show/hide the extra-keys bar and re-apply the layout so the display area
-    // is compressed (shown) or restored (hidden).
-    private void setExtraKeysBarVisible(boolean visible) {
-        if (extraKeysBar == null) return;
-        boolean cur = extraKeysBar.getVisibility() == View.VISIBLE;
-        if (cur == visible) return;
-        extraKeysBar.setVisibility(visible ? View.VISIBLE : View.GONE);
-        if (!visible) extraKeysBar.reset();
-        relayout();
-    }
-
-    // Construct the extra-keys bar from the user's saved JSON layout and add it to
-    // the content root (hidden). The bar height mirrors Termux at 37.5dp/row and
-    // scales with the parsed row count. Records the layout JSON it was built from.
-    private void buildExtraKeysBar() {
-        extraKeysBar = new ExtraKeysBar(this, new ExtraKeysBar.Sender() {
-            @Override public void key(int action, int evdev) { mNative.sendKey(action, evdev); }
-            @Override public void text(String s) {
-                if (!s.isEmpty()) mNative.sendTextInput(s.getBytes(StandardCharsets.UTF_8));
-            }
-            // Tapping the ⌨ key keeps the original behaviour: toggle the system IME.
-            @Override public void toggleKeyboard() { systemIme.toggleSystemKeyboard(); }
-            // Pulling up on the ⌨ key toggles the floating virtual keyboard.
-            @Override public void toggleVirtualKeyboard() {
-                if (virtualKeyboardView.getVisibility() == View.VISIBLE) {
-                    virtualKeyboardView.setVisibility(View.GONE);
-                } else {
-                    Log.d("VirtualKeyboard", "toggle: showing keyboard, mRoot="
-                            + mRoot.getWidth() + "x" + mRoot.getHeight());
-                    virtualKeyboardView.setVisibility(View.VISIBLE);
-                    virtualKeyboardView.bringToFront();
-                    // Re-position it (in case screen size changed)
-                    positionVirtualKeyboard();
-                    // Hide the system IME to avoid overlap with the floating keyboard.
-                    InputMethodManager imm = getSystemService(InputMethodManager.class);
-                    if (imm != null && getCurrentFocus() != null) {
-                        imm.hideSoftInputFromWindow(getCurrentFocus().getWindowToken(), 0);
-                    }
-                }
-            }
-            @Override public void openSettings() {
-                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
-            }
-        });
-        mBarHeight = Math.round(37.5f * mDensity * extraKeysBar.getRowCount());
-        extraKeysBar.setFloating(mKeyboardFloating);
-        extraKeysBar.setVisibility(View.GONE);
-        mRoot.addView(extraKeysBar, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, mBarHeight, Gravity.BOTTOM));
-        mAppliedLayoutJson = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString(KEY_EXTRA_KEYS_LAYOUT, "");
-    }
-
-    // Replace the bar with a freshly-parsed one after the user edits the layout in
-    // Settings. Called from onResume when the saved JSON no longer matches what the
-    // current bar was built from.
-    private void rebuildExtraKeysBar() {
-        if (mRoot == null) return;
-        if (extraKeysBar != null) {
-            extraKeysBar.reset();
-            mRoot.removeView(extraKeysBar);
+    private void toggleVirtualKeyboard() {
+        if (virtualKeyboardView == null) return;
+        if (virtualKeyboardView.getVisibility() == View.VISIBLE) {
+            virtualKeyboardView.hideWithAnimation(null);
+            return;
         }
-        buildExtraKeysBar();
-        setExtraKeysBarVisible(shouldShowBar(systemIme.isImeVisible()));
-        relayout();
-    }
 
-    // Toggle the extra-keys bar on its own (e.g. from the Back key), independent of
-    // the soft keyboard. Showing it just compresses the display area above the bar.
-    private void toggleExtraKeysBar() {
-        boolean visible = extraKeysBar != null
-            && extraKeysBar.getVisibility() == View.VISIBLE;
-        setExtraKeysBarVisible(!visible);
+        virtualKeyboardView.updateScreenSize();
+        virtualKeyboardView.bringToFront();
+        positionVirtualKeyboard();
+        virtualKeyboardView.showWithAnimation();
+        applyHudVisibility();
+
+        InputMethodManager imm = getSystemService(InputMethodManager.class);
+        if (imm != null && getCurrentFocus() != null) {
+            imm.hideSoftInputFromWindow(getCurrentFocus().getWindowToken(), 0);
+        }
     }
 
     /**
@@ -2073,8 +2232,12 @@ public class MainActivity extends Activity
 
     // Apply the screen-orientation preference (default / landscape / portrait).
     private void applyOrientation() {
-        String mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString("screen_orientation", "default");
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_STEAM_DECK_MODE, false)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            return;
+        }
+        String mode = prefs.getString("screen_orientation", "default");
         switch (mode) {
             case "landscape":
                 setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
@@ -2091,18 +2254,36 @@ public class MainActivity extends Activity
     // ---- SystemIME.Host ----
 
     @Override
-    public ExtraKeysBar getExtraKeysBar() {
-        return extraKeysBar;
+    public com.anland.consumer.hud.IModifierProvider getModifierProvider() {
+        return mHudOverlay;
+    }
+
+    private void setHudSteamDeckMode(boolean enabled) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        SharedPreferences.Editor edit = prefs.edit()
+                .putBoolean(KEY_STEAM_DECK_MODE, enabled);
+        if (enabled) {
+            edit.putBoolean(KEY_USE_HUD_OVERLAY, true);
+            try {
+                com.anland.consumer.hud.HudLayoutProfile profile =
+                        com.anland.consumer.hud.HudLayoutProfile.fromJSON(
+                                prefs.getString(KEY_HUD_LAYOUT_PROFILE, null));
+                profile.landscapeLayout =
+                        com.anland.consumer.hud.HudLayoutProfile.createSteamDeckLayout();
+                edit.putString(KEY_HUD_LAYOUT_PROFILE, profile.toJSON().toString());
+            } catch (Exception e) {
+                Log.e(TAG, "Unable to apply touchpad HUD layout", e);
+            }
+        }
+        edit.apply();
+        applyOrientation();
+        refreshHudOverlay();
     }
 
     // The IME was shown/hidden via SystemIME's toggle. In freeform mode the inset
-    // callback may not fire, so sync the extra-keys bar explicitly here in all modes.
+    // callback may not fire, so re-focus the surface here.
     @Override
     public void onImeVisibilityChanged(boolean visible) {
-        String mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getString(KEY_EXTRA_KEYS_MODE, "always");
-        if ("with_keyboard".equals(mode))
-            setExtraKeysBarVisible(visible);
         if (!visible && surfaceView != null) {
             surfaceView.requestFocus();
             if (mRoot != null)
@@ -2165,11 +2346,189 @@ public class MainActivity extends Activity
     public void onGrabbedTouch(MotionEvent ev) {
         if (mNative == null)
             return;
-        if (isTouchpadMode) {
-            updateTouchpadBounds(null);
-            screenTouchpad.onTouch(ev);
-        } else {
-            handleTouchEvent(ev);
+        routeGrabbedTouch(ev);
+    }
+
+    /**
+     * Hands a grabbed touch frame to whoever owns each of its pointers.
+     *
+     * Immersive mode takes the panel away from Android with EVIOCGRAB, so these
+     * frames never travel through the window: without this the HUD and the
+     * floating keyboard would be dead for the whole session. Ownership is
+     * decided per pointer, where it first touches down — a thumb resting on a
+     * HUD key must not stop the other thumb from dragging the desktop, and the
+     * desktop stream must not be left open when a key is pressed mid-drag.
+     */
+    private void routeGrabbedTouch(MotionEvent ev) {
+        if (!immersiveHudTouch) {
+            // Setting off: the grabbed stream belongs to the desktop alone,
+            // exactly like it did before the HUD could be reached here.
+            grabbedOverlayPointers.clear();
+            if (isTouchpadMode) {
+                updateTouchpadBounds(null);
+                screenTouchpad.onTouch(ev);
+            } else {
+                handleTouchEvent(ev);
+            }
+            return;
+        }
+        final int action = ev.getActionMasked();
+        final int index = ev.getActionIndex();
+        final int pointerId = ev.getPointerId(index);
+        final boolean isDown = action == MotionEvent.ACTION_DOWN
+                || action == MotionEvent.ACTION_POINTER_DOWN;
+
+        if (isDown) {
+            if (isOverlayControlAt(ev.getX(index), ev.getY(index)))
+                grabbedOverlayPointers.add(pointerId);
+            else
+                grabbedOverlayPointers.remove(pointerId);
+        }
+
+        if (anyOverlayPointer(ev)) {
+            MotionEvent overlay = anyDesktopPointer(ev) ? splitGrabbedEvent(ev, true) : ev;
+            boolean handled = false;
+            if (overlay != null) {
+                try {
+                    handled = mRoot != null && mRoot.dispatchTouchEvent(overlay);
+                } finally {
+                    if (overlay != ev) overlay.recycle();
+                }
+            }
+            if (!handled && isDown) {
+                // The control went away between the hit test and the dispatch
+                // (layout rebuilt, keyboard dismissed, ...). Give the pointer
+                // back to the desktop instead of swallowing it.
+                grabbedOverlayPointers.remove(pointerId);
+            }
+        }
+
+        if (anyDesktopPointer(ev)) {
+            MotionEvent desktop = anyOverlayPointer(ev) ? splitGrabbedEvent(ev, false) : ev;
+            if (desktop != null) {
+                try {
+                    if (isTouchpadMode) {
+                        updateTouchpadBounds(null);
+                        screenTouchpad.onTouch(desktop);
+                    } else {
+                        handleTouchEvent(desktop);
+                    }
+                } finally {
+                    if (desktop != ev) desktop.recycle();
+                }
+            }
+        }
+
+        if (action == MotionEvent.ACTION_CANCEL)
+            grabbedOverlayPointers.clear();   // every pointer of the stream died
+        else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP)
+            grabbedOverlayPointers.remove(pointerId);
+    }
+
+    private boolean anyOverlayPointer(MotionEvent ev) {
+        for (int i = 0; i < ev.getPointerCount(); i++)
+            if (grabbedOverlayPointers.contains(ev.getPointerId(i))) return true;
+        return false;
+    }
+
+    private boolean anyDesktopPointer(MotionEvent ev) {
+        for (int i = 0; i < ev.getPointerCount(); i++)
+            if (!grabbedOverlayPointers.contains(ev.getPointerId(i))) return true;
+        return false;
+    }
+
+    /**
+     * True when a HUD control (or the floating keyboard) would take a touch at
+     * this window-space point. Coordinates already are view pixels, the same
+     * space the overlay lays its widgets out in.
+     */
+    private boolean isOverlayControlAt(float x, float y) {
+        if (mHudOverlay != null && mHudOverlay.isControlAt(x, y)) return true;
+        View kb = virtualKeyboardView;
+        return kb != null && kb.getVisibility() == View.VISIBLE
+                && x >= kb.getX() && y >= kb.getY()
+                && x < kb.getX() + kb.getWidth() && y < kb.getY() + kb.getHeight();
+    }
+
+    /**
+     * Copies the pointers that belong to one side of the split into a new
+     * event, rewriting the action so each side sees a well-formed stream
+     * (DOWN for its first pointer, POINTER_DOWN / POINTER_UP afterwards, MOVE
+     * for the frames that merely pass by).
+     */
+    private MotionEvent splitGrabbedEvent(MotionEvent src, boolean overlay) {
+        final int count = src.getPointerCount();
+        final int[] keep = new int[count];
+        int n = 0;
+        for (int i = 0; i < count; i++) {
+            if (grabbedOverlayPointers.contains(src.getPointerId(i)) == overlay)
+                keep[n++] = i;
+        }
+        if (n == 0) return null;
+
+        final int masked = src.getActionMasked();
+        final int srcIndex = src.getActionIndex();
+        int newIndex = -1;
+        for (int k = 0; k < n; k++) {
+            if (keep[k] == srcIndex) { newIndex = k; break; }
+        }
+
+        int outAction;
+        switch (masked) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                outAction = newIndex < 0 ? MotionEvent.ACTION_MOVE
+                        : newIndex == 0 && n == 1 ? MotionEvent.ACTION_DOWN
+                        : MotionEvent.ACTION_POINTER_DOWN
+                                | (newIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                outAction = newIndex < 0 ? MotionEvent.ACTION_MOVE
+                        : n == 1 ? MotionEvent.ACTION_UP
+                        : MotionEvent.ACTION_POINTER_UP
+                                | (newIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                outAction = MotionEvent.ACTION_MOVE;
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                outAction = MotionEvent.ACTION_CANCEL;
+                break;
+            default:
+                return null;
+        }
+
+        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
+        for (int k = 0; k < n; k++) {
+            props[k] = new MotionEvent.PointerProperties();
+            src.getPointerProperties(keep[k], props[k]);
+            coords[k] = new MotionEvent.PointerCoords();
+            src.getPointerCoords(keep[k], coords[k]);
+        }
+        return MotionEvent.obtain(src.getDownTime(), src.getEventTime(), outAction, n,
+                props, coords, src.getMetaState(), src.getButtonState(),
+                src.getXPrecision(), src.getYPrecision(), src.getDeviceId(),
+                src.getEdgeFlags(), src.getSource(), src.getFlags());
+    }
+
+    /**
+     * Drops any HUD / keyboard gesture that was in flight when the immersive
+     * session ended. Without this the widget that was held would never see an
+     * ACTION_UP and would keep its modifier latched.
+     */
+    private void cancelOverlayTouches() {
+        grabbedOverlayPointers.clear();
+        if (mRoot == null)
+            return;
+        long now = SystemClock.uptimeMillis();
+        MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL,
+                0f, 0f, 0);
+        try {
+            mRoot.dispatchTouchEvent(cancel);
+        } finally {
+            cancel.recycle();
         }
     }
 
@@ -2184,6 +2543,9 @@ public class MainActivity extends Activity
     }
 
     private void releaseScreenTouches() {
+        // The grab flapped: both streams start over, so no pointer id from the
+        // previous one may keep a HUD control latched.
+        cancelOverlayTouches();
         forwardedTouches.releaseAll();
         if (screenTouchpad != null)
             screenTouchpad.cancel();
@@ -2240,6 +2602,8 @@ public class MainActivity extends Activity
         if (immersive != null)
             immersive.onSessionActiveChanged(active);
         if (active) {
+            immersiveHudTouch = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .getBoolean(ImmersiveMode.KEY_HUD_TOUCH, ImmersiveMode.DEFAULT_HUD_TOUCH);
             // The pointer is grabbed at the evdev level for the whole session, so
             // Android's capture is dropped for its duration. The user's "capture
             // external pointer" setting is left alone and takes effect again as
@@ -2251,6 +2615,9 @@ public class MainActivity extends Activity
                 OplusRefreshRateLease.release(this);
         } else {
             OplusRefreshRateLease.release(this);
+            // A control held through the grabbed stream will never get its
+            // ACTION_UP once Android owns the panel again.
+            cancelOverlayTouches();
             if (mRoot != null)
                 mRoot.post(this::syncPointerCapture);
         }
@@ -2389,8 +2756,7 @@ public class MainActivity extends Activity
         if (handlePointerCaptureBackKey(event))
             return true;
         // Mouse Back is already forwarded as BTN_SIDE from the MotionEvent path.
-        // Swallow Android's duplicate KEYCODE_BACK so it neither releases capture
-        // nor toggles the extra-keys bar.
+        // Swallow Android's duplicate KEYCODE_BACK so it does not release capture.
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
             return true;
         if (handleSoftKeyboardToggleKey(event))
@@ -2411,15 +2777,6 @@ public class MainActivity extends Activity
         if (event.getRepeatCount() > 0)
             return true;
 
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        // Back key toggles the extra-keys bar (without opening the soft keyboard)
-        // when enabled in settings. Leaves the default swallow behaviour otherwise.
-        if (keyCode == KeyEvent.KEYCODE_BACK
-                && prefs.getBoolean(KEY_BACK_OPENS_EXTRA_KEYS, true)) {
-            toggleExtraKeysBar();
-            return true;
-        }
-
         forwardKeyToLinux(event);
         return true;
     }
@@ -2430,6 +2787,10 @@ public class MainActivity extends Activity
     // unexpectedly finish via gesture navigation.
     @Override
     public void onBackPressed() {
+        if (mHudOverlay != null && mHudOverlay.isEditMode()) {
+            mHudOverlay.requestExit();
+            return;
+        }
         if (mRoot != null && mRoot.hasPointerCapture()) {
             releasePointerCapture(true);
             // There is no KeyEvent on this OEM path. Use a wildcard so a trailing
@@ -2452,8 +2813,8 @@ public class MainActivity extends Activity
 
         // Some tablet keyboard layouts expose their physical Esc key as
         // Android Back (Linux KEY_BACK / Browser Back).  Convert it only on
-        // the accessibility-interception path so the normal Android Back and
-        // extra-keys-bar behaviour is unchanged when interception is off.
+        // the accessibility-interception path so the normal Android Back
+        // behaviour is unchanged when interception is off.
         return forwardKeyToLinux(event, true);
     }
 
@@ -2825,16 +3186,4 @@ public class MainActivity extends Activity
         }
     }
     
-    private float[] convertMouseToNative(float x, float y) {
-        if (autoStretch) {
-            float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
-                           (float)customScreenWidth / viewWidth : 1.0f;
-            float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
-                           (float)customScreenHeight / viewHeight : 1.0f;
-            return new float[]{x * scaleX, y * scaleY};
-        } else {
-            return new float[]{x / surfaceScale, y / surfaceScale};
-        }
-    }
-
 }

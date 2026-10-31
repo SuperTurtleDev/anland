@@ -4,11 +4,11 @@
 
 This guide corresponds to the **Settings** screen in the Anland Android app. Here, "desktop" means the Linux desktop displayed by Anland, not the Android home screen.
 
-Changes are saved automatically; there is no Save button.
+Settings are saved automatically; HUD layouts must be saved in the editor.
 
 Some options apply only after the desktop reconnects. Returning from Settings to the Anland desktop normally triggers a reconnect.
 
-- Input, extra keys bar, and display layout settings take effect when you return to the desktop view.
+- Input, HUD, and display layout settings take effect when you return to the desktop view.
 - Connection, audio, and output resolution settings take effect on the next connection. Returning from Settings to the desktop normally triggers one.
 - Screen orientation takes effect after you exit and reopen Anland.
 
@@ -40,8 +40,8 @@ The version number at the bottom of the Settings home screen is only for identif
 <a id="raise-desktop"></a>
 #### Raise desktop when soft keyboard opens
 
-- **On:** the keyboard and extra keys bar occupy space at the bottom. The desktop shrinks and moves up, keeping the typing area visible.
-- **Off:** the desktop stays full size, with the keyboard and bar overlaid on top. They may cover content near the bottom.
+- **On:** the keyboard occupies space at the bottom. The desktop shrinks and moves up, keeping the typing area visible.
+- **Off:** the desktop stays full size, with the keyboard overlaid on top. It may cover content near the bottom.
 
 <a id="accessibility"></a>
 ### Accessibility Key Interception
@@ -56,84 +56,38 @@ It also converts Esc keys that some tablet keyboards report as Back or Browser B
 
 **Scope:** the service intercepts keys only while the Anland desktop window is in the foreground and has focus. It does not take over keys in other apps.
 
-<a id="extra-keys"></a>
-### Extra Keys Bar
+<a id="hud"></a>
+### Floating HUD controls
 
-The extra keys bar is a shortcut bar at the bottom of the desktop. Use it for terminals, editors, and desktop shortcuts when you do not have a full physical keyboard.
+The HUD provides configurable touch controls over the Linux desktop for shortcuts, mouse operations, and game controls. The former custom extra keys bar has been removed; HUD buttons can replace it. See the [HUD Controls User Guide](hud_guide.md) for each button and gesture.
 
-The default layout includes ESC, TAB, CTRL, ALT, arrow keys, HOME, END, PgUp, PgDn, a soft-keyboard button, and a Settings button.
+1. Open **Settings → Keyboard & Keys**, enable **Show floating HUD controls**, and tap **Edit floating control layout**. Opening the editor also enables the switch.
+2. The editor opens on a separate black canvas. Tap **ADD** to choose a control, drag it into position, and tap it to open its properties. Available properties depend on the control and include size, opacity, color, and actions; the panel also offers duplicate, delete, and position adjustments.
+3. Toggle grid snapping with **SNAP**. Use **LAYOUT** to apply a preset, copy the other orientation's regular HUD layout, or clear the active layout. Presets and clearing replace the current layout, so check before applying them.
+4. Tap **SAVE** to save the layout. If there are unsaved layout changes when you tap **EXIT** or Back, choose to save and exit, discard, or cancel.
 
-- Tap a modifier such as CTRL or ALT: it applies only to the next key.
-- Long-press a modifier: lock it; tap it again to unlock.
-- Hold a repeat-enabled arrow or page key: send repeated presses.
-- Swipe up on a key with a secondary action: show its popup, such as `|` from `-` or the floating virtual keyboard from `⌨`.
+Portrait and landscape layouts are saved separately. Rotate the device to edit each orientation, or use **LAYOUT** to copy from the other orientation. The HUD and keyboard layers also have separate layouts; check each orientation and layer.
 
-<a id="extra-keys-mode"></a>
-#### Extra keys bar mode
+#### Add and configure controls
 
-- **Always show:** keep the bar visible while the desktop is open.
+- **Standard Key Button:** assign a key, modifier, system action, or a combination of up to three keys. Configure a main action and a swipe-up popup action; enable **Repeat while held** when needed.
+- **Super Gesture Nub:** assign actions to different swipe directions.
+- **TrackPoint, trackpad, scroll bar, and D-pad:** control the pointer, scrolling, or direction; options depend on the control.
+- **Group container:** arrange several keys together and move them as a group. Add keys in its properties, choose **Move existing key in**, or drag a standalone key into it. Child keys can be detached or deleted in the properties panel.
 
-- **Never show:** hide the bar by default.
+On the desktop, tap or operate a control to send its configured action. Swipe up on a button with a popup action to trigger it. Tap a **KB** key assigned to the virtual keyboard to toggle the keyboard; hold it to hide the HUD and hold it again to restore it. The hidden state is remembered.
 
-- **Show with soft keyboard:** show the bar only while the Android system soft keyboard is visible.
+#### Keyboard layer
 
-When visible, the bar occupies space at the bottom of the desktop. If **Raise desktop when soft keyboard opens** is disabled, the bar overlays the desktop instead.
+In the editor, tap **Edit keyboard** to adjust the floating virtual keyboard and its dedicated HUD keyboard layer. This layer starts empty and accepts the same controls as the regular HUD. It is used while the virtual keyboard is visible; hiding the keyboard restores the regular HUD layer. Tap **Back to HUD** to return to the regular layer in the editor.
 
-<a id="back-extra-keys"></a>
-#### Back key quickly toggles extra keys bar
+Tap **Keyboard settings** on the keyboard layer to configure landscape split mode, handedness, appearance, and wing keys. In landscape split mode, drag the blank area near each half separately in the editor; its position is saved. Tap **HIDE** during use to dismiss the keyboard. The portrait floating keyboard can be moved using its drag handle.
 
-When enabled, pressing Android Back in the Anland desktop shows or hides the extra keys bar. This is a manual toggle, so it can temporarily show the bar even when **Never show** is selected.
+#### Export, import, and immersive mode
 
-If **Capture external pointer** is also enabled, the first Android Back press releases mouse/touchpad capture. Press Back again to toggle the bar.
+Under **Settings → Keyboard & Keys**, choose **Export HUD layout…** and use the Android file picker to save a JSON file. If there is no saved layout yet, save one in the editor first. **Import HUD layout…** replaces the current HUD profile and enables HUD controls; export a backup first if needed.
 
-<a id="custom-extra-keys"></a>
-### Custom Extra Keys Layout
-
-Edit the extra keys bar's JSON layout here. The editor shows **Valid layout** or an error below it.
-
-An invalid or empty layout falls back to the built-in default when you return to the desktop.
-
-<a id="load-default-layout"></a>
-#### Load default template
-
-Replace the editor contents with the built-in two-row default layout. You can then add, remove, or change keys.
-
-<a id="load-layout-file"></a>
-#### Load from file…
-
-Open the Android file picker, read a JSON or text file, and replace the editor contents with it. The file is validated and saved in the same way as a manual edit.
-
-<a id="layout-format"></a>
-#### Layout format
-
-The top-level `rows` value is an array of rows, and each row is an array of keys. This is a minimal example:
-
-```json
-{
-  "rows": [
-    [
-      {"label": "ESC", "type": "key", "code": 1},
-      {"label": "CTRL", "type": "modifier", "code": 29},
-      {"label": "⌨", "type": "keyboard", "popup": {"label": "VK", "type": "vkeyboard"}}
-    ]
-  ]
-}
-```
-
-| `type` | Action | Common fields |
-| --- | --- | --- |
-| `key` | Sends one key press and release to Linux | `code` is a Linux evdev key code; may include `"repeat": true` |
-| `text` | Enters text directly | `text`; defaults to `label` when omitted |
-| `modifier` | Toggles a modifier such as CTRL, ALT, or SHIFT | `code` is a Linux evdev key code |
-| `keyboard` | Shows or hides the Android system soft keyboard | None |
-| `vkeyboard` | Shows or hides Anland's floating virtual keyboard | None |
-| `settings` | Opens Anland Settings | None |
-
-Any key may include a `popup` object. Swiping up from that key performs the popup action.
-
-The `code` for `key` and `modifier` is a Linux evdev key code, not an Android `KEYCODE`.
-
-A green **Valid layout** status means the JSON structure can be loaded. Also confirm that the target Linux system supports those key codes.
+Under **Settings → Immersive Mode → Immersive Input**, **Touch HUD controls in immersive mode** is enabled by default. When disabled, touches go directly to the desktop while the touchscreen is grabbed and the HUD is display-only. If the HUD is missing or unresponsive, check the display switch, KB hidden state, current orientation and layer, and this immersive-mode option.
 
 <a id="immersive"></a>
 ## 🎮 Immersive Mode

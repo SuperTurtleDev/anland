@@ -4,16 +4,13 @@
     <!-- Titles / section headers -->
     <string name="settings_title">설정</string>
     <string name="section_virtual_keyboard">소프트 키보드 전환 키</string>
-    <string name="section_extra_keys">추가 키 바</string>
-    <string name="section_custom_layout">커스텀 추가 키 레이아웃</string>
-    <string name="section_touchpad">터치패드 설정</string>
     <string name="section_connection">연결</string>
     <string name="section_resolution">디스플레이 해상도</string>
     <string name="section_notification">설정 알림</string>
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ 뒤로</string>
     <string name="cat_keyboard_title">키보드 및 키</string>
-    <string name="cat_keyboard_subtitle">키 바인딩, 접근성 및 추가 키 바</string>
+    <string name="cat_keyboard_subtitle">키 바인딩, 접근성, 가상 키보드 및 HUD 컨트롤</string>
     <string name="cat_touchpad_title">터치패드 및 마우스</string>
     <string name="cat_touchpad_subtitle">터치패드 모드, 포인터 캡처 및 감도</string>
     <string name="cat_connection_subtitle">소켓, 루트, 마이크, 카메라 및 오디오 지연시간</string>
@@ -42,8 +39,9 @@
     <string name="section_immersive">몰입 모드</string>
     <string name="immersive_switch">몰입 모드 사용</string>
     <string name="immersive_hint">터치, 키보드, 마우스 입력을 안드로이드 제스처를 거치지 않고 리눅스 데스크톱으로 직접 전송합니다. 루트 권한이 필요합니다. 아래에서 전환 키를 설정하세요: 한 번 누르면 진입하고, 다시 누르면 종료됩니다. 앱을 전환해도 이 모드는 종료됩니다.</string>
+    <string name="immersive_hud_touch_switch">몰입 모드에서 HUD 컨트롤 터치</string>
+    <string name="immersive_hud_touch_hint">켜면 터치스크린이 점유된 동안에도 HUD 키, 방향키, 터치패드가 동작합니다. 끄면 모든 터치가 데스크톱으로 전달되어 HUD는 표시만 됩니다.</string>
     <string name="bind_immersive_key_button">몰입 모드 키 바인딩</string>
-    <string name="immersive_entering">몰입 모드: 모든 입력이 데스크톱으로 전달됩니다. %1$s 키를 다시 누르면 종료됩니다.</string>
     <string name="immersive_exited">몰입 모드 꺼짐</string>
     <string name="immersive_no_scancode">먼저 몰입 모드용 키를 바인딩하세요</string>
     <string name="immersive_failed">몰입 모드를 시작할 수 없습니다: 루트 권한이 거부되었거나 사용할 수 없습니다</string>
@@ -102,22 +100,7 @@
     <string name="accessibility_switch">접근성 키 가로채기</string>
     <string name="accessibility_hint">AccessibilityService를 통해 기능 키(Fn, F1-F12 등)를 가로채고, 태블릿 키보드의 뒤로가기/브라우저 뒤로가기를 ESC로 변환합니다. 외부 키보드의 Fn 조합이나 ESC가 데스크톱에 제대로 전달되지 않는다면 이 옵션을 활성화하세요. 시스템 설정 &gt; 접근성에서 접근성 권한을 한 번 허용해야 합니다.</string>
     <!-- Extra keys bar -->
-    <string name="extra_keys_mode_label">추가 키 바 모드</string>
-    <string name="extra_keys_mode_hint">ESC/TAB/CTRL/ALT/방향키/PgUp 등이 있는 Termux 스타일 하단 바를 언제 표시할지 설정합니다. 데스크톱 화면으로 다음에 돌아갈 때 적용됩니다.</string>
-    <string-array name="extra_keys_mode_options">
-        <item>항상 표시</item>
-        <item>표시 안 함</item>
-        <item>소프트 키보드와 함께 표시</item>
-    </string-array>
-    <string name="back_opens_switch">뒤로가기 키로 추가 키 바 빠르게 전환</string>
-    <string name="back_opens_hint">켜면, 추가 키 바가 숨겨진 상태에서 뒤로가기를 누르면 표시되고, 다시 누르면 숨겨집니다.</string>
     <!-- Custom layout editor -->
-    <string name="btn_load_default">기본 템플릿 불러오기</string>
-    <string name="btn_load_file">파일에서 불러오기…</string>
-    <string name="layout_hint">추가 키 바를 JSON으로 정의하세요: "rows"는 행의 배열이며, 각 행은 키의 배열입니다. 키는 "label"과 "type"(key/text/modifier/keyboard/vkeyboard/settings)을 가집니다. "key"/"modifier"는 evdev "code"를, "text"는 "text"를 사용합니다. 모든 키에 "repeat":true를 추가하거나 중첩된 "popup"을 넣을 수 있습니다. 잘못된 JSON은 기본값으로 대체됩니다. 데스크톱 화면으로 다음에 돌아갈 때 적용됩니다.</string>
-    <string name="layout_status_default">내장 기본 레이아웃 사용 중</string>
-    <string name="layout_status_valid">✓ 유효한 레이아웃</string>
-    <string name="layout_status_invalid">✗ %1$s</string>
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">터치패드 모드 (상대 좌표 이동)</string>
     <string name="touchpad_hint">켜짐: 손가락을 움직이면 마우스 커서가 이동합니다 (상대 좌표). 꺼짐: 터치한 위치가 화면 좌표에 그대로 대응됩니다 (절대 좌표).</string>
@@ -222,4 +205,181 @@
         <item>화면 × 0.5</item>
         <item>화면 × 0.25</item>
     </string-array>
+    <!-- Keyboard / HUD / immersive additions -->
+    <string name="landscape_split_keyboard">가로 모드에서 분할 아치 키보드 사용</string>
+    <string name="landscape_split_keyboard_hint">화면이 가로일 때 문자 키를 왼쪽과 오른쪽 엄지 영역으로 나눕니다.</string>
+    <string name="customize_keyboard_wings">엄지 윙 사용자 지정…</string>
+    <string name="keyboard_layer_to_keyboard">키보드 편집</string>
+    <string name="keyboard_layer_to_hud">HUD로 돌아가기</string>
+    <string name="keyboard_layer_settings">키보드 설정</string>
+    <string name="keyboard_wings_title">엄지 윙 사용자 지정</string>
+    <string name="keyboard_wings_left">왼쪽 윙</string>
+    <string name="keyboard_wings_right">오른쪽 윙</string>
+    <string name="keyboard_wings_picker_title">키 동작 선택</string>
+    <string name="keyboard_wings_use_default">기본 키 사용</string>
+    <string name="keyboard_wings_reset">기본값으로 재설정</string>
+    <string name="keyboard_wings_done">완료</string>
+    <string name="keyboard_handedness">키보드 왼손/오른손 설정</string>
+    <string-array name="keyboard_handedness_options">
+        <item>왼손잡이</item>
+        <item>오른손잡이</item>
+    </string-array>
+    <string name="keyboard_theme">키 모양</string>
+    <string-array name="keyboard_theme_options">
+        <item>채워진</item>
+        <item>테두리</item>
+        <item>투명</item>
+    </string-array>
+    <string name="keyboard_haptic_feedback">가상 키를 누를 때 진동</string>
+    <string name="hud_controls_switch">플로팅 HUD 컨트롤 표시</string>
+    <string name="hud_controls_hint">편집 가능한 터치패드, 방향 패드, 스틱 및 단축키 컨트롤을 표시합니다.</string>
+    <string name="hud_edit_layout">플로팅 컨트롤 레이아웃 편집</string>
+    <string name="hud_export_layout">HUD 레이아웃 내보내기…</string>
+    <string name="hud_import_layout">HUD 레이아웃 가져오기…</string>
+    <string name="hud_export_done">HUD 레이아웃을 내보냈습니다</string>
+    <string name="hud_export_failed">HUD 레이아웃을 내보낼 수 없습니다</string>
+    <string name="hud_export_empty">내보낼 HUD 레이아웃이 없습니다</string>
+    <string name="hud_import_done">HUD 레이아웃을 가져왔습니다</string>
+    <string name="hud_import_failed">해당 레이아웃 파일을 가져올 수 없습니다</string>
+    <string name="hud_overlay_saved">레이아웃 저장됨</string>
+    <string name="hud_overlay_hidden_on">HUD 숨김 — KB 키를 길게 눌러 복원하세요</string>
+    <string name="hud_overlay_hidden_off">HUD 복원됨</string>
+    <string name="hud_overlay_save_error">레이아웃 저장 오류</string>
+    <string name="hud_overlay_changes_discarded">변경 사항 삭제됨</string>
+    <string name="hud_overlay_exit_title">HUD 편집기 종료</string>
+    <string name="hud_overlay_exit_message">종료하기 전에 레이아웃 변경 사항을 저장할까요?</string>
+    <string name="hud_overlay_save_and_exit">저장 후 종료</string>
+    <string name="hud_overlay_discard">삭제</string>
+    <string name="hud_overlay_cancel">취소</string>
+    <string name="hud_overlay_orientation_title">화면 방향 안내</string>
+    <string name="hud_overlay_orientation_message">세로 및 가로 레이아웃은 별도로 저장됩니다.\n\n기기를 회전하여 각 방향의 버튼과 독 위치를 따로 사용자 지정하세요.</string>
+    <string name="hud_overlay_got_it">확인</string>
+    <string name="hud_overlay_snap_on">그리드에 맞추기: 켜짐</string>
+    <string name="hud_overlay_snap_off">그리드에 맞추기: 꺼짐</string>
+    <string name="hud_overlay_copy_portrait_here">세로 레이아웃을 여기에 복사</string>
+    <string name="hud_overlay_copy_landscape_here">가로 레이아웃을 여기에 복사</string>
+    <string name="hud_overlay_productivity_preset">데스크톱 / 생산성 프리셋 (10% 여백)</string>
+    <string name="hud_overlay_user_portrait_hotkeys_layout">사용자 세로 단축키 레이아웃</string>
+    <string name="hud_overlay_clear_active_layout">현재 레이아웃 지우기</string>
+    <string name="hud_overlay_layout_options_title">레이아웃 옵션 및 프리셋</string>
+    <string name="hud_overlay_copied">레이아웃 복사됨</string>
+    <string name="hud_overlay_productivity_preset_loaded">데스크톱 / 생산성 프리셋 (10% 여백) 불러옴</string>
+    <string name="hud_overlay_user_portrait_layout_loaded">사용자 세로 레이아웃 불러옴</string>
+    <string name="hud_overlay_layout_cleared">레이아웃 지워짐</string>
+    <string name="hud_overlay_add_standard_key_button">표준 키 버튼</string>
+    <string name="hud_overlay_add_super_gesture_nub">Super 제스처 넙</string>
+    <string name="hud_overlay_add_trackpoint">TrackPoint (마우스 / 스크롤)</string>
+    <string name="hud_overlay_add_steam_deck_trackpad">Steam Deck 트랙패드 (터치패드 / 마우스)</string>
+    <string name="hud_overlay_add_scroll_bar">스크롤 바 (세로 / 가로)</string>
+    <string name="hud_overlay_add_dpad">방향 패드 (슬라이딩 십자)</string>
+    <string name="hud_overlay_add_group">그룹 컨테이너</string>
+    <string name="hud_widget_group">그룹</string>
+    <string name="hud_group_children">하위 키</string>
+    <string name="hud_group_add_key">그룹에 키 추가</string>
+    <string name="hud_group_empty">이 그룹에는 아직 키가 없습니다</string>
+    <string name="hud_group_add_existing">기존 키 가져오기</string>
+    <string name="hud_group_detach">빼기</string>
+    <string name="hud_group_drop_hint">여기에 키를 놓으세요</string>
+    <string name="hud_group_moved_in">키를 그룹으로 옮겼습니다</string>
+    <string name="hud_group_detached">키를 그룹에서 빼냈습니다</string>
+    <string name="hud_group_no_candidates">화면에 옮길 독립 키가 없습니다</string>
+    <string name="hud_group_move_in_title">그룹으로 키 옮기기</string>
+    <string name="hud_overlay_add_widget_title">위젯 추가</string>
+    <string name="hud_overlay_daemon_connected">데몬 연결됨</string>
+    <string name="hud_overlay_daemon_offline">데몬 오프라인</string>
+    <string name="hud_overlay_toolbar_save">저장</string>
+    <string name="hud_overlay_toolbar_add">추가</string>
+    <string name="hud_overlay_toolbar_snap">맞춤</string>
+    <string name="hud_overlay_toolbar_layout">레이아웃</string>
+    <string name="hud_overlay_toolbar_exit">종료</string>
+    <string name="hud_overlay_label_key">키</string>
+    <string name="hud_overlay_label_super">SUPER</string>
+    <string name="hud_overlay_label_mouse">마우스</string>
+    <string name="hud_overlay_label_touchpad">터치패드</string>
+    <string name="hud_overlay_label_scroll">스크롤</string>
+    <string name="hud_overlay_label_dpad">방향 패드</string>
+    <string name="immersive_oplus_refresh_rate_switch">OnePlus 주사율 고정 유지</string>
+    <string name="immersive_oplus_refresh_rate_hint">일부 OnePlus 기기에서 입력 이벤트가 수신되지 않을 때 주사율이 떨어지는 것을 방지합니다.</string>
+    <string name="immersive_controller_failed">몰입 모드를 시작할 수 없습니다: Android 컨트롤러 억제에 실패하여 입력 인수를 취소했습니다</string>
+    <string name="immersive_controller_interrupted">몰입 모드가 종료되었습니다: Android 컨트롤러 억제가 해제되어 입력 인수가 풀렸습니다</string>
+    <string name="device_class_gamepad">게임패드 / 조이스틱</string>
+    <string name="stylus_button_right_click_switch">S Pen 측면 버튼으로 오른쪽 클릭</string>
+    <string name="stylus_hover_scroll_switch">S Pen 버튼을 누른 채 호버하면 스크롤</string>
+    <string name="stylus_hover_scroll_hint">S Pen 측면 버튼을 누른 채 호버 중인 펜을 움직이세요. 세로 움직임이 스크롤을 제어하며, 대각선 움직임의 세로 성분도 포함됩니다.</string>
+    <string name="stylus_hover_scroll_speed_label">S Pen 호버 스크롤 속도</string>
+    <string name="pad_tap">외부 터치패드: 합성 클릭</string>
+    <string name="pad_tip">캡처된 외부 터치패드와 몰입 모드 외부 터치패드에서 한 손가락/두 손가락 탭과 길게 눌러 드래그를 제어합니다. 비활성화해도 물리 버튼은 계속 작동합니다. 화면 터치패드는 변경되지 않습니다.</string>
+    <string name="pad_guard">스크롤 후 %1$d ms 동안 외부 터치패드 탭 무시 (0 = 끔)</string>
+    <string name="pad_debug">터치패드 디버그 로그 (AnlandTouchpad)</string>
+    <string name="hud_delete_short">삭제</string>
+    <string name="hud_duplicate_short">복제</string>
+    <string name="hud_delete_confirm">확인?</string>
+    <string name="hud_title_button_properties">버튼 속성</string>
+    <string name="hud_properties_title">%1$s 속성</string>
+    <string name="hud_dock_button_properties">독 버튼 속성</string>
+    <string name="hud_widget_button">버튼</string>
+    <string name="hud_widget_super_gesture">SUPER 제스처</string>
+    <string name="hud_widget_trackpoint">트랙포인트</string>
+    <string name="hud_widget_touchpad">터치패드</string>
+    <string name="hud_widget_scrollbar">스크롤바</string>
+    <string name="hud_widget_dpad">방향 패드</string>
+    <string name="hud_display_label">표시 이름</string>
+    <string name="hud_width_dp">너비 (dp):</string>
+    <string name="hud_height_dp">높이 (dp):</string>
+    <string name="hud_corner_dp">모서리 (dp):</string>
+    <string name="hud_opacity_percent">불투명도 (%):</string>
+    <string name="hud_action_mapping">동작 매핑:</string>
+    <string name="hud_main_action">주 동작</string>
+    <string name="hud_popup_swipe_up">팝업 (위로 스와이프)</string>
+    <string name="hud_swipe_actions">방향 동작</string>
+    <string name="hud_direction_left">왼쪽</string>
+    <string name="hud_direction_right">오른쪽</string>
+    <string name="hud_direction_up">위</string>
+    <string name="hud_direction_down">아래</string>
+    <string name="hud_trackpoint_mode">TrackPoint 모드:</string>
+    <string name="hud_mode">모드</string>
+    <string name="hud_mode_mouse">마우스</string>
+    <string name="hud_mode_scroll">스크롤</string>
+    <string name="hud_orientation_vertical">세로</string>
+    <string name="hud_orientation_horizontal">가로</string>
+    <string name="hud_sensitivity_x10">감도 (x10):</string>
+    <string name="hud_deadzone_dp">데드존 (dp):</string>
+    <string name="hud_color_theme">색상 테마:</string>
+    <string name="hud_haptic_feedback">햅틱 피드백</string>
+    <string name="hud_hold_to_repeat">누르고 있으면 연속 입력</string>
+    <string name="hud_nudge_position">위치 미세 조정:</string>
+    <string name="hud_unassigned">할당되지 않음</string>
+    <string name="hud_text_action">텍스트: %1$s</string>
+    <string name="hud_system_action">시스템: %1$s</string>
+    <string name="hud_key_code">키 %1$d</string>
+    <string-array name="hud_color_theme_names">
+        <item>슬레이트</item>
+        <item>시안</item>
+        <item>크림슨</item>
+        <item>앰버</item>
+        <item>에메랄드</item>
+        <item>스텔스</item>
+    </string-array>
+    <string name="hud_picker_back">뒤로</string>
+    <string name="hud_picker_title">키 / 동작 선택</string>
+    <string name="hud_picker_search">키 검색…</string>
+    <string name="hud_tab_keys">키</string>
+    <string name="hud_tab_mods_system">수정자 및 시스템</string>
+    <string name="hud_tab_combo">조합</string>
+    <string name="hud_none">없음</string>
+    <string name="hud_system_soft_keyboard">소프트 키보드</string>
+    <string name="hud_system_virtual_keyboard">가상 키보드</string>
+    <string name="hud_system_settings">설정</string>
+    <string name="hud_system_mouse_left">마우스 왼쪽</string>
+    <string name="hud_system_mouse_right">마우스 오른쪽</string>
+    <string name="hud_system_mouse_middle">마우스 가운데</string>
+    <string name="hud_system_scroll_up">위로 스크롤</string>
+    <string name="hud_system_scroll_down">아래로 스크롤</string>
+    <string name="hud_system_steam_deck_mode">Steam Deck 모드</string>
+    <string name="hud_system_exit_deck_mode">Deck 모드 종료</string>
+    <string name="hud_combo_slot">슬롯 %1$d</string>
+    <string name="hud_combo_builder_hint">키를 최대 3개까지 선택하세요. 활성 슬롯이 강조 표시되며, 키를 선택하면 채워집니다.</string>
+    <string name="hud_combo_clear_all">모두 지우기</string>
+    <string name="hud_combo_apply">조합 적용</string>
+    <string name="hud_combo_empty">(비어 있음)</string>
 </resources>

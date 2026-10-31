@@ -4,16 +4,13 @@
     <!-- Titles / section headers -->
     <string name="settings_title">設定</string>
     <string name="section_virtual_keyboard">虛擬鍵盤切換鍵</string>
-    <string name="section_extra_keys">擴充按鍵列</string>
-    <string name="section_custom_layout">自訂擴充按鍵配置</string>
-    <string name="section_touchpad">觸控板設定</string>
     <string name="section_connection">連線</string>
     <string name="section_resolution">顯示解析度</string>
     <string name="section_notification">設定通知</string>
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ 返回</string>
     <string name="cat_keyboard_title">鍵盤與按鍵</string>
-    <string name="cat_keyboard_subtitle">按鍵綁定、無障礙與擴充按鍵列</string>
+    <string name="cat_keyboard_subtitle">按鍵綁定、無障礙、虛擬鍵盤與 HUD 控制項</string>
     <string name="cat_touchpad_title">觸控板與滑鼠</string>
     <string name="cat_touchpad_subtitle">觸控板模式、指標擷取與靈敏度</string>
     <string name="cat_connection_subtitle">socket、root、麥克風、相機與音訊延遲</string>
@@ -42,8 +39,9 @@
     <string name="section_immersive">沉浸模式</string>
     <string name="immersive_switch">啟用沉浸模式</string>
     <string name="immersive_hint">將觸控、鍵盤和滑鼠等輸入直接交給 Linux 桌面，避免 Android 系統手勢干擾。需要 root。在下方設定切換按鍵：按一次進入，再按一次離開；切換到其他應用程式時會自動離開。</string>
+    <string name="immersive_hud_touch_switch">沉浸模式下可觸控 HUD 控制項</string>
+    <string name="immersive_hud_touch_hint">開啟後，觸控螢幕被獨佔期間 HUD 按鍵、方向鍵、觸控板仍可使用；關閉則所有觸控直接交給桌面，HUD 只顯示不回應。</string>
     <string name="bind_immersive_key_button">綁定沉浸模式按鍵</string>
-    <string name="immersive_entering">已進入沉浸模式：所有輸入交給桌面，再按一次 %1$s 離開</string>
     <string name="immersive_exited">已離開沉浸模式</string>
     <string name="immersive_no_scancode">請先為沉浸模式綁定按鍵</string>
     <string name="immersive_failed">無法進入沉浸模式：root 遭拒或無法使用</string>
@@ -104,22 +102,7 @@
     <string name="accessibility_switch">無障礙按鍵攔截</string>
     <string name="accessibility_hint">透過無障礙服務攔截功能鍵（Fn、F1-F12 等），並將平板鍵盤回報的返回／瀏覽器上一頁鍵轉換為 ESC。如果外接鍵盤的 Fn 組合鍵或 ESC 無法正確傳到桌面，請啟用此項。需要在系統 設定 &gt; 無障礙 中授予無障礙權限（僅需一次）。</string>
     <!-- Extra keys bar -->
-    <string name="extra_keys_mode_label">擴充按鍵列模式</string>
-    <string name="extra_keys_mode_hint">控制何時顯示類似 Termux 的底部按鍵列（含 ESC/TAB/CTRL/ALT/方向鍵/PgUp 等）。下次返回桌面檢視時生效。</string>
-    <string-array name="extra_keys_mode_options">
-        <item>始終顯示</item>
-        <item>不顯示</item>
-        <item>隨軟鍵盤顯示</item>
-    </string-array>
-    <string name="back_opens_switch">返回鍵快速切換擴充按鍵列</string>
-    <string name="back_opens_hint">開啟時，在擴充按鍵列隱藏狀態下按返回鍵會顯示它，再次按返回鍵則隱藏。</string>
     <!-- Custom layout editor -->
-    <string name="btn_load_default">載入預設範本</string>
-    <string name="btn_load_file">從檔案載入…</string>
-    <string name="layout_hint">以 JSON 定義擴充按鍵列：\"rows\" 是列的陣列，每列又是按鍵的陣列。每個按鍵都有 \"label\" 和 \"type\"（key/text/modifier/keyboard/vkeyboard/settings）。\"key\"/\"modifier\" 需要 evdev 的 \"code\"；\"text\" 需要 \"text\"；任意按鍵可加入 \"repeat\":true 或巢狀的 \"popup\"。無效的 JSON 會回退到預設配置。下次返回桌面時生效。</string>
-    <string name="layout_status_default">正在使用內建預設配置</string>
-    <string name="layout_status_valid">✓ 配置有效</string>
-    <string name="layout_status_invalid">✗ %1$s</string>
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">觸控板模式（相對移動）</string>
     <string name="touchpad_hint">開啟：手指滑動移動滑鼠游標（相對）。關閉：觸控直接對應到螢幕（絕對）。</string>
@@ -208,4 +191,195 @@
         <item>螢幕 × 0.5</item>
         <item>螢幕 × 0.25</item>
     </string-array>
+    <!-- Keyboard / HUD / immersive additions -->
+    <string name="landscape_split_keyboard">橫向時使用分離弧形鍵盤</string>
+    <string name="landscape_split_keyboard_hint">螢幕為橫向時，將字母鍵分到左右拇指區域。</string>
+    <string name="customize_keyboard_wings">自訂拇指側鍵…</string>
+    <string name="keyboard_layer_to_keyboard">編輯鍵盤</string>
+    <string name="keyboard_layer_to_hud">返回 HUD</string>
+    <string name="keyboard_layer_settings">鍵盤設定</string>
+    <string name="keyboard_wings_title">自訂拇指側鍵</string>
+    <string name="keyboard_wings_left">左側鍵</string>
+    <string name="keyboard_wings_right">右側鍵</string>
+    <string name="keyboard_wings_picker_title">選擇按鍵動作</string>
+    <string name="keyboard_wings_use_default">使用預設按鍵</string>
+    <string name="keyboard_wings_reset">重設為預設</string>
+    <string name="keyboard_wings_done">完成</string>
+    <string name="keyboard_handedness">鍵盤慣用手</string>
+    <string-array name="keyboard_handedness_options">
+        <item>左手</item>
+        <item>右手</item>
+    </string-array>
+    <string name="keyboard_theme">按鍵外觀</string>
+    <string-array name="keyboard_theme_options">
+        <item>填滿</item>
+        <item>描邊</item>
+        <item>透明</item>
+    </string-array>
+    <string name="keyboard_haptic_feedback">按下虛擬按鍵時震動</string>
+    <string name="hud_controls_switch">顯示浮動 HUD 控制項</string>
+    <string name="hud_controls_hint">顯示可編輯的觸控板、方向鍵、搖桿與快速鍵控制項。</string>
+    <string name="hud_edit_layout">編輯浮動控制項配置</string>
+    <string name="hud_export_layout">匯出 HUD 配置…</string>
+    <string name="hud_import_layout">匯入 HUD 配置…</string>
+    <string name="hud_export_done">已匯出 HUD 配置</string>
+    <string name="hud_export_failed">無法匯出 HUD 配置</string>
+    <string name="hud_export_empty">還沒有可匯出的 HUD 配置</string>
+    <string name="hud_import_done">已匯入 HUD 配置</string>
+    <string name="hud_import_failed">無法匯入該配置檔案</string>
+    <string name="hud_overlay_saved">配置已儲存</string>
+    <string name="hud_overlay_hidden_on">HUD 已隱藏，長按 KB 鍵可恢復</string>
+    <string name="hud_overlay_hidden_off">HUD 已恢復</string>
+    <string name="hud_overlay_save_error">儲存配置時發生錯誤</string>
+    <string name="hud_overlay_changes_discarded">已捨棄變更</string>
+    <string name="hud_overlay_exit_title">離開 HUD 編輯器</string>
+    <string name="hud_overlay_exit_message">離開前要儲存配置變更嗎？</string>
+    <string name="hud_overlay_save_and_exit">儲存並離開</string>
+    <string name="hud_overlay_discard">捨棄</string>
+    <string name="hud_overlay_cancel">取消</string>
+    <string name="hud_overlay_orientation_title">方向提醒</string>
+    <string name="hud_overlay_orientation_message">直向與橫向配置會分別儲存。\n\n請旋轉裝置，分別自訂各方向的按鈕與停駐位置。</string>
+    <string name="hud_overlay_got_it">知道了</string>
+    <string name="hud_overlay_snap_on">對齊格線：開</string>
+    <string name="hud_overlay_snap_off">對齊格線：關</string>
+    <string name="hud_overlay_copy_portrait_here">將直向配置複製到此處</string>
+    <string name="hud_overlay_copy_landscape_here">將橫向配置複製到此處</string>
+    <string name="hud_overlay_productivity_preset">桌面 / 生產力預設（10% 邊距）</string>
+    <string name="hud_overlay_user_portrait_hotkeys_layout">使用者直向快速鍵配置</string>
+    <string name="hud_overlay_clear_active_layout">清除目前配置</string>
+    <string name="hud_overlay_layout_options_title">配置選項與預設</string>
+    <string name="hud_overlay_copied">配置已複製</string>
+    <string name="hud_overlay_productivity_preset_loaded">已載入桌面 / 生產力預設（10% 邊距）</string>
+    <string name="hud_overlay_user_portrait_layout_loaded">已載入使用者直向配置</string>
+    <string name="hud_overlay_layout_cleared">配置已清除</string>
+    <string name="hud_overlay_add_standard_key_button">標準按鍵按鈕</string>
+    <string name="hud_overlay_add_super_gesture_nub">Super 手勢區</string>
+    <string name="hud_overlay_add_trackpoint">TrackPoint（滑鼠 / 捲動）</string>
+    <string name="hud_overlay_add_steam_deck_trackpad">Steam Deck 觸控板（觸控板 / 滑鼠）</string>
+    <string name="hud_overlay_add_scroll_bar">捲軸（垂直 / 水平）</string>
+    <string name="hud_overlay_add_dpad">方向鍵（滑動十字）</string>
+    <string name="hud_overlay_add_group">聚合容器</string>
+    <string name="hud_widget_group">聚合</string>
+    <string name="hud_group_children">子按鍵</string>
+    <string name="hud_group_add_key">新增按鍵到聚合</string>
+    <string name="hud_group_empty">這個聚合裡還沒有按鍵</string>
+    <string name="hud_group_add_existing">移入現有按鍵</string>
+    <string name="hud_group_detach">移出</string>
+    <string name="hud_group_drop_hint">把按鍵拖到這裡</string>
+    <string name="hud_group_moved_in">已移入聚合</string>
+    <string name="hud_group_detached">已移出聚合</string>
+    <string name="hud_group_no_candidates">螢幕上沒有可移入的獨立按鍵</string>
+    <string name="hud_group_move_in_title">移入聚合</string>
+    <string name="hud_overlay_add_widget_title">新增小工具</string>
+    <string name="hud_overlay_daemon_connected">守護程序已連線</string>
+    <string name="hud_overlay_daemon_offline">守護程序離線</string>
+    <string name="hud_overlay_toolbar_save">儲存</string>
+    <string name="hud_overlay_toolbar_add">新增</string>
+    <string name="hud_overlay_toolbar_snap">對齊</string>
+    <string name="hud_overlay_toolbar_layout">配置</string>
+    <string name="hud_overlay_toolbar_exit">離開</string>
+    <string name="hud_overlay_label_key">按鍵</string>
+    <string name="hud_overlay_label_super">SUPER</string>
+    <string name="hud_overlay_label_mouse">滑鼠</string>
+    <string name="hud_overlay_label_touchpad">觸控板</string>
+    <string name="hud_overlay_label_scroll">捲動</string>
+    <string name="hud_overlay_label_dpad">方向鍵</string>
+    <string name="immersive_oplus_refresh_rate_switch">固定 OnePlus 螢幕更新率</string>
+    <string name="immersive_oplus_refresh_rate_hint">避免部分 OnePlus 裝置在未收到輸入事件時更新率下降。</string>
+    <string name="device_class_gamepad">手把 / 搖桿</string>
+    <string name="stylus_button_right_click_switch">S Pen 側鍵用於右鍵點擊</string>
+    <string name="stylus_hover_scroll_switch">按住 S Pen 側鍵懸浮時捲動</string>
+    <string name="stylus_hover_scroll_hint">按住 S Pen 側鍵並移動懸浮的筆。垂直移動會控制捲動，包含斜向移動中的垂直分量。</string>
+    <string name="stylus_hover_scroll_speed_label">S Pen 懸浮捲動速度</string>
+    <string name="scroll_reverse_switch">反轉捲動方向</string>
+    <string name="scroll_reverse_hint">開：內容跟隨手指移動（「自然」捲動）。適用於螢幕觸控板與實體觸控板的雙指捲動。</string>
+    <string name="scroll_speed_label">雙指捲動速度</string>
+    <string name="scroll_speed_value">%1$.2f</string>
+    <string name="threshold_factor_value">%1$.2f× 觸控容差</string>
+    <string name="scroll_threshold_label">捲動偵測門檻</string>
+    <string name="scroll_threshold_hint">手指必須移動多遠才算移動。若捏合手勢被誤判為捲動，請調低此值。</string>
+    <string name="move_threshold_label">手勢判定門檻</string>
+    <string name="move_threshold_hint">主要手指必須移動多遠，才會判定模糊的雙指手勢。若捲動反應遲鈍，請調低此值。</string>
+    <string name="gesture_scale_label">手勢幅度</string>
+    <string name="gesture_scale_value">%1$.0f px</string>
+    <string name="gesture_scale_hint">以觸控形式轉送的手勢（捏合、三指以上）會對應到以指標為中心的這個大小方形區域。數值越大，相同的手指移動會走得越遠。</string>
+    <string name="disable_multi_finger_switch">停用捏合與多指手勢</string>
+    <string name="disable_multi_finger_hint">開：雙指捏合縮放與三指以上手勢會被攔下，不會送到桌面；雙指捲動與雙指右鍵仍可運作。關：捏合與多指手勢會以觸控形式轉送到桌面。</string>
+    <string name="auto_stretch_switch">自動延展顯示</string>
+    <string name="auto_stretch_hint">開：顯示畫面填滿螢幕（必要時延展）。關：維持自訂解析度的長寬比，並以黑邊填補（letterbox）。輸入座標會自動對應。</string>
+    <string name="pad_tap">外接觸控板：合成點擊</string>
+    <string name="pad_tip">控制已擷取的外接觸控板與沉浸模式外接觸控板的單指、雙指點擊及長按拖曳。停用後實體按鍵仍可運作。螢幕上的觸控板不受影響。</string>
+    <string name="pad_guard">捲動後 %1$d 毫秒內忽略外接觸控板點擊（0 = 關閉）</string>
+    <string name="pad_debug">觸控板除錯記錄（AnlandTouchpad）</string>
+    <string name="hud_delete_short">刪除</string>
+    <string name="hud_duplicate_short">複製</string>
+    <string name="hud_delete_confirm">確認？</string>
+    <string name="hud_title_button_properties">按鈕屬性</string>
+    <string name="hud_properties_title">%1$s 屬性</string>
+    <string name="hud_dock_button_properties">停駐按鈕屬性</string>
+    <string name="hud_widget_button">按鈕</string>
+    <string name="hud_widget_super_gesture">SUPER 手勢</string>
+    <string name="hud_widget_trackpoint">軌跡點</string>
+    <string name="hud_widget_touchpad">觸控板</string>
+    <string name="hud_widget_scrollbar">捲軸</string>
+    <string name="hud_widget_dpad">方向鍵</string>
+    <string name="hud_display_label">顯示標籤</string>
+    <string name="hud_width_dp">寬度 (dp)：</string>
+    <string name="hud_height_dp">高度 (dp)：</string>
+    <string name="hud_corner_dp">圓角 (dp)：</string>
+    <string name="hud_opacity_percent">不透明度 (%)：</string>
+    <string name="hud_action_mapping">動作對應：</string>
+    <string name="hud_main_action">主要動作</string>
+    <string name="hud_popup_swipe_up">彈出選單（向上滑動）</string>
+    <string name="hud_swipe_actions">方向動作</string>
+    <string name="hud_direction_left">左</string>
+    <string name="hud_direction_right">右</string>
+    <string name="hud_direction_up">上</string>
+    <string name="hud_direction_down">下</string>
+    <string name="hud_trackpoint_mode">TrackPoint 模式：</string>
+    <string name="hud_mode">模式</string>
+    <string name="hud_mode_mouse">滑鼠</string>
+    <string name="hud_mode_scroll">捲動</string>
+    <string name="hud_orientation_vertical">垂直</string>
+    <string name="hud_orientation_horizontal">水平</string>
+    <string name="hud_sensitivity_x10">靈敏度 (x10)：</string>
+    <string name="hud_deadzone_dp">死區 (dp)：</string>
+    <string name="hud_color_theme">色彩主題：</string>
+    <string name="hud_haptic_feedback">觸覺回饋</string>
+    <string name="hud_hold_to_repeat">按住時連續送出</string>
+    <string name="hud_nudge_position">微調位置：</string>
+    <string name="hud_unassigned">未指派</string>
+    <string name="hud_text_action">文字：%1$s</string>
+    <string name="hud_system_action">系統：%1$s</string>
+    <string name="hud_key_code">按鍵 %1$d</string>
+    <string-array name="hud_color_theme_names">
+        <item>石板</item>
+        <item>青色</item>
+        <item>深紅</item>
+        <item>琥珀</item>
+        <item>翡翠</item>
+        <item>隱匿</item>
+    </string-array>
+    <string name="hud_picker_back">返回</string>
+    <string name="hud_picker_title">選擇按鍵 / 動作</string>
+    <string name="hud_picker_search">搜尋按鍵…</string>
+    <string name="hud_tab_keys">按鍵</string>
+    <string name="hud_tab_mods_system">修飾鍵與系統</string>
+    <string name="hud_tab_combo">組合</string>
+    <string name="hud_none">無</string>
+    <string name="hud_system_soft_keyboard">系統軟體鍵盤</string>
+    <string name="hud_system_virtual_keyboard">虛擬鍵盤</string>
+    <string name="hud_system_settings">設定</string>
+    <string name="hud_system_mouse_left">滑鼠左鍵</string>
+    <string name="hud_system_mouse_right">滑鼠右鍵</string>
+    <string name="hud_system_mouse_middle">滑鼠中鍵</string>
+    <string name="hud_system_scroll_up">向上捲動</string>
+    <string name="hud_system_scroll_down">向下捲動</string>
+    <string name="hud_system_steam_deck_mode">Steam Deck 模式</string>
+    <string name="hud_system_exit_deck_mode">離開 Deck 模式</string>
+    <string name="hud_combo_slot">插槽 %1$d</string>
+    <string name="hud_combo_builder_hint">最多選擇 3 個按鍵。使用中的插槽會醒目顯示；選擇按鍵即可填入。</string>
+    <string name="hud_combo_clear_all">全部清除</string>
+    <string name="hud_combo_apply">套用組合</string>
+    <string name="hud_combo_empty">（空）</string>
 </resources>

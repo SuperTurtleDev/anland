@@ -5,9 +5,6 @@
     <!-- Titles / section headers -->
     <string name="settings_title">Configurações</string>
     <string name="section_virtual_keyboard">Tecla de Alternância do Teclado Virtual</string>
-    <string name="section_extra_keys">Barra de Teclas Extras</string>
-    <string name="section_custom_layout">Layout Customizado de Teclas Extras</string>
-    <string name="section_touchpad">Configurações de Touchpad</string>
     <string name="section_connection">Conexão</string>
     <string name="section_resolution">Resolução da Tela</string>
     <string name="section_notification">Configuração da Notificação</string>
@@ -15,7 +12,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ Voltar</string>
     <string name="cat_keyboard_title">Teclado e Teclas</string>
-    <string name="cat_keyboard_subtitle">Mapeamento de teclas, acessibilidade e barra de teclas extras</string>
+    <string name="cat_keyboard_subtitle">Mapeamento de teclas, acessibilidade, teclado virtual e controles HUD</string>
     <string name="cat_touchpad_title">Touchpad e Mouse</string>
     <string name="cat_touchpad_subtitle">Modo touchpad, captura de ponteiro e sensibilidade</string>
     <string name="cat_connection_subtitle">Socket, root, mic, câmera e latência do áudio</string>
@@ -47,8 +44,9 @@
     <string name="section_immersive">Modo Imersivo</string>
     <string name="immersive_switch">Ativar Modo Imersivo</string>
     <string name="immersive_hint">Envia toque, teclado e mouse diretamente para o desktop Linux, mantendo os gestos do Android fora do caminho. Precisa de root. Defina uma tecla de alternância abaixo: pressione uma vez para entrar e novamente para sair. O modo também termina quando você troca de app.</string>
+    <string name="immersive_hud_touch_switch">Tocar controles da HUD no modo imersivo</string>
+    <string name="immersive_hud_touch_hint">Mantém as teclas, o direcional e o touchpad da HUD funcionando enquanto a tela está capturada. Desligue para enviar todo toque direto ao desktop, deixando a HUD apenas visível.</string>
     <string name="bind_immersive_key_button">Mapear Tecla do Modo Imersivo</string>
-    <string name="immersive_entering">Modo imersivo: toda a entrada vai para o desktop. Pressione %1$s novamente para sair.</string>
     <string name="immersive_exited">Modo imersivo desativado</string>
     <string name="immersive_no_scancode">Mapeie uma tecla para o modo imersivo primeiro</string>
     <string name="immersive_failed">Não foi possível iniciar o modo imersivo: root foi negado ou está indisponível</string>
@@ -61,23 +59,8 @@
     <string name="accessibility_hint">Intercepta as teclas de função (Fn, F1-F12 etc.) via AccessibilityService e converte o Voltar do teclado de tablet/Voltar do navegador em ESC. Ative isso se combinações Fn ou o ESC de um teclado externo não estiverem chegando corretamente ao desktop. Requer a permissão de Acessibilidade concedida em Configurações do sistema &gt; Acessibilidade (uma única vez).</string>
 
     <!-- Extra keys bar -->
-    <string name="extra_keys_mode_label">Modo da barra de teclas extras</string>
-    <string name="extra_keys_mode_hint">Controla quando a barra inferior estilo Termux com ESC/TAB/CTRL/ALT/setas/PgUp etc. é exibida. Aplica-se na próxima vez que você voltar para a área de exibição do desktop.</string>
-    <string-array name="extra_keys_mode_options">
-        <item>Sempre mostrar</item>
-        <item>Nunca mostrar</item>
-        <item>Mostrar com o teclado virtual</item>
-    </string-array>
-    <string name="back_opens_switch">Tecla Voltar alterna rapidamente a barra de teclas extras</string>
-    <string name="back_opens_hint">Quando ativado, pressionar Voltar enquanto a barra de teclas extras está escondida a exibe; pressionar Voltar novamente a esconde.</string>
 
     <!-- Custom layout editor -->
-    <string name="btn_load_default">Carregar template original</string>
-    <string name="btn_load_file">Carregar de um arquivo…</string>
-    <string name="layout_hint">Define a barra de teclas extras como JSON: \"rows\" é um array de linhas, cada uma um array de teclas. Uma tecla tem um \"label\" e um \"type\" (key/text/modifier/keyboard/vkeyboard/settings). \"key\"/\"modifier\" usam um evdev \"code\"; \"text\" usa \"text\"; qualquer tecla pode adicionar \"repeat\":true ou um \"popup\" aninhado. JSON inválido retorna para o padrão. Tem efeito na próxima volta ao desktop.</string>
-    <string name="layout_status_default">Usando o layout padrão embutido</string>
-    <string name="layout_status_valid">✓ Layout Válido</string>
-    <string name="layout_status_invalid">✗ %1$s</string>
 
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">Modo Touchpad (movimento relativo)</string>
@@ -190,4 +173,226 @@
         <item>Tela × 0.5</item>
         <item>Tela × 0.25</item>
     </string-array>
+    <!-- Keyboard / HUD / immersive additions -->
+    <string name="landscape_split_keyboard">Usar teclado em arco dividido no modo paisagem</string>
+    <string name="landscape_split_keyboard_hint">Separa as teclas de letras em blocos para o polegar esquerdo e direito quando a tela está na horizontal.</string>
+    <string name="customize_keyboard_wings">Personalizar asas do polegar…</string>
+    <string name="keyboard_layer_to_keyboard">Editar teclado</string>
+    <string name="keyboard_layer_to_hud">Voltar ao HUD</string>
+    <string name="keyboard_layer_settings">Configurações do teclado</string>
+    <string name="keyboard_wings_title">Personalizar asas do polegar</string>
+    <string name="keyboard_wings_left">Asa esquerda</string>
+    <string name="keyboard_wings_right">Asa direita</string>
+    <string name="keyboard_wings_picker_title">Escolher ação da tecla</string>
+    <string name="keyboard_wings_use_default">Usar tecla padrão</string>
+    <string name="keyboard_wings_reset">Restaurar padrões</string>
+    <string name="keyboard_wings_done">Concluir</string>
+    <string name="keyboard_handedness">Mão de uso do teclado</string>
+    <string-array name="keyboard_handedness_options">
+        <item>Canhoto</item>
+        <item>Destro</item>
+    </string-array>
+    <string name="keyboard_theme">Aparência das teclas</string>
+    <string-array name="keyboard_theme_options">
+        <item>Preenchida</item>
+        <item>Contornada</item>
+        <item>Transparente</item>
+    </string-array>
+    <string name="keyboard_haptic_feedback">Vibrar ao pressionar tecla virtual</string>
+    <string name="hud_controls_switch">Mostrar controles HUD flutuantes</string>
+    <string name="hud_controls_hint">Mostra touchpad, D-pad, alavanca e atalhos editáveis.</string>
+    <string name="hud_edit_layout">Editar layout dos controles flutuantes</string>
+    <string name="hud_export_layout">Exportar layout HUD…</string>
+    <string name="hud_import_layout">Importar layout HUD…</string>
+    <string name="hud_export_done">Layout HUD exportado</string>
+    <string name="hud_export_failed">Não foi possível exportar o layout HUD</string>
+    <string name="hud_export_empty">Ainda não há layout HUD para exportar</string>
+    <string name="hud_import_done">Layout HUD importado</string>
+    <string name="hud_import_failed">Não foi possível importar esse arquivo de layout</string>
+    <string name="hud_overlay_saved">Layout Salvo</string>
+    <string name="hud_overlay_hidden_on">HUD oculta — segure a tecla KB para restaurar</string>
+    <string name="hud_overlay_hidden_off">HUD restaurada</string>
+    <string name="hud_overlay_save_error">Erro ao salvar o layout</string>
+    <string name="hud_overlay_changes_discarded">Alterações Descartadas</string>
+    <string name="hud_overlay_exit_title">SAIR DO EDITOR HUD</string>
+    <string name="hud_overlay_exit_message">Salvar as alterações do layout antes de sair?</string>
+    <string name="hud_overlay_save_and_exit">SALVAR E SAIR</string>
+    <string name="hud_overlay_discard">DESCARTAR</string>
+    <string name="hud_overlay_cancel">CANCELAR</string>
+    <string name="hud_overlay_orientation_title">AVISO DE ORIENTAÇÃO</string>
+    <string name="hud_overlay_orientation_message">Os layouts Retrato e Paisagem são armazenados separadamente.\n\nGire o dispositivo para personalizar botões e posições de encaixe de cada orientação separadamente.</string>
+    <string name="hud_overlay_got_it">ENTENDI</string>
+    <string name="hud_overlay_snap_on">Encaixar na Grade: ATIVADO</string>
+    <string name="hud_overlay_snap_off">Encaixar na Grade: DESATIVADO</string>
+    <string name="hud_overlay_copy_portrait_here">Copiar Layout Retrato Para Cá</string>
+    <string name="hud_overlay_copy_landscape_here">Copiar Layout Paisagem Para Cá</string>
+    <string name="hud_overlay_productivity_preset">Predefinição Desktop / Produtividade (10% de margem)</string>
+    <string name="hud_overlay_user_portrait_hotkeys_layout">Layout de Atalhos Retrato do Usuário</string>
+    <string name="hud_overlay_clear_active_layout">Limpar Layout Ativo</string>
+    <string name="hud_overlay_layout_options_title">Opções e Predefinições de Layout</string>
+    <string name="hud_overlay_copied">Layout Copiado</string>
+    <string name="hud_overlay_productivity_preset_loaded">Predefinição Desktop / Produtividade (10% de margem) Carregada</string>
+    <string name="hud_overlay_user_portrait_layout_loaded">Layout Retrato do Usuário Carregado</string>
+    <string name="hud_overlay_layout_cleared">Layout Limpo</string>
+    <string name="hud_overlay_add_standard_key_button">Botão de Tecla Padrão</string>
+    <string name="hud_overlay_add_super_gesture_nub">Nub de Gesto Super</string>
+    <string name="hud_overlay_add_trackpoint">TrackPoint (Mouse / Rolagem)</string>
+    <string name="hud_overlay_add_steam_deck_trackpad">Trackpad do Steam Deck (Touchpad / Mouse)</string>
+    <string name="hud_overlay_add_scroll_bar">Barra de Rolagem (Vertical / Horizontal)</string>
+    <string name="hud_overlay_add_dpad">D-Pad (Cruz Deslizante)</string>
+    <string name="hud_overlay_add_group">Contêiner de grupo</string>
+    <string name="hud_widget_group">GRUPO</string>
+    <string name="hud_group_children">Teclas filhas</string>
+    <string name="hud_group_add_key">Adicionar tecla ao grupo</string>
+    <string name="hud_group_empty">Ainda não há teclas neste grupo</string>
+    <string name="hud_group_add_existing">Mover tecla existente</string>
+    <string name="hud_group_detach">Retirar</string>
+    <string name="hud_group_drop_hint">Solte as teclas aqui</string>
+    <string name="hud_group_moved_in">Tecla movida para o grupo</string>
+    <string name="hud_group_detached">Tecla retirada do grupo</string>
+    <string name="hud_group_no_candidates">Nenhuma tecla avulsa na tela</string>
+    <string name="hud_group_move_in_title">Mover tecla para o grupo</string>
+    <string name="hud_overlay_add_widget_title">Adicionar Widget</string>
+    <string name="hud_overlay_daemon_connected">DAEMON CONECTADO</string>
+    <string name="hud_overlay_daemon_offline">DAEMON OFFLINE</string>
+    <string name="hud_overlay_toolbar_save">SALVAR</string>
+    <string name="hud_overlay_toolbar_add">ADICIONAR</string>
+    <string name="hud_overlay_toolbar_snap">ENCAIXAR</string>
+    <string name="hud_overlay_toolbar_layout">LAYOUT</string>
+    <string name="hud_overlay_toolbar_exit">SAIR</string>
+    <string name="hud_overlay_label_key">TECLA</string>
+    <string name="hud_overlay_label_super">SUPER</string>
+    <string name="hud_overlay_label_mouse">MOUSE</string>
+    <string name="hud_overlay_label_touchpad">TOUCHPAD</string>
+    <string name="hud_overlay_label_scroll">ROLAGEM</string>
+    <string name="hud_overlay_label_dpad">D-PAD</string>
+    <string name="immersive_oplus_refresh_rate_switch">Manter taxa de atualização fixa em OnePlus</string>
+    <string name="immersive_oplus_refresh_rate_hint">Evita quedas na taxa de atualização em alguns dispositivos OnePlus quando eventos de entrada não são recebidos.</string>
+    <string name="immersive_controller_failed">Não foi possível iniciar o modo imersivo: falha ao suprimir o controlador Android; a captura de entrada foi cancelada</string>
+    <string name="immersive_controller_interrupted">Modo imersivo encerrado: a supressão do controlador Android foi perdida; a captura de entrada foi liberada</string>
+    <string name="immersive_entering_mode">Modo imersivo ativado: %1$s</string>
+    <string name="immersive_gold_unknown">Não foi possível verificar quais dispositivos o Gold mantém; iniciando sem deixar nenhum deles livre</string>
+    <string name="immersive_selection_invalid">A seleção de dispositivos salva não é válida; corrija-a nas configurações de entrada imersiva</string>
+    <string name="immersive_selection_filtered">Todos os dispositivos selecionados estão com o Gold, então não sobrou nada para capturar</string>
+    <string name="cat_immersive_title">Modo Imersivo</string>
+    <string name="cat_immersive_subtitle">Controle de entrada em tela cheia, tecla de alternância e fonte de entrada</string>
+    <string name="immersive_inputs_title">Entrada imersiva</string>
+    <string name="immersive_inputs_subtitle">Escolha de onde o modo imersivo obtém a entrada</string>
+    <string name="section_immersive_inputs_source">Fonte de entrada</string>
+    <string name="section_immersive_inputs_direct">Nós de evento a capturar</string>
+    <string name="section_immersive_inputs_scope">O que isto abrange</string>
+    <string name="immersive_inputs_direct_blurb">Atualmente: o Anland captura os nós de evento físicos, e o Android não consegue vê-los enquanto isso. Precisa de root.</string>
+    <string name="immersive_inputs_bus_hint">O Gold remapeia o teclado; o Anland captura sua saída exclusivamente e a envia direto para o desktop.</string>
+    <string name="immersive_inputs_combined_hint">O Anland captura toque, ponteiros e gamepads junto com a saída de teclado remapeada do Gold.</string>
+    <string name="immersive_inputs_bus_scope">Precisa de root e do módulo Gold Keyboard Remaps. Todas as teclas remapeadas, incluindo Meta e atalhos do sistema, vão para o desktop durante a sessão. Toque, mouse e gestos do Android continuam disponíveis. Sair do app ou bloquear a tela libera o teclado.</string>
+    <string name="immersive_inputs_direct_hint">Apenas os dispositivos marcados abaixo são capturados, incluindo gamepads. Dispositivos que o Gold confirmou manter aparecem, mas não podem ser selecionados. Gamepads apenas pausam a entrada do Android; o desktop Linux os lê diretamente pelo /dev/input montado.</string>
+    <string name="immersive_inputs_auto">Escolher dispositivos automaticamente</string>
+    <string-array name="immersive_source_options">
+        <item>Anland captura os dispositivos (direto)</item>
+        <item>Teclado Gold direto para o desktop</item>
+        <item>Toque, ponteiros e gamepads diretos + teclado Gold</item>
+    </string-array>
+    <string name="immersive_source_unavailable">Precisa do módulo Gold Keyboard Remaps, que não está instalado ou não está em execução</string>
+    <string name="immersive_auto_enter">Entrar no modo imersivo automaticamente</string>
+    <string name="immersive_auto_enter_hint">Envia automaticamente o teclado Gold para o desktop quando este app volta ao primeiro plano. Toque e gestos do Android continuam disponíveis.</string>
+    <string name="immersive_inputs_loading">Verificando dispositivos…</string>
+    <string name="immersive_inputs_found">Os dispositivos ocupados pelo Gold aparecem, mas não podem ser selecionados.</string>
+    <string name="immersive_inputs_unknown">Não foi possível verificar quais dispositivos o Gold mantém, então nenhum está marcado como ocupado. Nada aqui é sabidamente livre.</string>
+    <string name="immersive_inputs_occupied">✕ %1$s — mantido pelo Gold</string>
+    <string name="device_class_keyboard">Teclado</string>
+    <string name="device_class_keys">Nó de botões</string>
+    <string name="device_class_mouse">Mouse</string>
+    <string name="device_class_gamepad">Gamepad / joystick</string>
+    <string name="device_class_touchpad">Touchpad</string>
+    <string name="device_class_touchscreen">Tela sensível ao toque</string>
+    <string name="bus_usb">USB</string>
+    <string name="bus_bluetooth">Bluetooth</string>
+    <string name="bus_builtin">Integrado</string>
+    <string name="bus_virtual">Virtual</string>
+    <string name="bus_i2c">I2C</string>
+    <string name="bus_spi">SPI</string>
+    <string name="bus_other">Barramento %1$s</string>
+    <string name="immersive_inputs_remembered">Salvos: %1$s. Utilizáveis agora: %2$s.</string>
+    <string name="immersive_inputs_all_filtered">Todos os dispositivos que você salvou estão com o Gold. O modo imersivo não iniciará até que isso mude; sua seleção foi mantida como está.</string>
+    <string name="immersive_inputs_none">Nenhum dispositivo de entrada encontrado.</string>
+    <string name="immersive_inputs_unavailable">Não foi possível listar os dispositivos de entrada: root foi negado ou está indisponível.</string>
+    <string name="stylus_button_right_click_switch">Botão lateral da S Pen para clique direito</string>
+    <string name="stylus_hover_scroll_switch">Rolar ao pairar com o botão da S Pen</string>
+    <string name="stylus_hover_scroll_hint">Segure o botão lateral da S Pen e mova a caneta enquanto paira. O movimento vertical controla a rolagem, incluindo a parte vertical de um movimento diagonal.</string>
+    <string name="stylus_hover_scroll_speed_label">Velocidade de rolagem ao pairar com a S Pen</string>
+    <string name="pad_tap">Touchpad externo: cliques sintéticos</string>
+    <string name="pad_tip">Controla toques com um e dois dedos, além de arrastar com toque longo, em touchpads externos capturados e no modo imersivo. Os botões físicos continuam funcionando quando desativado. O touchpad na tela não muda.</string>
+    <string name="pad_guard">Ignorar toques do touchpad externo por %1$d ms após rolar (0 = desligado)</string>
+    <string name="pad_debug">Log de depuração do touchpad (AnlandTouchpad)</string>
+    <string name="hud_delete_short">EXCL</string>
+    <string name="hud_duplicate_short">DUPL</string>
+    <string name="hud_delete_confirm">CONFIRMAR?</string>
+    <string name="hud_title_button_properties">PROPRIEDADES DO BOTÃO</string>
+    <string name="hud_properties_title">PROPRIEDADES DE %1$s</string>
+    <string name="hud_dock_button_properties">PROPRIEDADES DO BOTÃO DA DOCA</string>
+    <string name="hud_widget_button">BOTÃO</string>
+    <string name="hud_widget_super_gesture">GESTO SUPER</string>
+    <string name="hud_widget_trackpoint">TRACKPOINT</string>
+    <string name="hud_widget_touchpad">TOUCHPAD</string>
+    <string name="hud_widget_scrollbar">BARRA DE ROLAGEM</string>
+    <string name="hud_widget_dpad">D-PAD</string>
+    <string name="hud_display_label">Rótulo Exibido</string>
+    <string name="hud_width_dp">Largura (dp):</string>
+    <string name="hud_height_dp">Altura (dp):</string>
+    <string name="hud_corner_dp">Canto (dp):</string>
+    <string name="hud_opacity_percent">Opacidade (%):</string>
+    <string name="hud_action_mapping">Mapeamento de Ação:</string>
+    <string name="hud_main_action">Ação Principal</string>
+    <string name="hud_popup_swipe_up">Popup (Deslizar Para Cima)</string>
+    <string name="hud_swipe_actions">Ações direcionais</string>
+    <string name="hud_direction_left">Esquerda</string>
+    <string name="hud_direction_right">Direita</string>
+    <string name="hud_direction_up">Cima</string>
+    <string name="hud_direction_down">Baixo</string>
+    <string name="hud_trackpoint_mode">Modo TrackPoint:</string>
+    <string name="hud_mode">Modo</string>
+    <string name="hud_mode_mouse">MOUSE</string>
+    <string name="hud_mode_scroll">ROLAGEM</string>
+    <string name="hud_orientation_vertical">VERTICAL</string>
+    <string name="hud_orientation_horizontal">HORIZONTAL</string>
+    <string name="hud_sensitivity_x10">Sensibilidade (x10):</string>
+    <string name="hud_deadzone_dp">Zona Morta (dp):</string>
+    <string name="hud_color_theme">Tema de Cor:</string>
+    <string name="hud_haptic_feedback">Retorno Tátil</string>
+    <string name="hud_hold_to_repeat">Repetir enquanto pressionado</string>
+    <string name="hud_nudge_position">Ajuste Fino da Posição:</string>
+    <string name="hud_unassigned">Não Atribuído</string>
+    <string name="hud_text_action">Texto: %1$s</string>
+    <string name="hud_system_action">Sistema: %1$s</string>
+    <string name="hud_key_code">Tecla %1$d</string>
+    <string-array name="hud_color_theme_names">
+        <item>Ardósia</item>
+        <item>Ciano</item>
+        <item>Carmesim</item>
+        <item>Âmbar</item>
+        <item>Esmeralda</item>
+        <item>Furtivo</item>
+    </string-array>
+    <string name="hud_picker_back">VOLTAR</string>
+    <string name="hud_picker_title">SELECIONAR TECLA / AÇÃO</string>
+    <string name="hud_picker_search">Buscar teclas…</string>
+    <string name="hud_tab_keys">TECLAS</string>
+    <string name="hud_tab_mods_system">MODS E SISTEMA</string>
+    <string name="hud_tab_combo">COMBO</string>
+    <string name="hud_none">Nenhum</string>
+    <string name="hud_system_soft_keyboard">Teclado Virtual do Sistema</string>
+    <string name="hud_system_virtual_keyboard">Teclado Virtual</string>
+    <string name="hud_system_settings">Configurações</string>
+    <string name="hud_system_mouse_left">Mouse Esquerdo</string>
+    <string name="hud_system_mouse_right">Mouse Direito</string>
+    <string name="hud_system_mouse_middle">Mouse do Meio</string>
+    <string name="hud_system_scroll_up">Rolar Para Cima</string>
+    <string name="hud_system_scroll_down">Rolar Para Baixo</string>
+    <string name="hud_system_steam_deck_mode">Modo Steam Deck</string>
+    <string name="hud_system_exit_deck_mode">Sair do Modo Deck</string>
+    <string name="hud_combo_slot">Slot %1$d</string>
+    <string name="hud_combo_builder_hint">Escolha até 3 teclas. O slot ativo fica destacado; escolha uma tecla para preenchê-lo.</string>
+    <string name="hud_combo_clear_all">LIMPAR TUDO</string>
+    <string name="hud_combo_apply">APLICAR COMBO</string>
+    <string name="hud_combo_empty">(vazio)</string>
 </resources>

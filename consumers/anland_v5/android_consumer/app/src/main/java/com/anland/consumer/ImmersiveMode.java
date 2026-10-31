@@ -54,6 +54,13 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     private static final String PREFS_NAME = "anland_settings";
 
     static final String KEY_ENABLED  = "immersive_enabled";
+    /**
+     * Whether the HUD keeps taking touches while the panel is grabbed. With it
+     * off every grabbed frame goes straight to the desktop, which is what the
+     * session did before the HUD could be reached at all.
+     */
+    static final String KEY_HUD_TOUCH = "immersive_hud_touch";
+    static final boolean DEFAULT_HUD_TOUCH = true;
     static final String KEY_KEYCODE  = "immersive_keycode";
     /** Raw evdev scan code of the bound key: what the helper actually compares. */
     static final String KEY_SCANCODE = "immersive_scancode";
