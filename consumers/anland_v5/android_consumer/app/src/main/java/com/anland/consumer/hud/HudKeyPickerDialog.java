@@ -399,6 +399,9 @@ public final class HudKeyPickerDialog {
         list.add(new KeyEntry("LEFT", HudAction.key(105)));
         list.add(new KeyEntry("RIGHT", HudAction.key(106)));
         // System actions - clear, concise titles that fit comfortably on any screen
+        list.add(new KeyEntry(context.getString(R.string.hud_layout_1), HudAction.system("switch_layout_1")));
+        list.add(new KeyEntry(context.getString(R.string.hud_layout_2), HudAction.system("switch_layout_2")));
+        list.add(new KeyEntry(context.getString(R.string.hud_layout_3), HudAction.system("switch_layout_3")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_soft_keyboard), HudAction.system("toggle_ime")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_virtual_keyboard), HudAction.system("toggle_vk")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_settings), HudAction.system("open_settings")));

@@ -396,4 +396,13 @@
     <string name="hud_combo_clear_all">CLEAR ALL</string>
     <string name="hud_combo_apply">APPLY COMBO</string>
     <string name="hud_combo_empty">(empty)</string>
+    <string name="hud_layout_1">Switch to layout 1</string>
+    <string name="hud_layout_2">Switch to layout 2</string>
+    <string name="hud_layout_3">Switch to layout 3</string>
+    <string name="hud_slot_1">Layout 1</string>
+    <string name="hud_slot_2">Layout 2</string>
+    <string name="hud_slot_3">Layout 3</string>
+    <string name="hud_export_choose">Choose a layout to export</string>
+    <string name="hud_import_choose">Choose a layout to replace</string>
+    <string name="hud_import_source_choose">Choose a layout from the backup</string>
 </resources>

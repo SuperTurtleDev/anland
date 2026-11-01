@@ -88,7 +88,8 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     private HudGroupView mDropTargetGroup = null;
 
     private final SnapGeometryEngine mSnapEngine;
-    private boolean mSnapEnabled = true;
+    private static final String PREF_KEY_LAYOUT_SLOT = "hud_layout_slot";
+    private int mLayoutSlot = 0;
     private final Paint mGuidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     // Self-edge guides are drawn in a different color so the user can
     // distinguish "the canvas edge my button snapped to" (green, sibling)
@@ -328,23 +329,9 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             mProfile = new HudLayoutProfile();
         }
         mHudHidden = mPrefs.getBoolean(PREF_KEY_HUD_HIDDEN, false);
-        boolean isSteamDeck = mPrefs.getBoolean(PREF_KEY_STEAM_DECK, false);
-        if (isSteamDeck) {
-            ensureSteamDeckLayout();
-        }
+        mLayoutSlot = Math.max(0, Math.min(2, mPrefs.getInt(PREF_KEY_LAYOUT_SLOT, 0)));
         if (mFloatingContainer != null) {
             rebuildActiveLayout();
-        }
-    }
-
-    public void ensureSteamDeckLayout() {
-        if (mProfile != null && !isKeyboardLayer()) {
-            if (mProfile.landscapeLayout == null || mProfile.landscapeLayout.floatingButtons == null || mProfile.landscapeLayout.floatingButtons.isEmpty()) {
-                mProfile.landscapeLayout = HudLayoutProfile.createSteamDeckLayout();
-                try {
-                    mPrefs.edit().putString(PREF_KEY_PROFILE, mProfile.toJSON().toString()).apply();
-                } catch (Exception ignored) {}
-            }
         }
     }
 
@@ -495,33 +482,17 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         int orientation = getResources().getConfiguration().orientation;
         // In Steam Deck Mode, ALWAYS lock to landscape layout regardless of transient system orientation.
         boolean wantLandscape = isSteamDeck || (orientation == Configuration.ORIENTATION_LANDSCAPE);
-        if (isKeyboardLayer()) {
-            HudLayout kb = wantLandscape
-                    ? mProfile.keyboardLandscapeLayout : mProfile.keyboardPortraitLayout;
-            if (kb == null) {
-                // Empty by design: the keyboard layer starts with nothing on it.
-                kb = new HudLayout();
-                if (wantLandscape) {
-                    mProfile.keyboardLandscapeLayout = kb;
-                } else {
-                    mProfile.keyboardPortraitLayout = kb;
-                }
-            }
-            return kb;
-        }
-        HudLayout layout = wantLandscape
-                ? mProfile.landscapeLayout : mProfile.portraitLayout;
-        if (layout == null) {
-            layout = wantLandscape
-                    ? HudLayoutProfile.createSteamDeckLayout()
-                    : HudLayoutProfile.createDefaultPortraitLayout();
-            if (wantLandscape) {
-                mProfile.landscapeLayout = layout;
-            } else {
-                mProfile.portraitLayout = layout;
-            }
-        }
-        return layout;
+        return mProfile.getLayout(mLayoutSlot, wantLandscape, isKeyboardLayer());
+    }
+
+    private void switchLayoutSlot(int slot) {
+        if (slot < 0 || slot > 2 || slot == mLayoutSlot) return;
+        reset();
+        selectButton(null, null);
+        mLayoutSlot = slot;
+        mPrefs.edit().putInt(PREF_KEY_LAYOUT_SLOT, slot).apply();
+        rebuildActiveLayout();
+        invalidate();
     }
 
     public static int getSystemStatusBarHeight(Context ctx) {
@@ -790,16 +761,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_add),
                 Color.WHITE, true, this::showAddWidgetChooser);
 
-        Button btnSnap = addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_snap),
-                mSnapEnabled ? M3.COLOR_PRIMARY : M3.COLOR_TEXT_MUTED, true, null);
-        btnSnap.setOnClickListener(v -> {
-            mSnapEnabled = !mSnapEnabled;
-            btnSnap.setTextColor(mSnapEnabled ? M3.COLOR_PRIMARY : M3.COLOR_TEXT_MUTED);
-            Toast.makeText(getContext(),
-                    mSnapEnabled ? R.string.hud_overlay_snap_on : R.string.hud_overlay_snap_off,
-                    Toast.LENGTH_SHORT).show();
-        });
-
         addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_layout),
                 Color.WHITE, true, this::showLayoutOptionsChooser);
         // EXIT prompts for saving first.
@@ -827,6 +788,9 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 : R.string.hud_overlay_copy_landscape_here);
 
         final String[] options = new String[] {
+                getContext().getString(R.string.hud_layout_1),
+                getContext().getString(R.string.hud_layout_2),
+                getContext().getString(R.string.hud_layout_3),
                 copyOption,
                 getContext().getString(R.string.hud_overlay_productivity_preset),
                 getContext().getString(R.string.hud_overlay_user_portrait_hotkeys_layout),
@@ -837,11 +801,16 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 .setTitle(R.string.hud_overlay_layout_options_title)
                 .setItems(options, (d, which) -> {
                     if (!mIsEditMode) return;
+                    if (which < 3) {
+                        switchLayoutSlot(which);
+                        return;
+                    }
+                    which -= 3;
                     mHasUnsavedChanges = true;
                     HudLayout dst = getActiveLayout();
                     if (which == 0) {
                         // Copy from opposite layout
-                        HudLayout src = isLandscape ? mProfile.portraitLayout : mProfile.landscapeLayout;
+                        HudLayout src = mProfile.getLayout(mLayoutSlot, !isLandscape, false);
                         dst.floatingButtons.clear();
                         for (HudButton b : src.floatingButtons) {
                             dst.floatingButtons.add(b.duplicate());
@@ -1459,7 +1428,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                                 view.getWidth(), view.getHeight()));
                     }
 
-                    if (mSnapEnabled && mDropTargetGroup == null) {
+                    if (mDropTargetGroup == null) {
                         RectF candidate = new RectF(targetX, targetY,
                                 targetX + view.getWidth(), targetY + view.getHeight());
                         List<RectF> siblings = getSiblingBounds(model);
@@ -1805,7 +1774,10 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 }
             });
         } else if (HudAction.TYPE_SYSTEM.equals(action.type)) {
-            if ("toggle_ime".equals(action.systemCommand)) mHost.toggleSystemKeyboard();
+            if ("switch_layout_1".equals(action.systemCommand)) post(() -> switchLayoutSlot(0));
+            else if ("switch_layout_2".equals(action.systemCommand)) post(() -> switchLayoutSlot(1));
+            else if ("switch_layout_3".equals(action.systemCommand)) post(() -> switchLayoutSlot(2));
+            else if ("toggle_ime".equals(action.systemCommand)) mHost.toggleSystemKeyboard();
             else if ("toggle_vk".equals(action.systemCommand)) mHost.toggleVirtualKeyboard();
             else if ("open_settings".equals(action.systemCommand)) mHost.openSettings();
             else if ("toggle_steam_deck".equals(action.systemCommand)) mHost.toggleSteamDeckMode();

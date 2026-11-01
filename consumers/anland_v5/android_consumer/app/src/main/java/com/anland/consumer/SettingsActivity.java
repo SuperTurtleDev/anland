@@ -1,6 +1,9 @@
 package com.anland.consumer;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+
+import org.json.JSONObject;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -144,11 +147,19 @@ public class SettingsActivity extends Activity {
     // Custom extra-keys layout editor (JSON), and the SAF file-picker request code.
     private static final int REQ_EXPORT_HUD_LAYOUT = 2002;
     private static final int REQ_IMPORT_HUD_LAYOUT = 2003;
+    private String pendingHudExport;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null) pendingHudExport = savedInstanceState.getString("pending_hud_export");
         showHome();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString("pending_hud_export", pendingHudExport);
     }
 
     // ============================================================
@@ -1833,23 +1844,32 @@ public class SettingsActivity extends Activity {
 
     // ---- HUD layout export / import (SAF, no storage permission needed) ----
 
-    /** Ask the user where to write the current HUD profile as JSON. */
+    private void chooseHudSlot(int title, java.util.function.IntConsumer onSelected) {
+        String[] labels = {getString(R.string.hud_slot_1), getString(R.string.hud_slot_2),
+                getString(R.string.hud_slot_3)};
+        new AlertDialog.Builder(this).setTitle(title).setItems(labels,
+                (dialog, which) -> onSelected.accept(which)).setNegativeButton(android.R.string.cancel, null).show();
+    }
+
     private void exportHudLayout() {
-        String json = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getString(KEY_HUD_LAYOUT_PROFILE, null);
-        if (json == null || json.trim().isEmpty()) {
-            Toast.makeText(this, R.string.hud_export_empty, Toast.LENGTH_SHORT).show();
-            return;
-        }
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("application/json");
-        intent.putExtra(Intent.EXTRA_TITLE, "anland-hud-layout.json");
-        try {
-            startActivityForResult(intent, REQ_EXPORT_HUD_LAYOUT);
-        } catch (android.content.ActivityNotFoundException e) {
-            Toast.makeText(this, R.string.toast_no_picker, Toast.LENGTH_SHORT).show();
-        }
+        chooseHudSlot(R.string.hud_export_choose, slot -> {
+            try {
+                String json = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .getString(KEY_HUD_LAYOUT_PROFILE, null);
+                pendingHudExport = com.anland.consumer.hud.HudLayoutProfile.fromJSON(json)
+                        .exportSlot(slot).toString();
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/json");
+                intent.putExtra(Intent.EXTRA_TITLE, "anland-hud-layout-" + (slot + 1) + ".json");
+                startActivityForResult(intent, REQ_EXPORT_HUD_LAYOUT);
+            } catch (android.content.ActivityNotFoundException e) {
+                Toast.makeText(this, R.string.toast_no_picker, Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Log.w(TAG, "HUD export preparation failed", e);
+                Toast.makeText(this, R.string.hud_export_failed, Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     /** Ask the user for a JSON file and replace the HUD profile with it. */
@@ -1878,23 +1898,25 @@ public class SettingsActivity extends Activity {
         }
     }
 
-    private void applyImportedHudLayout(String text) {
-        com.anland.consumer.hud.HudLayoutProfile profile =
-                com.anland.consumer.hud.HudLayoutProfile.fromJSON(text);
-        if (profile == null) {
-            Toast.makeText(this, R.string.hud_import_failed, Toast.LENGTH_SHORT).show();
-            return;
-        }
+    private void applyImportedHudLayout(JSONObject document, int source, int destination) {
         try {
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                    .putString(KEY_HUD_LAYOUT_PROFILE, profile.toJSON().toString())
-                    .putBoolean(KEY_USE_HUD_OVERLAY, true)
-                    .apply();
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            com.anland.consumer.hud.HudLayoutProfile profile =
+                    com.anland.consumer.hud.HudLayoutProfile.fromJSON(
+                            prefs.getString(KEY_HUD_LAYOUT_PROFILE, null));
+            profile.importSlot(document, source, destination);
+            prefs.edit().putString(KEY_HUD_LAYOUT_PROFILE, profile.toJSON().toString())
+                    .putBoolean(KEY_USE_HUD_OVERLAY, true).apply();
             Toast.makeText(this, R.string.hud_import_done, Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            Log.w(TAG, "applyImportedHudLayout failed", e);
+            Log.w(TAG, "Invalid HUD layout import", e);
             Toast.makeText(this, R.string.hud_import_failed, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private void chooseHudImportDestination(JSONObject document, int source) {
+        chooseHudSlot(R.string.hud_import_choose, destination ->
+                applyImportedHudLayout(document, source, destination));
     }
 
     @Override
@@ -1904,24 +1926,29 @@ public class SettingsActivity extends Activity {
         Uri uri = data.getData();
         if (uri == null) return;
         if (requestCode == REQ_EXPORT_HUD_LAYOUT) {
-            String json = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                    .getString(KEY_HUD_LAYOUT_PROFILE, null);
-            if (json == null || json.trim().isEmpty()) {
-                try {
-                    json = new com.anland.consumer.hud.HudLayoutProfile().toJSON().toString();
-                } catch (Exception e) {
-                    Toast.makeText(this, R.string.hud_export_failed, Toast.LENGTH_SHORT).show();
-                    return;
-                }
+            if (pendingHudExport == null) {
+                Toast.makeText(this, R.string.hud_export_failed, Toast.LENGTH_SHORT).show();
+            } else {
+                writeTextToUri(uri, pendingHudExport);
+                pendingHudExport = null;
             }
-            writeTextToUri(uri, json);
         } else if (requestCode == REQ_IMPORT_HUD_LAYOUT) {
             String text = readTextFromUri(uri);
             if (text == null) {
                 Toast.makeText(this, R.string.toast_read_failed, Toast.LENGTH_SHORT).show();
                 return;
             }
-            applyImportedHudLayout(text);
+            try {
+                JSONObject document = new JSONObject(text);
+                if (!document.has("format") && (document.has("layout_2") || document.has("layout_3"))) {
+                    chooseHudSlot(R.string.hud_import_source_choose, source ->
+                            chooseHudImportDestination(document, source));
+                } else {
+                    chooseHudImportDestination(document, 0);
+                }
+            } catch (Exception e) {
+                Toast.makeText(this, R.string.hud_import_failed, Toast.LENGTH_SHORT).show();
+            }
         }
     }
 

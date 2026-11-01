@@ -1148,6 +1148,9 @@ public final class HudPropertyInspectorView extends LinearLayout {
     }
 
     private String systemActionLabel(String command) {
+        if ("switch_layout_1".equals(command)) return getString(R.string.hud_layout_1);
+        if ("switch_layout_2".equals(command)) return getString(R.string.hud_layout_2);
+        if ("switch_layout_3".equals(command)) return getString(R.string.hud_layout_3);
         if ("toggle_ime".equals(command)) return getString(R.string.hud_system_soft_keyboard);
         if ("toggle_vk".equals(command)) return getString(R.string.hud_system_virtual_keyboard);
         if ("open_settings".equals(command)) return getString(R.string.hud_system_settings);

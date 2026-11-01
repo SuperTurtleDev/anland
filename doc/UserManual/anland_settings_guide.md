@@ -63,7 +63,7 @@ The HUD provides configurable touch controls over the Linux desktop for shortcut
 
 1. Open **Settings → Keyboard & Keys**, enable **Show floating HUD controls**, and tap **Edit floating control layout**. Opening the editor also enables the switch.
 2. The editor opens on a separate black canvas. Tap **ADD** to choose a control, drag it into position, and tap it to open its properties. Available properties depend on the control and include size, opacity, color, and actions; the panel also offers duplicate, delete, and position adjustments.
-3. Toggle grid snapping with **SNAP**. Use **LAYOUT** to apply a preset, copy the other orientation's regular HUD layout, or clear the active layout. Presets and clearing replace the current layout, so check before applying them.
+3. Controls snap into alignment while dragging. Use **LAYOUT** to switch among three custom layouts, apply a preset, copy the other orientation's regular HUD layout, or clear the active layout. Presets and clearing replace the current layout, so check before applying them.
 4. Tap **SAVE** to save the layout. If there are unsaved layout changes when you tap **EXIT** or Back, choose to save and exit, discard, or cancel.
 
 Portrait and landscape layouts are saved separately. Rotate the device to edit each orientation, or use **LAYOUT** to copy from the other orientation. The HUD and keyboard layers also have separate layouts; check each orientation and layer.
@@ -85,7 +85,7 @@ Tap **Keyboard settings** on the keyboard layer to configure landscape split mod
 
 #### Export, import, and immersive mode
 
-Under **Settings → Keyboard & Keys**, choose **Export HUD layout…** and use the Android file picker to save a JSON file. If there is no saved layout yet, save one in the editor first. **Import HUD layout…** replaces the current HUD profile and enables HUD controls; export a backup first if needed.
+Under **Settings → Keyboard & Keys**, choose **Export HUD layout…**, select one layout, and save the JSON file. It includes portrait, landscape, and keyboard layers for that layout. For **Import HUD layout…**, select a file and one destination layout to replace; other layouts are preserved. For an older full-profile backup, first choose the source layout in the backup. Import enables HUD controls.
 
 Under **Settings → Immersive Mode → Immersive Input**, **Touch HUD controls in immersive mode** is enabled by default. When disabled, touches go directly to the desktop while the touchscreen is grabbed and the HUD is display-only. If the HUD is missing or unresponsive, check the display switch, KB hidden state, current orientation and layer, and this immersive-mode option.
 

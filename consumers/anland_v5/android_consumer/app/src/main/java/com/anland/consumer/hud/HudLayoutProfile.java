@@ -7,7 +7,7 @@ import org.json.JSONObject;
  * Root profile managing separate Portrait and Landscape layouts, persistence, and default factory presets.
  */
 public final class HudLayoutProfile {
-    public int version = 2;
+    public int version = 3;
     public String profileName = "Niri WM Profile";
     public boolean firstTimeNoticeShown = false;
 
@@ -20,6 +20,20 @@ public final class HudLayoutProfile {
      */
     public HudLayout keyboardPortraitLayout = new HudLayout();
     public HudLayout keyboardLandscapeLayout = new HudLayout();
+
+    // Slots 2 and 3 start empty, including their keyboard layers.
+    private final HudLayout[][] extraLayouts = {
+            {new HudLayout(), new HudLayout(), new HudLayout(), new HudLayout()},
+            {new HudLayout(), new HudLayout(), new HudLayout(), new HudLayout()}
+    };
+
+    public HudLayout getLayout(int slot, boolean landscape, boolean keyboard) {
+        if (slot < 1 || slot > 2) {
+            return keyboard ? (landscape ? keyboardLandscapeLayout : keyboardPortraitLayout)
+                    : (landscape ? landscapeLayout : portraitLayout);
+        }
+        return extraLayouts[slot - 1][(keyboard ? 2 : 0) + (landscape ? 1 : 0)];
+    }
 
     public HudLayoutProfile() {
         initDefaults();
@@ -355,6 +369,55 @@ public final class HudLayoutProfile {
         return layout;
     }
 
+    /** A portable file contains exactly one slot and its four layers. */
+    public JSONObject exportSlot(int slot) throws JSONException {
+        if (slot < 0 || slot > 2) throw new JSONException("Invalid layout slot");
+        JSONObject result = new JSONObject();
+        result.put("format", "anland-hud-layout");
+        result.put("version", 1);
+        JSONObject layouts = new JSONObject();
+        layouts.put("portrait", getLayout(slot, false, false).toJSON());
+        layouts.put("landscape", getLayout(slot, true, false).toJSON());
+        layouts.put("keyboard_portrait", getLayout(slot, false, true).toJSON());
+        layouts.put("keyboard_landscape", getLayout(slot, true, true).toJSON());
+        result.put("layout", layouts);
+        return result;
+    }
+
+    /** Imports one slot from a portable file or an older full-profile export. */
+    public void importSlot(JSONObject document, int source, int destination) throws JSONException {
+        if (source < 0 || source > 2 || destination < 0 || destination > 2)
+            throw new JSONException("Invalid layout slot");
+        boolean portable = "anland-hud-layout".equals(document.optString("format"));
+        if (document.has("format") && !portable) throw new JSONException("Unknown layout format");
+        JSONObject layouts = portable ? document.getJSONObject("layout")
+                : source == 0 ? document : document.getJSONObject("layout_" + (source + 1));
+        String[] keys = portable || source != 0
+                ? new String[]{"portrait", "landscape", "keyboard_portrait", "keyboard_landscape"}
+                : new String[]{"portrait_layout", "landscape_layout", "keyboard_portrait_layout", "keyboard_landscape_layout"};
+        HudLayout[] parsed = new HudLayout[4];
+        for (int i = 0; i < keys.length; i++) {
+            // Old profiles may predate keyboard layers; those start empty.
+            if (!portable && source == 0 && i >= 2 && !layouts.has(keys[i])) {
+                parsed[i] = new HudLayout();
+                continue;
+            }
+            JSONObject item = layouts.getJSONObject(keys[i]);
+            if (item.has("floating_buttons") && item.optJSONArray("floating_buttons") == null ||
+                    item.has("dock_items") && item.optJSONArray("dock_items") == null)
+                throw new JSONException("Invalid layout controls");
+            parsed[i] = HudLayout.fromJSON(item);
+        }
+        if (destination == 0) {
+            portraitLayout = parsed[0];
+            landscapeLayout = parsed[1];
+            keyboardPortraitLayout = parsed[2];
+            keyboardLandscapeLayout = parsed[3];
+        } else {
+            System.arraycopy(parsed, 0, extraLayouts[destination - 1], 0, parsed.length);
+        }
+    }
+
     public JSONObject toJSON() throws JSONException {
         JSONObject obj = new JSONObject();
         obj.put("version", version);
@@ -364,6 +427,14 @@ public final class HudLayoutProfile {
         obj.put("landscape_layout", landscapeLayout.toJSON());
         obj.put("keyboard_portrait_layout", keyboardPortraitLayout.toJSON());
         obj.put("keyboard_landscape_layout", keyboardLandscapeLayout.toJSON());
+        for (int slot = 1; slot <= 2; slot++) {
+            JSONObject extra = new JSONObject();
+            extra.put("portrait", getLayout(slot, false, false).toJSON());
+            extra.put("landscape", getLayout(slot, true, false).toJSON());
+            extra.put("keyboard_portrait", getLayout(slot, false, true).toJSON());
+            extra.put("keyboard_landscape", getLayout(slot, true, true).toJSON());
+            obj.put("layout_" + (slot + 1), extra);
+        }
         return obj;
     }
 
@@ -383,12 +454,6 @@ public final class HudLayoutProfile {
             if (obj.has("landscape_layout")) {
                 p.landscapeLayout = HudLayout.fromJSON(obj.optJSONObject("landscape_layout"));
             }
-            if (p.portraitLayout.floatingButtons.isEmpty()) {
-                p.portraitLayout = createDefaultPortraitLayout();
-            }
-            if (p.landscapeLayout.floatingButtons.isEmpty()) {
-                p.landscapeLayout = createSteamDeckLayout();
-            }
             // The keyboard layer never falls back to a preset: empty is a
             // perfectly valid layout there, and that is the default.
             if (obj.has("keyboard_portrait_layout")) {
@@ -399,6 +464,16 @@ public final class HudLayoutProfile {
                 HudLayout kb = HudLayout.fromJSON(obj.optJSONObject("keyboard_landscape_layout"));
                 if (kb != null) p.keyboardLandscapeLayout = kb;
             }
+            String[] keys = {"portrait", "landscape", "keyboard_portrait", "keyboard_landscape"};
+            for (int slot = 1; slot <= 2; slot++) {
+                JSONObject extra = obj.optJSONObject("layout_" + (slot + 1));
+                if (extra == null) continue;
+                for (int i = 0; i < keys.length; i++) {
+                    JSONObject layout = extra.optJSONObject(keys[i]);
+                    if (layout != null) p.extraLayouts[slot - 1][i] = HudLayout.fromJSON(layout);
+                }
+            }
+            p.version = 3;
             return p;
         } catch (Exception e) {
             return new HudLayoutProfile();

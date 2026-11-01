@@ -380,4 +380,13 @@
     <string name="hud_combo_clear_all">清除全部</string>
     <string name="hud_combo_apply">应用组合键</string>
     <string name="hud_combo_empty">（空）</string>
+    <string name="hud_layout_1">切换布局 1</string>
+    <string name="hud_layout_2">切换布局 2</string>
+    <string name="hud_layout_3">切换布局 3</string>
+    <string name="hud_slot_1">布局 1</string>
+    <string name="hud_slot_2">布局 2</string>
+    <string name="hud_slot_3">布局 3</string>
+    <string name="hud_export_choose">选择要导出的布局</string>
+    <string name="hud_import_choose">选择要覆盖的布局</string>
+    <string name="hud_import_source_choose">选择备份中的布局</string>
 </resources>

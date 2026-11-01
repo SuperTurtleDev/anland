@@ -19,7 +19,6 @@ HUD layout edits require saving in the editor. Keyboard settings and positions a
 | --- | --- |
 | **SAVE** | Save the HUD layout profile and continue editing. |
 | **ADD** | Open the control list and place the selected control on the canvas. |
-| **SNAP** | Toggle grid snapping to help align controls while dragging. |
 | **LAYOUT** | Open the copy, preset, and clear menu described below. |
 | **EXIT** | Leave the editor. If the layout has unsaved changes, choose **SAVE & EXIT**, **DISCARD**, or **CANCEL**. Android Back also exits. |
 | **Edit keyboard** | Switch to the virtual keyboard and its dedicated HUD keyboard layer. |
@@ -109,7 +108,7 @@ The portrait hotkeys preset contains only the Super gesture, Q, OV, and CP. Add 
 
 ## Keyboard layer and settings
 
-Regular HUD and keyboard layers are stored separately, with separate portrait and landscape layouts. Tap **Edit keyboard** to see the keyboard and its HUD layer. This layer starts empty and accepts the controls described above. It is used while the virtual keyboard is visible; closing the keyboard returns to the regular HUD layer.
+Controls snap into alignment while dragging. Choose custom layout 1, 2, or 3 from **Layout**. Layout 1 retains the existing layout; layouts 2 and 3 start empty. Each custom layout stores regular HUD and keyboard layers separately in portrait and landscape. Add layout-switch buttons from **Mods & System** in the standard key picker; add a return button to an empty destination before switching to it. Tap **Edit keyboard** to see the keyboard and its HUD layer. This layer starts empty and accepts the controls described above. It is used while the virtual keyboard is visible; closing the keyboard returns to the regular HUD layer.
 
 Tap **Keyboard settings** on the keyboard layer:
 
@@ -123,7 +122,7 @@ Move the portrait floating keyboard using its drag handle. Keyboard settings and
 
 ## Backup, restore, and troubleshooting
 
-Under **Settings → Keyboard & Keys**, choose **Export HUD layout…** and use the Android file picker to save JSON. If there is no layout to export, save one in the editor first. **Import HUD layout…** replaces the current HUD profile and enables the HUD. Export a backup first if you want to keep the existing layout.
+Under **Settings → Keyboard & Keys**, choose **Export HUD layout…**, select one layout, and save the JSON file. It includes portrait, landscape, and keyboard layers for that layout. For **Import HUD layout…**, select a file and one destination layout to replace; other layouts are preserved. For an older full-profile backup, first choose the source layout in the backup. Import enables HUD controls.
 
 - **Controls are missing:** check the display switch, current orientation, and layer. If hidden by holding KB, hold the still-visible KB again to restore them. In the editor, check whether the current layout is empty or its opacity is too low.
 - **Controls do not respond:** check their bindings and whether the target supports the input. Under **Settings → Immersive Mode → Immersive input**, check that **Touch HUD controls in immersive mode** is enabled. When disabled while the touchscreen is grabbed, the HUD is display-only and touches go to the desktop.
