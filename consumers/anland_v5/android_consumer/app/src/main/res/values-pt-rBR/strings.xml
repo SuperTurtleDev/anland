@@ -316,10 +316,6 @@
     <string name="immersive_inputs_all_filtered">Todos os dispositivos que você salvou estão com o Gold. O modo imersivo não iniciará até que isso mude; sua seleção foi mantida como está.</string>
     <string name="immersive_inputs_none">Nenhum dispositivo de entrada encontrado.</string>
     <string name="immersive_inputs_unavailable">Não foi possível listar os dispositivos de entrada: root foi negado ou está indisponível.</string>
-    <string name="stylus_button_right_click_switch">Botão lateral da S Pen para clique direito</string>
-    <string name="stylus_hover_scroll_switch">Rolar ao pairar com o botão da S Pen</string>
-    <string name="stylus_hover_scroll_hint">Segure o botão lateral da S Pen e mova a caneta enquanto paira. O movimento vertical controla a rolagem, incluindo a parte vertical de um movimento diagonal.</string>
-    <string name="stylus_hover_scroll_speed_label">Velocidade de rolagem ao pairar com a S Pen</string>
     <string name="pad_tap">Touchpad externo: cliques sintéticos</string>
     <string name="pad_tip">Controla toques com um e dois dedos, além de arrastar com toque longo, em touchpads externos capturados e no modo imersivo. Os botões físicos continuam funcionando quando desativado. O touchpad na tela não muda.</string>
     <string name="pad_guard">Ignorar toques do touchpad externo por %1$d ms após rolar (0 = desligado)</string>

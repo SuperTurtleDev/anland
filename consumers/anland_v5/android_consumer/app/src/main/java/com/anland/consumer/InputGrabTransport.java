@@ -20,6 +20,9 @@ interface InputGrabTransport {
         /** Opened device, initially or on hotplug/state changes. Ranges are raw ABS units. */
         void onDevice(int dev, int cls, int minX, int maxX, int minY, int maxY, int flags);
 
+        /** Range for an advertised EV_ABS axis, following its DEVICE record. */
+        void onAxisRange(int dev, int axis, int min, int max);
+
         /** Initial setup settled. Hotplug and device-state records may still follow. */
         void onReady(int grabbedCount);
 

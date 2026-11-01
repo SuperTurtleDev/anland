@@ -810,3 +810,23 @@ index cc59fc9e..2f42e786 100644
  		.color_transform = NULL,
  	};
  	if (m->icc_transform && !has_img_desc)
+diff --git a/src/input/tablet.c b/src/input/tablet.c
+--- a/src/input/tablet.c
++++ b/src/input/tablet.c
+@@ -1,0 +2 @@
++#include "anland_backend/anland.h"
+@@ -27,2 +28,3 @@
+-	if (!wlr_input_device_is_libinput(device) ||
+-		!(device_handle = wlr_libinput_get_device_handle(device))) {
++    bool anland = mango_anland_tablet_is(wlr_tablet_from_input_device(device));
++    if (!anland && (!wlr_input_device_is_libinput(device) ||
++        !(device_handle = wlr_libinput_get_device_handle(device)))) {
+@@ -46 +48,3 @@
+-	if (libinput_device_config_send_events_get_modes(device_handle)) {
++    if (anland) {
++		wlr_cursor_attach_input_device(server.cursor, device);
++    } else if (libinput_device_config_send_events_get_modes(device_handle)) {
+@@ -52,0 +57,3 @@
++
++    /* Android pens have no libinput group or companion pad. */
++    if (anland) return;

@@ -2,7 +2,9 @@ package com.anland.consumer;
 
 /** One automatic attempt window per foreground entry or lifecycle interruption. */
 final class AutomaticImmersiveEntry {
-    private static final long WAIT_MS = 10_000L;
+    // Gold backs off for up to 30 seconds between device scans. Allow its
+    // next scan, Android device publication, and previous-helper cleanup too.
+    private static final long WAIT_MS = 45_000L;
     private boolean pending;
     private long deadline;
 

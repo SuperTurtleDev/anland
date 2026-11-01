@@ -541,6 +541,8 @@ impl Anland {
 
     fn on_session_lost(&mut self, niri: &mut Niri) {
         if self.session_generation.take().is_none() { return; }
+        self.input_backend.queue_tablet_releases();
+        self.client.reset_input();
         self.pending_input_releases.extend(self.input_backend.take_releases());
         self.selection_epoch.fetch_add(1, Ordering::AcqRel);
         self.clipboard_read_pending = false;
@@ -675,6 +677,9 @@ impl Anland {
         &mut self,
         niri: &mut Niri,
     ) -> Option<smithay::backend::input::InputEvent<input::AnlandInputBackend>> {
+        if let Some(event) = self.input_backend.pop_pending() {
+            return Some(event);
+        }
         if let Some(release) = self.pending_input_releases.pop_front() {
             return input::translate(&mut self.input_backend, &release);
         }

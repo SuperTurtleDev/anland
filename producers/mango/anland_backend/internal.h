@@ -10,6 +10,7 @@
 #include "mango/ext-protocol/text-input.h"
 #include <anland_de_backend.h>
 #include <anland_audio.h>
+#include <anland_tablet.h>
 #include <drm_fourcc.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -30,6 +31,7 @@
 #include <wlr/interfaces/wlr_output.h>
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/interfaces/wlr_touch.h>
+#include <wlr/interfaces/wlr_tablet_tool.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_data_device.h>
@@ -75,6 +77,10 @@ struct anland_backend {
 	struct mango_anland_text *text;
 	struct wlr_pointer pointer;
 	struct wlr_touch touch;
+    struct wlr_tablet tablet;
+    struct wlr_tablet_tool tablet_tools[ANLAND_TABLET_MAX_TOOLS];
+    uint32_t tablet_tool_ids[ANLAND_TABLET_MAX_TOOLS];
+    anland_tablet tablet_state;
 	struct wl_event_source *data_source, *ready_source, *reconnect_source;
 	struct wl_event_source *scene_source, *frame_timer, *pump_timer;
 	bool destroying, session_lost;
@@ -100,6 +106,7 @@ struct anland_backend {
 extern const struct wlr_keyboard_impl mango_private_keyboard_impl;
 extern const struct wlr_pointer_impl mango_private_pointer_impl;
 extern const struct wlr_touch_impl mango_private_touch_impl;
+extern const struct wlr_tablet_impl mango_private_tablet_impl;
 
 
 extern const struct wlr_output_impl mango_private_output_impl;
@@ -114,6 +121,7 @@ bool mango_private_import_buffers(struct anland_backend *backend);
 int mango_private_handle_ready(int fd, uint32_t mask, void *data);
 int mango_private_handle_input(int fd, uint32_t mask, void *data);
 void mango_private_reset_input(struct anland_backend *backend);
+void mango_private_replay_tablets(struct anland_backend *backend);
 void mango_private_clear_input_payload(struct anland_backend *backend);
 void mango_private_cancel_clipboard_read(struct anland_backend *backend);
 void mango_private_clear_clipboard_writes(struct anland_backend *backend);

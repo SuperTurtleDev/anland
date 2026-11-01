@@ -3,6 +3,10 @@
 const struct wlr_keyboard_impl mango_private_keyboard_impl = {.name = "anland-keyboard"};
 const struct wlr_pointer_impl mango_private_pointer_impl = {.name = "anland-pointer"};
 const struct wlr_touch_impl mango_private_touch_impl = {.name = "anland-touch"};
+const struct wlr_tablet_impl mango_private_tablet_impl = {.name = "anland-tablet"};
+bool mango_anland_tablet_is(struct wlr_tablet *tablet) {
+    return tablet && tablet->impl == &mango_private_tablet_impl;
+}
 
 uint32_t mango_private_now_msec(void) {
 	struct timespec ts;
@@ -16,6 +20,67 @@ static double normalized(float value, uint32_t extent) {
 }
 static void emit_pointer_frame(struct anland_backend *b) {
 	wl_signal_emit_mutable(&b->pointer.events.frame, &b->pointer);
+}
+static void emit_tablet_frame(struct anland_backend *b,
+        const anland_tablet_sample *previous, const anland_tablet_sample *sample) {
+    struct wlr_tablet_tool *tool = NULL;
+    unsigned index;
+    for (index = 0; index < ANLAND_TABLET_MAX_TOOLS; ++index)
+        if (b->tablet_tool_ids[index] == sample->tool_id) { tool = &b->tablet_tools[index]; break; }
+    if (!tool) for (index = 0; index < ANLAND_TABLET_MAX_TOOLS; ++index) {
+        if (!b->tablet_tool_ids[index]) {
+            tool = &b->tablet_tools[index];
+            b->tablet_tool_ids[index] = sample->tool_id;
+            tool->type = sample->tool_type == TABLET_TOOL_ERASER ? WLR_TABLET_TOOL_TYPE_ERASER : WLR_TABLET_TOOL_TYPE_PEN;
+            tool->hardware_serial = ((uint64_t)sample->device_id << 32) | sample->tool_id;
+            tool->pressure = sample->capabilities & TABLET_CAP_PRESSURE;
+            tool->tilt = sample->capabilities & TABLET_CAP_TILT;
+            tool->distance = sample->capabilities & TABLET_CAP_DISTANCE;
+            wl_signal_init(&tool->events.destroy);
+            break;
+        }
+    }
+    if (!tool) return;
+    bool in = sample->flags & TABLET_FLAG_PROXIMITY, was_in = previous->flags & TABLET_FLAG_PROXIMITY;
+    bool down = sample->flags & TABLET_FLAG_TIP_DOWN, was_down = previous->flags & TABLET_FLAG_TIP_DOWN;
+    double x = normalized(sample->x, b->width), y = normalized(sample->y, b->height);
+    if (in && !was_in) {
+        struct wlr_tablet_tool_proximity_event e = {.tablet=&b->tablet,.tool=tool,.time_msec=sample->time_msec,
+            .x=x,.y=y,.state=WLR_TABLET_TOOL_PROXIMITY_IN};
+        wl_signal_emit_mutable(&b->tablet.events.proximity, &e);
+    }
+    if (was_down && !down) {
+        struct wlr_tablet_tool_tip_event e = {.tablet=&b->tablet,.tool=tool,.time_msec=sample->time_msec,
+            .x=x,.y=y,.state=WLR_TABLET_TOOL_TIP_UP};
+        wl_signal_emit_mutable(&b->tablet.events.tip, &e);
+    }
+    if (in) {
+        uint32_t axes = WLR_TABLET_TOOL_AXIS_X | WLR_TABLET_TOOL_AXIS_Y;
+        if (tool->pressure) axes |= WLR_TABLET_TOOL_AXIS_PRESSURE;
+        if (tool->tilt) axes |= WLR_TABLET_TOOL_AXIS_TILT_X | WLR_TABLET_TOOL_AXIS_TILT_Y;
+        if (tool->distance) axes |= WLR_TABLET_TOOL_AXIS_DISTANCE;
+        struct wlr_tablet_tool_axis_event e = {.tablet=&b->tablet,.tool=tool,.time_msec=sample->time_msec,
+            .updated_axes=axes,.x=x,.y=y,
+            .dx=was_in ? x-normalized(previous->x,b->width) : 0,
+            .dy=was_in ? y-normalized(previous->y,b->height) : 0,
+            .pressure=sample->pressure,.distance=sample->distance,.tilt_x=sample->tilt_x,.tilt_y=sample->tilt_y};
+        wl_signal_emit_mutable(&b->tablet.events.axis, &e);
+    }
+    if (down && !was_down) {
+        struct wlr_tablet_tool_tip_event e = {.tablet=&b->tablet,.tool=tool,.time_msec=sample->time_msec,
+            .x=x,.y=y,.state=WLR_TABLET_TOOL_TIP_DOWN};
+        wl_signal_emit_mutable(&b->tablet.events.tip, &e);
+    }
+    for (unsigned bit=0;bit<2;++bit) if ((previous->buttons ^ sample->buttons) & (1u<<bit)) {
+        struct wlr_tablet_tool_button_event e = {.tablet=&b->tablet,.tool=tool,.time_msec=sample->time_msec,
+            .button=0x14bu+bit,.state=(sample->buttons & (1u<<bit)) ? WLR_BUTTON_PRESSED : WLR_BUTTON_RELEASED};
+        wl_signal_emit_mutable(&b->tablet.events.button, &e);
+    }
+    if (!in && was_in) {
+        struct wlr_tablet_tool_proximity_event e = {.tablet=&b->tablet,.tool=tool,.time_msec=sample->time_msec,
+            .x=x,.y=y,.state=WLR_TABLET_TOOL_PROXIMITY_OUT};
+        wl_signal_emit_mutable(&b->tablet.events.proximity, &e);
+    }
 }
 void mango_private_clear_input_payload(struct anland_backend *backend) {
 	free(backend->input_payload);
@@ -38,9 +103,36 @@ static bool track_input_id(uint32_t *ids, uint32_t *count, uint32_t id, bool dow
     return true;
 }
 
+void mango_private_replay_tablets(struct anland_backend *b) {
+    /* Input can arrive after fd attachment but before the first output target.
+     * Register the native device before publishing any cached proximity/tip. */
+    for (unsigned i=0;i<ANLAND_TABLET_MAX_TOOLS;++i) {
+        const anland_tablet_slot *slot = &b->tablet_state.tools[i];
+        if (!slot->occupied || !(slot->current.flags & TABLET_FLAG_PROXIMITY)) continue;
+        anland_tablet_sample previous = slot->current;
+        previous.flags = previous.buttons = 0;
+        previous.pressure = 0;
+        emit_tablet_frame(b, &previous, &slot->current);
+    }
+}
+
 void mango_private_reset_input(struct anland_backend *b) {
-    if (!b->announced) return;
+    if (!b->announced) {
+        memset(&b->tablet_state, 0, sizeof(b->tablet_state));
+        return;
+    }
     uint32_t time = mango_private_now_msec();
+    unsigned cursor = 0;
+    anland_tablet_sample previous, sample;
+    while (anland_tablet_release_next(&b->tablet_state, &cursor, &previous, &sample)) {
+        sample.time_msec = time;
+        emit_tablet_frame(b, &previous, &sample);
+    }
+    for (unsigned i=0;i<ANLAND_TABLET_MAX_TOOLS;++i) if (b->tablet_tool_ids[i]) {
+        wl_signal_emit_mutable(&b->tablet_tools[i].events.destroy, &b->tablet_tools[i]);
+        memset(&b->tablet_tools[i], 0, sizeof(b->tablet_tools[i]));
+        b->tablet_tool_ids[i] = 0;
+    }
     while (b->keyboard.num_keycodes) {
         struct wlr_keyboard_key_event e = {.time_msec=time,
             .keycode=b->keyboard.keycodes[b->keyboard.num_keycodes - 1],
@@ -109,6 +201,13 @@ int mango_private_handle_input(int fd, uint32_t mask, void *data) {
 	int ret;
 	while ((ret = anland_device_poll_input(b->device, &ev, 0)) > 0) {
 		uint32_t time = mango_private_now_msec();
+		if (anland_tablet_is_event(ev.type)) {
+            anland_tablet_sample previous, sample;
+            int status = anland_tablet_feed(&b->tablet_state, &ev, &previous, &sample);
+            if (status < 0) { mango_private_drop_session(b); return 0; }
+            if (status > 0 && b->announced) emit_tablet_frame(b, &previous, &sample);
+            continue;
+        }
 		switch (ev.type) {
 		case ANLAND_DEVICE_IN_KEY: {
 			struct wlr_keyboard_key_event e = {.time_msec=time, .keycode=ev.key.keycode,

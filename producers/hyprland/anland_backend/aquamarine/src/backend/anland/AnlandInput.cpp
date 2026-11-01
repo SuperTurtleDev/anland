@@ -10,6 +10,41 @@
 using namespace Aquamarine;
 using namespace Hyprutils::Math;
 static uint32_t inputTime() { timespec now{}; clock_gettime(CLOCK_MONOTONIC, &now); return uint32_t(now.tv_sec * 1000 + now.tv_nsec / 1000000); }
+void CAnlandBackend::tabletFrame(const anland_tablet_sample& previous, const anland_tablet_sample& sample) {
+    if (!m_tablet || !m_width || !m_height) return;
+    auto& tool = m_tablet->tools[sample.tool_id];
+    if (!tool) {
+        tool = Hyprutils::Memory::makeShared<CAnlandTabletTool>();
+        tool->type = sample.tool_type == TABLET_TOOL_ERASER ? ITabletTool::AQ_TABLET_TOOL_TYPE_ERASER : ITabletTool::AQ_TABLET_TOOL_TYPE_PEN;
+        tool->serial = (uint64_t(sample.device_id) << 32) | sample.tool_id;
+        if (sample.capabilities & TABLET_CAP_PRESSURE) tool->capabilities |= ITabletTool::AQ_TABLET_TOOL_CAPABILITY_PRESSURE;
+        if (sample.capabilities & TABLET_CAP_TILT) tool->capabilities |= ITabletTool::AQ_TABLET_TOOL_CAPABILITY_TILT;
+        if (sample.capabilities & TABLET_CAP_DISTANCE) tool->capabilities |= ITabletTool::AQ_TABLET_TOOL_CAPABILITY_DISTANCE;
+    }
+    const Vector2D absolute{std::clamp(double(sample.x) / m_width, 0.0, 1.0), std::clamp(double(sample.y) / m_height, 0.0, 1.0)};
+    const bool in = sample.flags & TABLET_FLAG_PROXIMITY, wasIn = previous.flags & TABLET_FLAG_PROXIMITY;
+    const bool down = sample.flags & TABLET_FLAG_TIP_DOWN, wasDown = previous.flags & TABLET_FLAG_TIP_DOWN;
+    const auto time = sample.time_msec;
+    if (in && !wasIn)
+        m_tablet->events.proximity.emit(ITablet::SProximityEvent{.tool=tool,.timeMs=time,.absolute=absolute,.in=true});
+    if (wasDown && !down)
+        m_tablet->events.tip.emit(ITablet::STipEvent{.tool=tool,.timeMs=time,.absolute=absolute,.down=false});
+    if (in) {
+        uint32_t axes = AQ_TABLET_TOOL_AXIS_X | AQ_TABLET_TOOL_AXIS_Y;
+        if (sample.capabilities & TABLET_CAP_PRESSURE) axes |= AQ_TABLET_TOOL_AXIS_PRESSURE;
+        if (sample.capabilities & TABLET_CAP_TILT) axes |= AQ_TABLET_TOOL_AXIS_TILT_X | AQ_TABLET_TOOL_AXIS_TILT_Y;
+        if (sample.capabilities & TABLET_CAP_DISTANCE) axes |= AQ_TABLET_TOOL_AXIS_DISTANCE;
+        m_tablet->events.axis.emit(ITablet::SAxisEvent{.tool=tool,.timeMs=time,.updatedAxes=axes,.absolute=absolute,
+            .delta=wasIn ? Vector2D{(sample.x-previous.x)/m_width,(sample.y-previous.y)/m_height} : Vector2D{},
+            .tilt={sample.tilt_x,sample.tilt_y},.pressure=sample.pressure,.distance=sample.distance});
+    }
+    if (down && !wasDown)
+        m_tablet->events.tip.emit(ITablet::STipEvent{.tool=tool,.timeMs=time,.absolute=absolute,.down=true});
+    for (unsigned i = 0; i < 2; ++i) if ((sample.buttons ^ previous.buttons) & (1u << i))
+        m_tablet->events.button.emit(ITablet::SButtonEvent{.tool=tool,.timeMs=time,.button=0x14bu+i,.down=bool(sample.buttons & (1u<<i))});
+    if (!in && wasIn)
+        m_tablet->events.proximity.emit(ITablet::SProximityEvent{.tool=tool,.timeMs=time,.absolute=absolute,.in=false});
+}
 void CAnlandBackend::cancelTextQueuedKeys() { resetInput(); }
 void CAnlandBackend::deliverTextQueuedKey(uint32_t key, bool pressed, uint32_t time) {
     if (pressed) m_keys.insert(key); else m_keys.erase(key);
@@ -18,6 +53,13 @@ void CAnlandBackend::deliverTextQueuedKey(uint32_t key, bool pressed, uint32_t t
 void CAnlandBackend::resetInput() {
     if (onInputReset) onInputReset();
     const auto time = inputTime();
+    unsigned cursor = 0;
+    anland_tablet_sample previous{}, sample{};
+    while (m_tablet && anland_tablet_release_next(&m_tablet->state, &cursor, &previous, &sample)) {
+        sample.time_msec = time;
+        tabletFrame(previous, sample);
+    }
+    if (m_tablet) m_tablet->tools.clear();
     if (m_keyboard) for (auto key : m_keys) m_keyboard->events.key.emit(IKeyboard::SKeyEvent{.timeMs=time, .key=key, .pressed=false});
     if (m_pointer) {
         for (auto button : m_buttons) m_pointer->events.button.emit(IPointer::SButtonEvent{.timeMs=time, .button=button, .pressed=false});
@@ -78,6 +120,13 @@ void CAnlandBackend::onInputReadable() {
         if (result <= 0) break;
         const uint32_t time = inputTime();
         if (event.type != ANLAND_DEVICE_IN_PTR_MOTION) flushMotion();
+        if (anland_tablet_is_event(event.type)) {
+            anland_tablet_sample previous{}, sample{};
+            const int tablet = anland_tablet_feed(&m_tablet->state, &event, &previous, &sample);
+            if (tablet < 0) { m_lost = true; break; }
+            if (tablet > 0) tabletFrame(previous, sample);
+            continue;
+        }
         switch (event.type) {
             case ANLAND_DEVICE_IN_PTR_MOTION: {
                 const Vector2D delta{event.pointer_motion.dx, event.pointer_motion.dy};

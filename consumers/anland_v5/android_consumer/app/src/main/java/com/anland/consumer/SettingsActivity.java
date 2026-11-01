@@ -86,9 +86,6 @@ public class SettingsActivity extends Activity {
 
     // ===== 新增：触摸板 Key =====
     private static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
-    private static final String KEY_STYLUS_BUTTON_RIGHT_CLICK = "stylus_button_right_click";
-    private static final String KEY_STYLUS_HOVER_SCROLL = "stylus_hover_scroll";
-    private static final String KEY_STYLUS_HOVER_SCROLL_SPEED = "stylus_hover_scroll_speed";
     private static final String KEY_MOUSE_ACCEL = "mouse_speed";
     private static final String KEY_POINTER_CAPTURE = "pointer_capture";
     private static final String KEY_SCROLL_SPEED = "scroll_speed";
@@ -1252,35 +1249,6 @@ public class SettingsActivity extends Activity {
         padDebug.setOnCheckedChangeListener((v, checked) ->
                 prefs.edit().putBoolean(KEY_PAD_DEBUG, checked).apply());
         root.addView(padDebug);
-
-        Switch stylusRightClickSwitch = new Switch(this);
-        stylusRightClickSwitch.setText(R.string.stylus_button_right_click_switch);
-        stylusRightClickSwitch.setTextSize(14);
-        stylusRightClickSwitch.setPadding(0, dp(8), 0, 0);
-        stylusRightClickSwitch.setChecked(prefs.getBoolean(KEY_STYLUS_BUTTON_RIGHT_CLICK, true));
-        stylusRightClickSwitch.setOnCheckedChangeListener((v, checked) ->
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                        .putBoolean(KEY_STYLUS_BUTTON_RIGHT_CLICK, checked).apply());
-        root.addView(stylusRightClickSwitch);
-
-        Switch stylusHoverScrollSwitch = new Switch(this);
-        stylusHoverScrollSwitch.setText(R.string.stylus_hover_scroll_switch);
-        stylusHoverScrollSwitch.setTextSize(14);
-        stylusHoverScrollSwitch.setPadding(0, dp(8), 0, 0);
-        stylusHoverScrollSwitch.setChecked(prefs.getBoolean(KEY_STYLUS_HOVER_SCROLL, true));
-        stylusHoverScrollSwitch.setOnCheckedChangeListener((v, checked) ->
-                prefs.edit().putBoolean(KEY_STYLUS_HOVER_SCROLL, checked).apply());
-        root.addView(stylusHoverScrollSwitch);
-
-        TextView stylusHoverScrollHint = new TextView(this);
-        stylusHoverScrollHint.setText(R.string.stylus_hover_scroll_hint);
-        stylusHoverScrollHint.setTextSize(12);
-        stylusHoverScrollHint.setTextColor(Color.GRAY);
-        stylusHoverScrollHint.setPadding(0, dp(4), 0, dp(4));
-        root.addView(stylusHoverScrollHint);
-        addFloatSlider(root, R.string.stylus_hover_scroll_speed_label,
-                R.string.scroll_speed_value, null, KEY_STYLUS_HOVER_SCROLL_SPEED,
-                0.05f, 3.0f, 0.05f, 0.5f);
 
         // External mouse pointer capture.  This is opt-in because it changes
         // Android's mouse event mode from absolute coordinates to relative motion.

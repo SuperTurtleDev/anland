@@ -102,6 +102,13 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
          * like a real touch, so touchpad mode keeps working.
          */
         void onGrabbedTouch(MotionEvent ev);
+        /** Raw stylus sample from a grabbed touchscreen, already mapped to view pixels. */
+        void onEvdevTabletSample(int helperDevice, EvdevTabletState.Sample sample,
+                                 float viewX, float viewY);
+        /** Cancel tools belonging to a helper device before its slot is replaced. */
+        void cancelEvdevTabletDevice(int helperDevice, long timeMsec);
+        /** Cancel all raw tools when the grabbed stream is interrupted or ends. */
+        void cancelEvdevTabletTools(long timeMsec);
         /** Release the previous touchscreen stream before its new owner sends input. */
         void onTouchscreenGrabChanged(boolean grabbed);
         /** A {@link Touchpad} wired to the host's cursor, for a grabbed physical pad. */
@@ -144,6 +151,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         int contactFrames;
 
         final EvdevTouchState touch = new EvdevTouchState();
+        final EvdevTabletState tablet = new EvdevTabletState();
         boolean droppingFrame;
 
         /** Contacts currently reported to the host, in pointer-index order. */
@@ -153,6 +161,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         int activeCount = 0;
         long downTime = 0;
         boolean absDirty = false;
+        boolean tabletDirty = false;
 
         // Relative axes, accumulated over a frame and emitted on SYN_REPORT.
         float relX, relY;
@@ -478,6 +487,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                          int flags) {
         if (dev < 0 || dev >= devs.length)
             return;
+        if (devs[dev] != null)
+            host.cancelEvdevTabletDevice(dev, SystemClock.uptimeMillis());
         Dev d = new Dev();
         d.devIdx = dev;
         d.cls = cls;
@@ -504,6 +515,13 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         devs[dev] = d;
         if ((flags & InputGrab.DEV_GRABBED) != 0 && cls == InputGrab.CLASS_TOUCHSCREEN)
             host.onTouchscreenGrabChanged(true);
+    }
+
+    @Override
+    public void onAxisRange(int dev, int axis, int min, int max) {
+        if (dev < 0 || dev >= devs.length || devs[dev] == null)
+            return;
+        devs[dev].tablet.setRange(axis, min, max);
     }
 
     @Override
@@ -624,8 +642,12 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 handleRelEvent(d, code, value);
                 break;
             case EV_ABS:
-                if (d.cls == InputGrab.CLASS_TOUCHSCREEN || d.cls == InputGrab.CLASS_TOUCHPAD)
+                if (d.cls == InputGrab.CLASS_TOUCHSCREEN) {
+                    d.tabletDirty |= d.tablet.abs(code, value);
                     d.absDirty |= d.touch.abs(code, value);
+                } else if (d.cls == InputGrab.CLASS_TOUCHPAD) {
+                    d.absDirty |= d.touch.abs(code, value);
+                }
                 break;
             default:
                 break;   // EV_MSC scan codes, EV_LED, EV_SW: nothing to forward
@@ -637,10 +659,17 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             return;   // auto-repeat: the compositor makes its own from the keymap
         boolean pressed = value != 0;
 
+        boolean tabletEvent = d.cls == InputGrab.CLASS_TOUCHSCREEN
+                && d.tablet.key(code, value);
+        if (tabletEvent)
+            d.tabletDirty = true;
+
         if (d.touch.key(code, pressed)) {
             d.absDirty = true;
             return;
         }
+        if (tabletEvent)
+            return; // stylus tool/tip/side-button states are native tablet input.
         if (code >= BTN_FIRST && code <= BTN_LAST) {
             handlePointerButton(d, code, pressed);
             return;
@@ -759,6 +788,13 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             resolveTwin(d);
             if (!d.dup)
                 dispatchContacts(d);
+        }
+        if (d.tabletDirty && d.cls == InputGrab.CLASS_TOUCHSCREEN) {
+            d.tabletDirty = false;
+            for (EvdevTabletState.Sample sample : d.tablet.endFrame(eventTimeUs / 1000L)) {
+                mapTabletContact(d, sample);
+                host.onEvdevTabletSample(d.devIdx, sample, mapped[0], mapped[1]);
+            }
         }
     }
 
@@ -948,6 +984,23 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         mapped[1] = host.outputOriginY() + ov * host.outputHeight();
     }
 
+    /** Convert legacy ABS_X/Y samples to the MT coordinate space used by the touch node. */
+    private void mapTabletContact(Dev d, EvdevTabletState.Sample sample) {
+        float rawX = sample.x;
+        float rawY = sample.y;
+        if (d.tablet.hasRange(sample.coordinateAxisX)) {
+            rawX = EvdevTabletState.mapCoordinate(rawX,
+                    d.tablet.rangeMin(sample.coordinateAxisX),
+                    d.tablet.rangeMax(sample.coordinateAxisX), d.minX, d.maxX);
+        }
+        if (d.tablet.hasRange(sample.coordinateAxisY)) {
+            rawY = EvdevTabletState.mapCoordinate(rawY,
+                    d.tablet.rangeMin(sample.coordinateAxisY),
+                    d.tablet.rangeMax(sample.coordinateAxisY), d.minY, d.maxY);
+        }
+        mapContact(d, rawX, rawY);
+    }
+
     private static float clamp01(float f) {
         if (!(f > 0f))
             return 0f;   // also catches NaN
@@ -964,6 +1017,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
      */
     private void releaseEverything() {
         long now = SystemClock.uptimeMillis();
+        host.cancelEvdevTabletTools(now);
         for (Dev d : devs) {
             if (d == null)
                 continue;
@@ -972,7 +1026,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 d.activeCount = 0;
             }
             d.touch.clear();
+            d.tablet.clear();
             d.absDirty = false;
+            d.tabletDirty = false;
             d.relX = d.relY = d.wheel = d.hwheel = 0f;
             d.relativeTimeUs = 0L;
             d.relativeSpeed = d.relativePendingDistance = 0f;

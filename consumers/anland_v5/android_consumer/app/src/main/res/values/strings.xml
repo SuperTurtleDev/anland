@@ -209,10 +209,6 @@
 
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">Touchpad Mode (relative movement)</string>
-    <string name="stylus_button_right_click_switch">S Pen side button for right click</string>
-    <string name="stylus_hover_scroll_switch">Scroll while hovering with S Pen button</string>
-    <string name="stylus_hover_scroll_hint">Hold the S Pen side button and move the hovering pen. Vertical movement controls scrolling, including the vertical part of diagonal movement.</string>
-    <string name="stylus_hover_scroll_speed_label">S Pen hover scroll speed</string>
     <string name="touchpad_hint">ON: finger slides move mouse cursor (relative). OFF: touch maps directly to screen (absolute).</string>
     <string name="pointer_capture_switch">Capture external pointer</string>
     <string name="pointer_capture_hint">Locks an external mouse or touchpad to the desktop view and uses relative movement, so reaching the top or bottom edge will not reveal Android system bars. Use Android Back to release temporarily; click the desktop view to capture again. Screen touch input is unaffected.</string>

@@ -9,6 +9,7 @@
 #include <vector>
 
 struct anland_de_backend;
+struct anland_tablet_sample;
 
 namespace Aquamarine {
     class CAnlandAllocator;
@@ -16,6 +17,8 @@ namespace Aquamarine {
     class CAnlandPointer;
     class CAnlandKeyboard;
     class CAnlandTouch;
+    class CAnlandTablet;
+    class CAnlandTabletTool;
 
     // Owns one public backend. All frame and input operations run on AQ's dispatch thread.
     class CAnlandBackend : public IBackendImplementation {
@@ -61,6 +64,7 @@ namespace Aquamarine {
         void dispatchScene();
         void onInputReadable();
         void resetInput();
+        void tabletFrame(const anland_tablet_sample& previous, const anland_tablet_sample& sample);
         void syncWatchers();
         void loseSession();
         void syncMouseCapture();
@@ -72,6 +76,7 @@ namespace Aquamarine {
         Hyprutils::Memory::CSharedPointer<CAnlandPointer> m_pointer;
         Hyprutils::Memory::CSharedPointer<CAnlandKeyboard> m_keyboard;
         Hyprutils::Memory::CSharedPointer<CAnlandTouch> m_touch;
+        Hyprutils::Memory::CSharedPointer<CAnlandTablet> m_tablet;
         std::vector<Hyprutils::Memory::CSharedPointer<SPollFD>> m_watchers;
         Hyprutils::Memory::CSharedPointer<std::function<void()>> m_readyIdle;
 

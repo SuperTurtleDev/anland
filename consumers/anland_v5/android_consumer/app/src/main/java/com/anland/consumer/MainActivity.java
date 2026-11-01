@@ -12,6 +12,7 @@ import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
+import android.hardware.input.InputManager;
 import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
@@ -41,6 +42,7 @@ import android.widget.FrameLayout;
 import android.util.DisplayMetrics;   // ADDED
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 public class MainActivity extends Activity
         implements SurfaceHolder.Callback, SystemIME.Host, ImmersiveMode.Host {
@@ -90,6 +92,31 @@ public class MainActivity extends Activity
     static final String EXTRA_WINDOW_NAME = "window_name";
     // This window's own native transport instance (its own consumer_state handle).
     private Native mNative;
+    private final TabletInput tabletInput = new TabletInput(frame -> {
+        if (mNative != null) {
+            mNative.sendTabletSample(frame.toolId, frame.toolType, frame.capabilities,
+                    frame.deviceId, frame.x, frame.y, frame.pressure,
+                    frame.tiltX, frame.tiltY, frame.distance,
+                    frame.flags, frame.buttons, frame.timeMsec);
+        }
+    });
+    private final InputManager.InputDeviceListener tabletDeviceListener =
+            new InputManager.InputDeviceListener() {
+                @Override public void onInputDeviceAdded(int deviceId) { }
+
+                @Override public void onInputDeviceRemoved(int deviceId) {
+                    tabletInput.cancelDevice(deviceId, SystemClock.uptimeMillis());
+                }
+
+                @Override public void onInputDeviceChanged(int deviceId) {
+                    tabletInput.cancelDevice(deviceId, SystemClock.uptimeMillis());
+                }
+            };
+    private InputManager tabletInputManager;
+    private boolean tabletDeviceListenerRegistered;
+    private static final int MAX_RAW_TABLET_DEVICES = 32;
+    private final int[] rawTabletDeviceIds = new int[MAX_RAW_TABLET_DEVICES];
+    private int nextRawTabletDeviceId = 1;
     private final TouchLedger forwardedTouches = new TouchLedger(new TouchLedger.Sender() {
         @Override public void touch(int action, int id, float x, float y) {
             if (mNative != null)
@@ -151,9 +178,6 @@ public class MainActivity extends Activity
 
     // ==================== 触摸板相关设置 ====================
     public static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
-    public static final String KEY_STYLUS_BUTTON_RIGHT_CLICK = "stylus_button_right_click";
-    public static final String KEY_STYLUS_HOVER_SCROLL = "stylus_hover_scroll";
-    public static final String KEY_STYLUS_HOVER_SCROLL_SPEED = "stylus_hover_scroll_speed";
     public static final String KEY_MOUSE_ACCEL = "mouse_speed"; // 名称仍为 speed，实际控制加速度强度
     // Two-finger scroll tuning, shared by the on-screen and captured touchpads.
     public static final String KEY_SCROLL_SPEED = "scroll_speed";
@@ -281,15 +305,18 @@ public class MainActivity extends Activity
             displayRotation = d.getRotation();
     }
 
-    // Called from native on_fallback (display lib dropped the connection). Runs on a
-    // native worker thread, so hop to the UI thread before touching the window.
+    // Called from native on_fallback (display lib dropped the connection). Always
+    // enqueue the UI work: this can be called inline from push_input_event while a
+    // JNI sender holds input_lock, and cancelAll sends back through that same lock.
     // The display transport already has a reconnect path; only close this window
     // after repeated root probes agree that the producer socket is really gone.
     public void onFallback(){
         Log.w(TAG, "display transport fallback");
-        runOnUiThread(() -> {
+        lifecycleHandler.post(() -> {
             // The producer connection is gone: every consumer var regresses to 0.
             // The producer resends the current value once it reconnects.
+            tabletInput.cancelAll(SystemClock.uptimeMillis());
+            resetTabletIdentitySession();
             captureMouseForced = false;
             if (mRoot != null)
                 mRoot.post(this::syncPointerCapture);
@@ -322,8 +349,7 @@ public class MainActivity extends Activity
         }
         if (!hasFocus) {
             cancelOverlayTouches();
-            stylusTouching = false;
-            stylusHoverScroll.reset();
+            tabletInput.cancelAll(SystemClock.uptimeMillis());
             releaseAllMouseButtons();
         }
         if (hasFocus && clipboard != null) {
@@ -409,10 +435,12 @@ public class MainActivity extends Activity
     }
 
     private void stopNativePipeline() {
+        tabletInput.cancelAll(SystemClock.uptimeMillis());
         cancelOverlayTouches();
         cancelPendingReconnect();
         if (mNative != null)
             mNative.stop();
+        resetTabletIdentitySession();
         connectedW = 0;
         connectedH = 0;
     }
@@ -443,8 +471,10 @@ public class MainActivity extends Activity
         updateDisplayRotation();
         ensurePointerPosition();
         applyCameraState();
+        tabletInput.cancelAll(SystemClock.uptimeMillis());
         releaseScreenTouches();
         mNative.stop();
+        resetTabletIdentitySession();
         connectedW = 0;
         connectedH = 0;
         applyConnectionConfig();
@@ -725,6 +755,54 @@ public class MainActivity extends Activity
         // this keeps capture working even while the soft keyboard owns focus.
         FrameLayout root = new FrameLayout(this) {
             @Override
+            public boolean dispatchTouchEvent(MotionEvent event) {
+                if (!containsTabletPointer(event))
+                    return super.dispatchTouchEvent(event);
+
+                // HUD children otherwise receive stylus DOWN first and can
+                // turn it into a mouse click. Route the pen at the window edge,
+                // then let only the remaining finger pointers reach the views.
+                handleTabletMotionEvent(event);
+                MotionEvent fingers = filterTabletPointers(event, false);
+                if (fingers == null)
+                    return true;
+                try {
+                    // Activity.dispatchTouchEvent normally falls back to
+                    // Activity.onTouchEvent with the original event when the
+                    // window returns false. The original still contains the pen,
+                    // which would submit the same native sample a second time.
+                    // Reproduce that fallback with the finger-only event here.
+                    if (!super.dispatchTouchEvent(fingers))
+                        MainActivity.this.onTouchEvent(fingers);
+                    return true;
+                } finally {
+                    fingers.recycle();
+                }
+            }
+
+            @Override
+            public boolean dispatchGenericMotionEvent(MotionEvent event) {
+                if (!containsTabletPointer(event))
+                    return super.dispatchGenericMotionEvent(event);
+
+                // Hover and button samples can be consumed by a HUD child just
+                // like touch DOWN; deliver the pen first at the window edge.
+                handleTabletMotionEvent(event);
+                MotionEvent fingers = filterTabletPointers(event, false);
+                if (fingers == null)
+                    return true;
+                try {
+                    // Keep Activity's fallback on the filtered event too, so
+                    // generic pen motion cannot be delivered twice.
+                    if (!super.dispatchGenericMotionEvent(fingers))
+                        MainActivity.this.onGenericMotionEvent(fingers);
+                    return true;
+                } finally {
+                    fingers.recycle();
+                }
+            }
+
+            @Override
             public boolean dispatchCapturedPointerEvent(MotionEvent event) {
                 if (handleCapturedPointerEvent(event))
                     return true;
@@ -734,6 +812,7 @@ public class MainActivity extends Activity
             @Override
             public void dispatchPointerCaptureChanged(boolean hasCapture) {
                 super.dispatchPointerCaptureChanged(hasCapture);
+                tabletInput.cancelAll(SystemClock.uptimeMillis());
                 if (!hasCapture) {
                     releaseAllMouseButtons();
                     resetCapturedTouchpadGesture();
@@ -1330,6 +1409,10 @@ public class MainActivity extends Activity
 
     /** Handle mouse and hardware-touchpad events delivered through pointer capture. */
     private boolean handleCapturedPointerEvent(MotionEvent event) {
+        if (containsTabletPointer(event)) {
+            handleTabletMotionEvent(event);
+            return true;
+        }
         // A few OEMs combine source capability bits. Prefer the touchpad path
         // whenever SOURCE_TOUCHPAD is present so raw multi-pointer events still
         // reach the gesture state machine.
@@ -1786,6 +1869,12 @@ public class MainActivity extends Activity
             return;
         }
 
+        tabletInputManager = getSystemService(InputManager.class);
+        if (tabletInputManager != null && !tabletDeviceListenerRegistered) {
+            tabletInputManager.registerInputDeviceListener(tabletDeviceListener, lifecycleHandler);
+            tabletDeviceListenerRegistered = true;
+        }
+
         applyOrientation();
 
         requestMediaAudioFocus();
@@ -1882,7 +1971,11 @@ public class MainActivity extends Activity
         mResumed = false;
         automaticImmersive.cancel();
         lifecycleHandler.removeCallbacks(automaticImmersiveEntry);
-        stylusHoverScroll.reset();
+        tabletInput.cancelAll(SystemClock.uptimeMillis());
+        if (tabletInputManager != null && tabletDeviceListenerRegistered) {
+            tabletInputManager.unregisterInputDeviceListener(tabletDeviceListener);
+            tabletDeviceListenerRegistered = false;
+        }
         lifecycleHandler.removeCallbacks(delayedFocusStop);
         lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         // Socket-missing bounce: no pipeline exists, so skip teardown (mNative is
@@ -1926,6 +2019,11 @@ public class MainActivity extends Activity
         automaticImmersive.cancel();
         lifecycleHandler.removeCallbacks(automaticImmersiveEntry);
         abandonMediaAudioFocus();
+        tabletInput.cancelAll(SystemClock.uptimeMillis());
+        if (tabletInputManager != null && tabletDeviceListenerRegistered) {
+            tabletInputManager.unregisterInputDeviceListener(tabletDeviceListener);
+            tabletDeviceListenerRegistered = false;
+        }
         if (immersive != null) immersive.stop();
         OplusRefreshRateLease.release(this);
         // Before the pipeline stops: a key this window forwarded and never saw
@@ -2383,6 +2481,57 @@ public class MainActivity extends Activity
         routeGrabbedTouch(ev);
     }
 
+    private int rawTabletDeviceId(int helperDevice) {
+        // Android InputDevice ids are nonnegative. Allocate a new high-bit id
+        // when the helper reuses a slot for a hotplugged physical device.
+        if (helperDevice < 0 || helperDevice >= rawTabletDeviceIds.length)
+            return 0x80000000 | (helperDevice & 0x7fffffff);
+        if (rawTabletDeviceIds[helperDevice] == 0) {
+            if (nextRawTabletDeviceId <= 0)
+                return 0;
+            rawTabletDeviceIds[helperDevice] = 0x80000000 | nextRawTabletDeviceId++;
+        }
+        return rawTabletDeviceIds[helperDevice];
+    }
+
+    @Override
+    public void onEvdevTabletSample(int helperDevice, EvdevTabletState.Sample sample,
+                                   float viewX, float viewY) {
+        if (mNative == null || sample == null)
+            return;
+        float[] nativeCoords = convertToNativeCoords(viewX, viewY);
+        tabletInput.update(new TabletInput.Sample(rawTabletDeviceId(helperDevice),
+                sample.pointerId, sample.toolType, sample.capabilities,
+                nativeCoords[0], nativeCoords[1], sample.pressure,
+                sample.tiltX, sample.tiltY, sample.distance,
+                sample.proximity, sample.tipDown, sample.tipState, false,
+                sample.buttons, sample.timeMsec));
+    }
+
+    @Override
+    public void cancelEvdevTabletDevice(int helperDevice, long timeMsec) {
+        if (helperDevice < 0 || helperDevice >= rawTabletDeviceIds.length)
+            return;
+        int deviceId = rawTabletDeviceIds[helperDevice];
+        if (deviceId != 0)
+            tabletInput.cancelDevice(deviceId, timeMsec);
+        rawTabletDeviceIds[helperDevice] = 0;
+    }
+
+    @Override
+    public void cancelEvdevTabletTools(long timeMsec) {
+        for (int deviceId : rawTabletDeviceIds) {
+            if (deviceId != 0)
+                tabletInput.cancelDevice(deviceId, timeMsec);
+        }
+    }
+
+    private void resetTabletIdentitySession() {
+        tabletInput.resetSession();
+        Arrays.fill(rawTabletDeviceIds, 0);
+        nextRawTabletDeviceId = 1;
+    }
+
     /**
      * Hands a grabbed touch frame to whoever owns each of its pointers.
      *
@@ -2394,13 +2543,14 @@ public class MainActivity extends Activity
      * desktop stream must not be left open when a key is pressed mid-drag.
      */
     private void routeGrabbedTouch(MotionEvent ev) {
+        handleTabletMotionEvent(ev);
         if (!immersiveHudTouch) {
             // Setting off: the grabbed stream belongs to the desktop alone,
             // exactly like it did before the HUD could be reached here.
             grabbedOverlayPointers.clear();
             if (isTouchpadMode) {
                 updateTouchpadBounds(null);
-                screenTouchpad.onTouch(ev);
+                dispatchTouchpadWithoutTablet(ev);
             } else {
                 handleTouchEvent(ev);
             }
@@ -2413,7 +2563,8 @@ public class MainActivity extends Activity
                 || action == MotionEvent.ACTION_POINTER_DOWN;
 
         if (isDown) {
-            if (isOverlayControlAt(ev.getX(index), ev.getY(index)))
+            if (!isTabletTool(ev.getToolType(index))
+                    && isOverlayControlAt(ev.getX(index), ev.getY(index)))
                 grabbedOverlayPointers.add(pointerId);
             else
                 grabbedOverlayPointers.remove(pointerId);
@@ -2443,7 +2594,7 @@ public class MainActivity extends Activity
                 try {
                     if (isTouchpadMode) {
                         updateTouchpadBounds(null);
-                        screenTouchpad.onTouch(desktop);
+                        dispatchTouchpadWithoutTablet(desktop);
                     } else {
                         handleTouchEvent(desktop);
                     }
@@ -2570,6 +2721,7 @@ public class MainActivity extends Activity
     public void onTouchscreenGrabChanged(boolean grabbed) {
         if (touchscreenGrabbed == grabbed)
             return;
+        tabletInput.cancelAll(SystemClock.uptimeMillis());
         // The Android contact ids and the helper's slots belong to different
         // streams. End the old stream before accepting any of the new one.
         releaseScreenTouches();
@@ -2630,6 +2782,7 @@ public class MainActivity extends Activity
 
     @Override
     public void onImmersiveChanged(boolean active) {
+        tabletInput.cancelAll(SystemClock.uptimeMillis());
         immersiveActive = active;
         // This is the one place both sources report a session starting or
         // ending, so it is where Gold is told to switch profiles and back.
@@ -2674,6 +2827,7 @@ public class MainActivity extends Activity
     public boolean onTouchEvent(MotionEvent event) {
         if (touchscreenGrabbed && event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN))
             return true; // Android may still dispatch the tail queued before EVIOCGRAB.
+        handleTabletMotionEvent(event);
         boolean mouseEvent = isMouseEvent(event);
         if (mouseEvent && event.getActionMasked() == MotionEvent.ACTION_DOWN
                 && pointerCaptureWanted() && mRoot != null
@@ -2688,7 +2842,7 @@ public class MainActivity extends Activity
             // Bounds are refreshed here as well as in surfaceChanged: the IME inset
             // resizes the surface without going through it on every path.
             updateTouchpadBounds(null);
-            screenTouchpad.onTouch(event);
+            dispatchTouchpadWithoutTablet(event);
             return true;
         }
 
@@ -2705,6 +2859,10 @@ public class MainActivity extends Activity
 
     @Override
     public boolean onGenericMotionEvent(MotionEvent event) {
+        if (containsTabletPointer(event)) {
+            handleTabletMotionEvent(event);
+            return true;
+        }
         if (isMouseEvent(event)) {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_BUTTON_PRESS
@@ -2713,12 +2871,6 @@ public class MainActivity extends Activity
                 requestPointerCaptureAfterClick();
             }
             if (action == MotionEvent.ACTION_HOVER_MOVE) {
-                int tool = event.getToolType(event.getActionIndex());
-                if (tool == MotionEvent.TOOL_TYPE_STYLUS
-                        || tool == MotionEvent.TOOL_TYPE_ERASER) {
-                    updateStylusButtonState(event);
-                    updateStylusHoverScroll(event);
-                }
                 float nativeX, nativeY;
                 if (autoStretch) {
                     float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
@@ -2740,16 +2892,6 @@ public class MainActivity extends Activity
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
                 return true;
             }
-            if (action == MotionEvent.ACTION_HOVER_ENTER
-                    || action == MotionEvent.ACTION_HOVER_EXIT) {
-                int tool = event.getToolType(event.getActionIndex());
-                if (tool == MotionEvent.TOOL_TYPE_STYLUS
-                        || tool == MotionEvent.TOOL_TYPE_ERASER) {
-                    updateStylusButtonState(event);
-                    updateStylusHoverScroll(event);
-                    return true;
-                }
-            }
             if (action == MotionEvent.ACTION_SCROLL) {
                 float vScroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL);
                 float hScroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
@@ -2761,12 +2903,7 @@ public class MainActivity extends Activity
             }
             if (action == MotionEvent.ACTION_BUTTON_PRESS
                     || action == MotionEvent.ACTION_BUTTON_RELEASE) {
-                int tool = event.getToolType(event.getActionIndex());
-                if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER) {
-                    updateStylusHoverScroll(event);
-                    updateStylusButtonState(event);
-                } else
-                    updateMouseButtonStateFromEvent(event);
+                updateMouseButtonStateFromEvent(event);
                 return true;
             }
         }
@@ -2952,8 +3089,6 @@ public class MainActivity extends Activity
     private static final int CLASSIFICATION_PINCH = 5;
 
     private int savedBS = 0;
-    private boolean stylusTouching = false;
-    private final StylusHoverScroll stylusHoverScroll = new StylusHoverScroll();
 
     private static final int[][] BUTTON_MAP = {
         {MotionEvent.BUTTON_PRIMARY,   0x110}, // BTN_LEFT
@@ -3022,54 +3157,272 @@ public class MainActivity extends Activity
         updateMouseButtonState(bs);
     }
 
-    private void updateStylusButtonState(MotionEvent event) {
-        int action = event.getActionMasked();
-        if (action == MotionEvent.ACTION_CANCEL) {
-            stylusTouching = false;
-            releaseAllMouseButtons();
-            return;
-        }
-        int buttons = event.getButtonState();
-        if (action == MotionEvent.ACTION_DOWN)
-            stylusTouching = true;
-        else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_HOVER_ENTER
-                || action == MotionEvent.ACTION_HOVER_MOVE
-                || action == MotionEvent.ACTION_HOVER_EXIT)
-            stylusTouching = false;
-        else if (action == MotionEvent.ACTION_MOVE)
-            stylusTouching = event.getPressure() > 0f;
-        int desired = buttons & ~(MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY);
-        if (stylusTouching) {
-            boolean right = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(
-                    KEY_STYLUS_BUTTON_RIGHT_CLICK, true)
-                    && (buttons & (MotionEvent.BUTTON_STYLUS_PRIMARY
-                    | MotionEvent.BUTTON_STYLUS_SECONDARY)) != 0;
-            desired |= right ? MotionEvent.BUTTON_SECONDARY : MotionEvent.BUTTON_PRIMARY;
-        }
-        updateMouseButtonState(desired);
+    private static boolean isTabletTool(int toolType) {
+        return toolType == MotionEvent.TOOL_TYPE_STYLUS
+                || toolType == MotionEvent.TOOL_TYPE_ERASER;
     }
 
-    private void updateStylusHoverScroll(MotionEvent event) {
-        int action = event.getActionMasked();
-        boolean hovering = (action == MotionEvent.ACTION_HOVER_ENTER
-                || action == MotionEvent.ACTION_HOVER_MOVE)
-                && event.getPressure() <= 0f;
-        int buttons = event.getButtonState();
-        int actionButton = event.getActionButton();
-        int stylusButtonMask = MotionEvent.BUTTON_STYLUS_PRIMARY
-                | MotionEvent.BUTTON_STYLUS_SECONDARY;
-        if (action == MotionEvent.ACTION_BUTTON_PRESS)
-            buttons |= actionButton & stylusButtonMask;
-        else if (action == MotionEvent.ACTION_BUTTON_RELEASE)
-            buttons &= ~(actionButton & stylusButtonMask);
+    private static boolean containsTabletPointer(MotionEvent event) {
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            if (isTabletTool(event.getToolType(i)))
+                return true;
+        }
+        return false;
+    }
 
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        boolean enabled = prefs.getBoolean(KEY_STYLUS_HOVER_SCROLL, true);
-        float speed = prefs.getFloat(KEY_STYLUS_HOVER_SCROLL_SPEED, 0.5f);
-        float scroll = stylusHoverScroll.update(hovering && enabled,
-                (buttons & stylusButtonMask) != 0, event.getX(), event.getY(), speed);
-        if (scroll != 0f && mNative != null)
-            mNative.sendMouseScroll(0, scroll);
+    /** Convert every pen pointer, including historical samples, without mouse emulation. */
+    private void handleTabletMotionEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        long eventTime = event.getEventTime();
+        if (action == MotionEvent.ACTION_CANCEL) {
+            tabletInput.cancelDevice(event.getDeviceId(), eventTime);
+            return;
+        }
+        if (!containsTabletPointer(event))
+            return;
+
+        int capabilities = tabletCapabilities(event);
+        int buttons = tabletButtons(event);
+        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
+            for (int history = 0; history < event.getHistorySize(); history++) {
+                long time = event.getHistoricalEventTime(history);
+                for (int pointer = 0; pointer < event.getPointerCount(); pointer++) {
+                    if (isTabletTool(event.getToolType(pointer)))
+                        sendTabletPointerSample(event, pointer, history, capabilities,
+                                buttons, action, time);
+                }
+            }
+        }
+        for (int pointer = 0; pointer < event.getPointerCount(); pointer++) {
+            if (isTabletTool(event.getToolType(pointer)))
+                sendTabletPointerSample(event, pointer, -1, capabilities,
+                        buttons, action, eventTime);
+        }
+    }
+
+    private void dispatchTouchpadWithoutTablet(MotionEvent event) {
+        if (!containsTabletPointer(event) || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            screenTouchpad.onTouch(event);
+            return;
+        }
+        MotionEvent fingers = filterTabletPointers(event, false);
+        if (fingers == null)
+            return;
+        try {
+            screenTouchpad.onTouch(fingers);
+        } finally {
+            fingers.recycle();
+        }
+    }
+
+    /** Makes a well-formed event for one tool class while preserving batched samples. */
+    private MotionEvent filterTabletPointers(MotionEvent source, boolean keepTablet) {
+        int pointerCount = source.getPointerCount();
+        int[] keep = new int[pointerCount];
+        int count = 0;
+        for (int i = 0; i < pointerCount; i++) {
+            if (isTabletTool(source.getToolType(i)) == keepTablet)
+                keep[count++] = i;
+        }
+        if (count == 0)
+            return null;
+
+        int action = source.getActionMasked();
+        int sourceIndex = source.getActionIndex();
+        int newActionIndex = -1;
+        for (int i = 0; i < count; i++) {
+            if (keep[i] == sourceIndex) {
+                newActionIndex = i;
+                break;
+            }
+        }
+
+        int filteredAction;
+        switch (action) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                filteredAction = newActionIndex < 0 ? MotionEvent.ACTION_MOVE
+                        : newActionIndex == 0 && count == 1 ? MotionEvent.ACTION_DOWN
+                        : MotionEvent.ACTION_POINTER_DOWN
+                                | (newActionIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                filteredAction = newActionIndex < 0 ? MotionEvent.ACTION_MOVE
+                        : count == 1 ? MotionEvent.ACTION_UP
+                        : MotionEvent.ACTION_POINTER_UP
+                                | (newActionIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                filteredAction = MotionEvent.ACTION_MOVE;
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                filteredAction = MotionEvent.ACTION_CANCEL;
+                break;
+            case MotionEvent.ACTION_HOVER_ENTER:
+            case MotionEvent.ACTION_HOVER_MOVE:
+            case MotionEvent.ACTION_HOVER_EXIT:
+            case MotionEvent.ACTION_SCROLL:
+                filteredAction = action;
+                break;
+            case MotionEvent.ACTION_BUTTON_PRESS:
+            case MotionEvent.ACTION_BUTTON_RELEASE:
+                // Stylus buttons were already routed through the tablet frame.
+                // Represent their accompanying finger sample as motion so this
+                // filtered event cannot turn the same side button into a mouse
+                // click in a child view or the Activity fallback.
+                int actionButton = source.getActionButton();
+                boolean tabletButton = actionButton == MotionEvent.BUTTON_STYLUS_PRIMARY
+                        || actionButton == MotionEvent.BUTTON_STYLUS_SECONDARY;
+                filteredAction = tabletButton ? MotionEvent.ACTION_MOVE : action;
+                break;
+            default:
+                return null;
+        }
+
+        MotionEvent.PointerProperties[] properties =
+                new MotionEvent.PointerProperties[count];
+        MotionEvent.PointerCoords[] coordinates = new MotionEvent.PointerCoords[count];
+        for (int i = 0; i < count; i++) {
+            properties[i] = new MotionEvent.PointerProperties();
+            source.getPointerProperties(keep[i], properties[i]);
+            coordinates[i] = new MotionEvent.PointerCoords();
+        }
+
+        int historyCount = source.getHistorySize();
+        boolean hasHistory = historyCount > 0;
+        long firstTime = hasHistory ? source.getHistoricalEventTime(0) : source.getEventTime();
+        for (int i = 0; i < count; i++) {
+            if (hasHistory)
+                source.getHistoricalPointerCoords(keep[i], 0, coordinates[i]);
+            else
+                source.getPointerCoords(keep[i], coordinates[i]);
+        }
+        MotionEvent result = MotionEvent.obtain(source.getDownTime(), firstTime,
+                hasHistory ? MotionEvent.ACTION_MOVE : filteredAction, count,
+                properties, coordinates, source.getMetaState(),
+                keepTablet ? source.getButtonState() : source.getButtonState()
+                        & ~(MotionEvent.BUTTON_STYLUS_PRIMARY
+                                | MotionEvent.BUTTON_STYLUS_SECONDARY),
+                source.getXPrecision(), source.getYPrecision(), source.getDeviceId(),
+                source.getEdgeFlags(), source.getSource(), source.getFlags());
+        if (hasHistory) {
+            for (int history = 1; history < historyCount; history++) {
+                for (int i = 0; i < count; i++)
+                    source.getHistoricalPointerCoords(keep[i], history, coordinates[i]);
+                result.addBatch(source.getHistoricalEventTime(history), coordinates,
+                        source.getMetaState());
+            }
+            for (int i = 0; i < count; i++)
+                source.getPointerCoords(keep[i], coordinates[i]);
+            result.addBatch(source.getEventTime(), coordinates, source.getMetaState());
+            result.setAction(filteredAction);
+        }
+        return result;
+    }
+
+    private void sendTabletPointerSample(MotionEvent event, int pointer, int history,
+                                         int capabilities, int buttons, int action,
+                                         long timeMsec) {
+        int tool = event.getToolType(pointer) == MotionEvent.TOOL_TYPE_ERASER
+                ? TabletInput.TOOL_ERASER : TabletInput.TOOL_PEN;
+        boolean current = history < 0;
+        int actionIndex = event.getActionIndex();
+        float pressure = normalizedTabletAxis(event, MotionEvent.AXIS_PRESSURE,
+                pointer, history);
+        boolean hoveringAction = action == MotionEvent.ACTION_HOVER_ENTER
+                || action == MotionEvent.ACTION_HOVER_MOVE
+                || action == MotionEvent.ACTION_HOVER_EXIT;
+        boolean tipDown = !hoveringAction && pressure > 0f;
+        if (current && pointer == actionIndex) {
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN)
+                tipDown = true;
+            else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP)
+                tipDown = false;
+        }
+        boolean proximity = !(current && pointer == actionIndex
+                && action == MotionEvent.ACTION_HOVER_EXIT);
+        int sampleButtons = proximity ? buttons : 0;
+
+        float x = current ? event.getX(pointer) : event.getHistoricalX(pointer, history);
+        float y = current ? event.getY(pointer) : event.getHistoricalY(pointer, history);
+        float[] nativeCoords = convertToNativeCoords(x, y);
+
+        float tiltX = 0f;
+        float tiltY = 0f;
+        if ((capabilities & TabletInput.CAP_TILT) != 0) {
+            float tilt = tabletAxis(event, MotionEvent.AXIS_TILT, pointer, history);
+            float orientation = tabletAxis(event, MotionEvent.AXIS_ORIENTATION, pointer, history);
+            float[] projected = TabletInput.projectTilt(tilt, orientation);
+            tiltX = projected[0];
+            tiltY = projected[1];
+        }
+        float distance = (capabilities & TabletInput.CAP_DISTANCE) != 0
+                ? normalizedTabletAxis(event, MotionEvent.AXIS_DISTANCE, pointer, history) : 0f;
+
+        int tipState = TabletInput.TIP_STATE_UNKNOWN;
+        if (hoveringAction)
+            tipState = TabletInput.TIP_STATE_UP;
+        else if (current && pointer == actionIndex
+                && (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN))
+            tipState = TabletInput.TIP_STATE_DOWN;
+        else if (current && pointer == actionIndex
+                && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP))
+            tipState = TabletInput.TIP_STATE_UP;
+
+        tabletInput.update(new TabletInput.Sample(event.getDeviceId(), event.getPointerId(pointer),
+                tool, capabilities, nativeCoords[0], nativeCoords[1], pressure,
+                tiltX, tiltY, distance, proximity, tipDown, tipState,
+                false, sampleButtons, timeMsec));
+    }
+
+    private static int tabletButtons(MotionEvent event) {
+        int state = event.getButtonState();
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_BUTTON_PRESS)
+            state |= event.getActionButton();
+        else if (action == MotionEvent.ACTION_BUTTON_RELEASE)
+            state &= ~event.getActionButton();
+        int buttons = 0;
+        if ((state & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0)
+            buttons |= TabletInput.BUTTON_PRIMARY;
+        if ((state & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0)
+            buttons |= TabletInput.BUTTON_SECONDARY;
+        return buttons;
+    }
+
+    private static int tabletCapabilities(MotionEvent event) {
+        int capabilities = 0;
+        if (tabletMotionRange(event, MotionEvent.AXIS_PRESSURE) != null)
+            capabilities |= TabletInput.CAP_PRESSURE;
+        if (tabletMotionRange(event, MotionEvent.AXIS_TILT) != null
+                && tabletMotionRange(event, MotionEvent.AXIS_ORIENTATION) != null)
+            capabilities |= TabletInput.CAP_TILT;
+        if (tabletMotionRange(event, MotionEvent.AXIS_DISTANCE) != null)
+            capabilities |= TabletInput.CAP_DISTANCE;
+        return capabilities;
+    }
+
+    private static InputDevice.MotionRange tabletMotionRange(MotionEvent event, int axis) {
+        InputDevice device = event.getDevice();
+        if (device == null)
+            return null;
+        InputDevice.MotionRange range = device.getMotionRange(axis, event.getSource());
+        return range != null ? range : device.getMotionRange(axis);
+    }
+
+    private static float tabletAxis(MotionEvent event, int axis, int pointer, int history) {
+        return history < 0 ? event.getAxisValue(axis, pointer)
+                : event.getHistoricalAxisValue(axis, pointer, history);
+    }
+
+    private static float normalizedTabletAxis(MotionEvent event, int axis, int pointer,
+                                              int history) {
+        float value = tabletAxis(event, axis, pointer, history);
+        InputDevice.MotionRange range = tabletMotionRange(event, axis);
+        if (range != null && range.getMax() > range.getMin())
+            value = (value - range.getMin()) / (range.getMax() - range.getMin());
+        return Float.isFinite(value) ? Math.max(0f, Math.min(1f, value)) : 0f;
     }
 
     private void releaseAllMouseButtons() {
@@ -3097,15 +3450,14 @@ public class MainActivity extends Activity
 
     private boolean isMouseEvent(MotionEvent event) {
         int source = event.getSource();
-        int toolType = event.getToolType(event.getActionIndex());
-        // A stylus can be reported either as SOURCE_STYLUS or as a tool on the
-        // touchscreen source (common for S Pens). Route both pen and eraser
-        // hover/motion through the pointer path instead of forwarding them as
-        // touchscreen contacts.
+        if (event.getPointerCount() == 0)
+            return false;
+        int toolType = event.getToolType(Math.min(event.getActionIndex(),
+                event.getPointerCount() - 1));
+        // Pens are sent through the tablet protocol before this mouse/touch split.
         if (toolType == MotionEvent.TOOL_TYPE_STYLUS
                 || toolType == MotionEvent.TOOL_TYPE_ERASER)
-            return (source & InputDevice.SOURCE_CLASS_POINTER)
-                    == InputDevice.SOURCE_CLASS_POINTER;
+            return false;
         if ((source & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN)
             return false;
         if ((source & InputDevice.SOURCE_MOUSE) != InputDevice.SOURCE_MOUSE)
@@ -3152,12 +3504,7 @@ public class MainActivity extends Activity
         }
         mNative.sendMouseMotion(nativeX, nativeY, dx, dy);
 
-        if (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_STYLUS
-                || event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_ERASER) {
-            updateStylusHoverScroll(event);
-            updateStylusButtonState(event);
-        } else
-            updateMouseButtonStateFromEvent(event);
+        updateMouseButtonStateFromEvent(event);
         return true;
     }
 
@@ -3181,8 +3528,12 @@ public class MainActivity extends Activity
         switch (action) {
             case MotionEvent.ACTION_DOWN:
                 forwardedTouches.releaseAll();
+                if (isTabletTool(event.getToolType(pointerIdx)))
+                    return true;
                 // fall through
             case MotionEvent.ACTION_POINTER_DOWN:
+                if (isTabletTool(event.getToolType(pointerIdx)))
+                    return true;
                 float[] downCoords = convertToNativeCoords(event.getX(pointerIdx), event.getY(pointerIdx));
                 forwardedTouches.send(0, pointerId, downCoords[0], downCoords[1]);
                 forwardedTouches.frame();
@@ -3190,6 +3541,8 @@ public class MainActivity extends Activity
             
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP:
+                if (isTabletTool(event.getToolType(pointerIdx)))
+                    return true;
                 float[] upCoords = convertToNativeCoords(event.getX(pointerIdx), event.getY(pointerIdx));
                 forwardedTouches.send(1, pointerId, upCoords[0], upCoords[1]);
                 if (action == MotionEvent.ACTION_UP)
@@ -3199,6 +3552,8 @@ public class MainActivity extends Activity
             
             case MotionEvent.ACTION_MOVE:
                 for (int i = 0; i < event.getPointerCount(); i++) {
+                    if (isTabletTool(event.getToolType(i)))
+                        continue;
                     float[] moveCoords = convertToNativeCoords(event.getX(i), event.getY(i));
                     forwardedTouches.send(2, event.getPointerId(i), moveCoords[0], moveCoords[1]);
                 }

@@ -57,7 +57,7 @@ final class InputGrab implements InputGrabTransport {
     /** Byte offset of aux[0] inside a record. */
     private static final int AUX0 = 12;
 
-    private static final int PROTO_VERSION = 2;
+    private static final int PROTO_VERSION = 3;
 
     // rtype
     private static final int REC_HELLO  = 1;
@@ -65,6 +65,7 @@ final class InputGrab implements InputGrabTransport {
     private static final int REC_READY  = 3;
     private static final int REC_EVENT  = 4;
     private static final int REC_BYE    = 5;
+    private static final int REC_AXIS_RANGE = 6;
 
     // DEVICE.etype (device class)
     static final int CLASS_TOUCHSCREEN = 1;
@@ -673,6 +674,16 @@ final class InputGrab implements InputGrabTransport {
                         main.post(() -> {
                             if (running && !stopping)
                                 listener.onDevice(d, cls, minX, maxX, minY, maxY, flags);
+                        });
+                        break;
+                    }
+                    case REC_AXIS_RANGE: {
+                        batchLen = flush(batch, batchLen);
+                        final int d = dev, axis = code, min = value;
+                        final int max = bb.getInt(rec + AUX0);
+                        main.post(() -> {
+                            if (running && !stopping)
+                                listener.onAxisRange(d, axis, min, max);
                         });
                         break;
                     }

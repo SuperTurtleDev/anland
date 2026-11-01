@@ -1,6 +1,7 @@
 #include "anland_niri_bridge.h"
 #include "anland_de_backend.h"
 #include "bounded_input_read.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 struct anland_niri_bridge {
     anland_de_backend *backend;
     uint64_t layer;
+    anland_tablet tablet;
 };
 
 static anland_device *device(anland_niri_bridge *b)
@@ -72,6 +74,10 @@ uint64_t anland_niri_generation(anland_niri_bridge *b)
 void anland_niri_drop_session(anland_niri_bridge *b)
 {
     if (b) anland_de_backend_drop_session(b->backend);
+}
+void anland_niri_reset_input(anland_niri_bridge *b)
+{
+    if (b) memset(&b->tablet, 0, sizeof(b->tablet));
 }
 int anland_niri_output_info(anland_niri_bridge *b, anland_niri_output *out)
 {
@@ -170,36 +176,56 @@ int anland_niri_dispatch(anland_niri_bridge *b, anland_niri_event *out,
 int anland_niri_poll_input(anland_niri_bridge *b, anland_niri_input *out)
 {
     if (!device(b) || !out) return -1;
-    anland_device_input_t ev;
-    int rc = anland_device_poll_input(device(b), &ev, 0);
-    if (rc != 1) return rc;
-    memset(out, 0, sizeof(*out));
-    out->type = ev.type;
-    switch (ev.type) {
-    case ANLAND_DEVICE_IN_KEY:
-        out->action = ev.key.action; out->code = ev.key.keycode; break;
-    case ANLAND_DEVICE_IN_TOUCH:
-        out->action = ev.touch.action; out->x = ev.touch.x;
-        out->y = ev.touch.y; out->pointer_id = ev.touch.pointer_id; break;
-    case ANLAND_DEVICE_IN_PTR_MOTION:
-        out->x = ev.pointer_motion.x; out->y = ev.pointer_motion.y;
-        out->dx = ev.pointer_motion.dx; out->dy = ev.pointer_motion.dy; break;
-    case ANLAND_DEVICE_IN_PTR_BUTTON:
-        out->code = (int32_t)ev.pointer_button.button;
-        out->action = ev.pointer_button.pressed; break;
-    case ANLAND_DEVICE_IN_PTR_AXIS:
-        out->code = (int32_t)ev.pointer_axis.axis;
-        out->value = ev.pointer_axis.value;
-        out->discrete = ev.pointer_axis.discrete; break;
-    case ANLAND_DEVICE_IN_CLIPBOARD: out->payload_size = ev.clipboard.size; break;
-    case ANLAND_DEVICE_IN_DISPLAY_REFRESH: out->refresh_mhz = ev.display.refresh_mhz; break;
-    case ANLAND_DEVICE_IN_TEXT_INPUT: out->payload_size = ev.text_input.size; break;
-    case ANLAND_DEVICE_IN_RESOURCE:
-    case ANLAND_DEVICE_IN_RESOURCE_INVALID:
-        out->resource_type = ev.resource.type; out->fd_count = ev.resource.fdnum; break;
-    default: break;
+    /* Tool/axis packets are private staging records. Publish only complete
+     * TABLET_FRAME snapshots so consumers can never observe half a sample. */
+    for (unsigned i = 0; i < 64; ++i) {
+        anland_device_input_t ev;
+        int rc = anland_device_poll_input(device(b), &ev, 0);
+        if (rc != 1) return rc;
+        if (anland_tablet_is_event(ev.type)) {
+            anland_tablet_sample previous, sample;
+            rc = anland_tablet_feed(&b->tablet, &ev, &previous, &sample);
+            if (rc < 0) {
+                anland_niri_drop_session(b);
+                anland_niri_reset_input(b);
+                return -EPROTO;
+            }
+            if (rc == 0) continue;
+            memset(out, 0, sizeof(*out));
+            out->type = ANLAND_DEVICE_IN_TABLET_FRAME;
+            out->tablet_previous = previous;
+            out->tablet_current = sample;
+            return 1;
+        }
+        memset(out, 0, sizeof(*out));
+        out->type = ev.type;
+        switch (ev.type) {
+        case ANLAND_DEVICE_IN_KEY:
+            out->action = ev.key.action; out->code = ev.key.keycode; break;
+        case ANLAND_DEVICE_IN_TOUCH:
+            out->action = ev.touch.action; out->x = ev.touch.x;
+            out->y = ev.touch.y; out->pointer_id = ev.touch.pointer_id; break;
+        case ANLAND_DEVICE_IN_PTR_MOTION:
+            out->x = ev.pointer_motion.x; out->y = ev.pointer_motion.y;
+            out->dx = ev.pointer_motion.dx; out->dy = ev.pointer_motion.dy; break;
+        case ANLAND_DEVICE_IN_PTR_BUTTON:
+            out->code = (int32_t)ev.pointer_button.button;
+            out->action = ev.pointer_button.pressed; break;
+        case ANLAND_DEVICE_IN_PTR_AXIS:
+            out->code = (int32_t)ev.pointer_axis.axis;
+            out->value = ev.pointer_axis.value;
+            out->discrete = ev.pointer_axis.discrete; break;
+        case ANLAND_DEVICE_IN_CLIPBOARD: out->payload_size = ev.clipboard.size; break;
+        case ANLAND_DEVICE_IN_DISPLAY_REFRESH: out->refresh_mhz = ev.display.refresh_mhz; break;
+        case ANLAND_DEVICE_IN_TEXT_INPUT: out->payload_size = ev.text_input.size; break;
+        case ANLAND_DEVICE_IN_RESOURCE:
+        case ANLAND_DEVICE_IN_RESOURCE_INVALID:
+            out->resource_type = ev.resource.type; out->fd_count = ev.resource.fdnum; break;
+        default: break;
+        }
+        return rc;
     }
-    return rc;
+    return 0;
 }
 /* The common read_input() polls only before recv_all(), which can block forever
  * after a partial payload. Keep the compositor event loop bounded even when the

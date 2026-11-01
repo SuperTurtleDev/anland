@@ -21,4 +21,4 @@ anland_public = static_library('gamescope-anland-public',
 anland_dep = declare_dependency(link_with: anland_public,
   include_directories: anland_inc,
   dependencies: [dependency('libpipewire-0.3'), dependency('threads')])
-src += files('AnlandBackend.cpp', 'clipboard.cpp', 'session.c', 'input.c')
+src += files('AnlandBackend.cpp', 'clipboard.cpp', 'session.c', 'input.c', 'tablet.c')

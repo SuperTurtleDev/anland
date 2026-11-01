@@ -178,6 +178,12 @@ impl Client {
         }
     }
 
+    pub fn reset_input(&mut self) {
+        // SAFETY: the bridge is a live single-threaded owner and only its
+        // partial tablet-frame assembler is cleared.
+        unsafe { ffi::anland_niri_reset_input(self.0.as_ptr()) }
+    }
+
     pub fn read_payload(&mut self, size: usize) -> io::Result<Vec<u8>> {
         const MAX_PAYLOAD: usize = 1024 * 1024;
         if size > MAX_PAYLOAD {

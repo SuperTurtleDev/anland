@@ -122,6 +122,13 @@ struct input_mask {
 #endif
 
 #define IGRAB_MASK_PATH_MAX 64
+#define IGRAB_MAX_TABLET_RANGES 10
+
+struct tablet_axis_range {
+    int axis;
+    int min;
+    int max;
+};
 
 struct dev_entry {
     int  fd;
@@ -147,6 +154,8 @@ struct dev_entry {
     int  multitouch;
     int  clickpad;   /* one button under the pad: BTN_LEFT alone means "a click" */
     int  min_x, max_x, min_y, max_y;
+    int  tablet_range_count;
+    struct tablet_axis_range tablet_ranges[IGRAB_MAX_TABLET_RANGES];
     int  toggle_capable; /* cached: the session toggle key exists on this node */
     char name[256]; /* full identity, not the shortened discovery/display label */
 };
@@ -708,6 +717,11 @@ static int pending_gold(void)
     return 0;
 }
 
+static int pending_setup(void)
+{
+    return pending_gamepad_leases() || pending_gold();
+}
+
 static int has_gold_output(void)
 {
     for (int i = 0; i < g_ndevs; i++)
@@ -969,6 +983,23 @@ static void read_abs_range(int fd, const char *path, int axis, int *min, int *ma
     *max = info.maximum;
 }
 
+static void read_tablet_axis_range(int fd, unsigned long *abs, int axis,
+                                   struct dev_entry *entry)
+{
+    if (entry->tablet_range_count >= IGRAB_MAX_TABLET_RANGES
+            || !TEST_BIT(axis, abs))
+        return;
+    struct input_absinfo info;
+    if (query_input(fd, EVIOCGABS(axis), &info) < 0
+            || info.maximum <= info.minimum)
+        return;
+    struct tablet_axis_range *range =
+            &entry->tablet_ranges[entry->tablet_range_count++];
+    range->axis = axis;
+    range->min = info.minimum;
+    range->max = info.maximum;
+}
+
 static int is_builtin_bus(unsigned int bus)
 {
     return bus == 0 || bus == BUS_HOST || bus == BUS_I8042
@@ -1139,6 +1170,16 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
             close(fd);
             return -1;
         }
+        read_tablet_axis_range(fd, abs, ABS_PRESSURE, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_PRESSURE, out);
+        read_tablet_axis_range(fd, abs, ABS_TILT_X, out);
+        read_tablet_axis_range(fd, abs, ABS_TILT_Y, out);
+        read_tablet_axis_range(fd, abs, ABS_DISTANCE, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_DISTANCE, out);
+        read_tablet_axis_range(fd, abs, ABS_X, out);
+        read_tablet_axis_range(fd, abs, ABS_Y, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_POSITION_X, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_POSITION_Y, out);
     }
 
     /* Some panels advertise KEY_POWER for screen-off gestures. That does not
@@ -1519,6 +1560,43 @@ static void fill_device_record(struct igrab_rec *rec, int idx)
         (de->clickpad ? IGRAB_DEV_CLICKPAD : 0);
 }
 
+static void fill_axis_range_record(struct igrab_rec *rec, int idx,
+                                   const struct tablet_axis_range *range)
+{
+    memset(rec, 0, sizeof(*rec));
+    rec->rtype = IGRAB_REC_AXIS_RANGE;
+    rec->dev = (uint16_t)idx;
+    rec->code = (uint16_t)range->axis;
+    rec->value = range->min;
+    rec->aux[0] = range->max;
+}
+
+static int send_axis_ranges(int sock, int idx)
+{
+    const struct dev_entry *de = &g_devs[idx];
+    for (int i = 0; i < de->tablet_range_count; i++) {
+        struct igrab_rec rec;
+        fill_axis_range_record(&rec, idx, &de->tablet_ranges[i]);
+        if (send_rec(sock, &rec) < 0)
+            return -1;
+        if (g_pending_len != 0 || g_need_resync)
+            return 0;
+    }
+    return 1;
+}
+
+static int send_axis_ranges_blocking(int sock, int idx)
+{
+    const struct dev_entry *de = &g_devs[idx];
+    for (int i = 0; i < de->tablet_range_count; i++) {
+        struct igrab_rec rec;
+        fill_axis_range_record(&rec, idx, &de->tablet_ranges[i]);
+        if (send_all(sock, &rec, sizeof(rec)) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 /* Reuse a detached device id before growing the table. The Java side only sees
  * a replacement DEVICE record after the global resync sent on removal, so the
  * old state cannot be confused with the new node. */
@@ -1551,6 +1629,9 @@ static int announce_pending_devices(int sock)
             return -1;
         if (g_pending_len != 0 || g_need_resync)
             return 0;
+        int ranges = send_axis_ranges(sock, i);
+        if (ranges <= 0)
+            return ranges;
         g_devs[i].announced = 1;
         LOGI("announced device %d '%s'", i, g_devs[i].name);
     }
@@ -1733,11 +1814,13 @@ static int send_device_list(int sock, int grabbed)
         fill_device_record(&rec, i);
         if (send_all(sock, &rec, sizeof(rec)) < 0)
             return -1;
+        if (send_axis_ranges_blocking(sock, i) < 0)
+            return -1;
         g_devs[i].announced = 1;
     }
 
-    if (pending_gamepad_leases())
-        return 0; // Only confirm READY after Android suppression succeeds or fails.
+    if (pending_setup())
+        return 0; // READY requires Android suppression and the Gold output grab.
     memset(&rec, 0, sizeof(rec));
     rec.rtype = IGRAB_REC_READY;
     rec.aux[0] = controlled_device_count();
@@ -1957,7 +2040,7 @@ int main(int argc, char **argv)
     long last_beat = now_ms();
     long last_scan = now_ms();
     int reason = IGRAB_BYE_PEER_GONE;
-    int ready_sent = !pending_gamepad_leases();
+    int ready_sent = !pending_setup();
 
     for (;;) {
         if (g_quit) {
@@ -2045,7 +2128,7 @@ int main(int argc, char **argv)
                 reason = IGRAB_BYE_PEER_GONE;
                 break;
             }
-            if (!ready_sent && !pending_gamepad_leases() && announced > 0) {
+            if (!ready_sent && !pending_setup() && announced > 0) {
                 int controlled = controlled_device_count();
                 if (controlled == 0 && !pending_gold()) {
                     reason = IGRAB_BYE_ERROR;

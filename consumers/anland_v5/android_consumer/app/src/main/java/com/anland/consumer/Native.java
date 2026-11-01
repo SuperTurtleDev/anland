@@ -55,6 +55,12 @@ public final class Native {
     public void sendMouseMotion(float x, float y, float dx, float dy) { nativeSendMouseMotion(handle, x, y, dx, dy); }
     public void sendMouseButton(int button, boolean pressed) { nativeSendMouseButton(handle, button, pressed); }
     public void sendMouseScroll(int axis, float value) { nativeSendMouseScroll(handle, axis, value); }
+    public void sendTabletSample(int toolId, int toolType, int capabilities, int deviceId,
+                                 float x, float y, float pressure, float tiltX, float tiltY,
+                                 float distance, int flags, int buttons, long timeMsec) {
+        nativeSendTabletSample(handle, toolId, toolType, capabilities, deviceId,
+                x, y, pressure, tiltX, tiltY, distance, flags, buttons, timeMsec);
+    }
     public void setRefreshRate(float hz) { nativeSetRefreshRate(handle, hz); }
     public void sendClipboard(byte[] data) { nativeSendClipboard(handle, data); }
     public void sendTextInput(byte[] data) { nativeSendTextInput(handle, data); }
@@ -90,6 +96,11 @@ public final class Native {
     private static native void nativeSendMouseMotion(long handle, float x, float y, float dx, float dy);
     private static native void nativeSendMouseButton(long handle, int button, boolean pressed);
     private static native void nativeSendMouseScroll(long handle, int axis, float value);
+    private static native void nativeSendTabletSample(long handle, int toolId, int toolType,
+                                                       int capabilities, int deviceId,
+                                                       float x, float y, float pressure,
+                                                       float tiltX, float tiltY, float distance,
+                                                       int flags, int buttons, long timeMsec);
     private static native void nativeSetRefreshRate(long handle, float hz);
     private static native void nativeSendClipboard(long handle, byte[] data);
     private static native void nativeSendTextInput(long handle, byte[] data);

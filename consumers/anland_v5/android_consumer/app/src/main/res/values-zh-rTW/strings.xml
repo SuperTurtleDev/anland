@@ -287,10 +287,6 @@
     <string name="immersive_oplus_refresh_rate_switch">固定 OnePlus 螢幕更新率</string>
     <string name="immersive_oplus_refresh_rate_hint">避免部分 OnePlus 裝置在未收到輸入事件時更新率下降。</string>
     <string name="device_class_gamepad">手把 / 搖桿</string>
-    <string name="stylus_button_right_click_switch">S Pen 側鍵用於右鍵點擊</string>
-    <string name="stylus_hover_scroll_switch">按住 S Pen 側鍵懸浮時捲動</string>
-    <string name="stylus_hover_scroll_hint">按住 S Pen 側鍵並移動懸浮的筆。垂直移動會控制捲動，包含斜向移動中的垂直分量。</string>
-    <string name="stylus_hover_scroll_speed_label">S Pen 懸浮捲動速度</string>
     <string name="scroll_reverse_switch">反轉捲動方向</string>
     <string name="scroll_reverse_hint">開：內容跟隨手指移動（「自然」捲動）。適用於螢幕觸控板與實體觸控板的雙指捲動。</string>
     <string name="scroll_speed_label">雙指捲動速度</string>

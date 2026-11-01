@@ -303,10 +303,6 @@
     <string name="immersive_controller_failed">몰입 모드를 시작할 수 없습니다: Android 컨트롤러 억제에 실패하여 입력 인수를 취소했습니다</string>
     <string name="immersive_controller_interrupted">몰입 모드가 종료되었습니다: Android 컨트롤러 억제가 해제되어 입력 인수가 풀렸습니다</string>
     <string name="device_class_gamepad">게임패드 / 조이스틱</string>
-    <string name="stylus_button_right_click_switch">S Pen 측면 버튼으로 오른쪽 클릭</string>
-    <string name="stylus_hover_scroll_switch">S Pen 버튼을 누른 채 호버하면 스크롤</string>
-    <string name="stylus_hover_scroll_hint">S Pen 측면 버튼을 누른 채 호버 중인 펜을 움직이세요. 세로 움직임이 스크롤을 제어하며, 대각선 움직임의 세로 성분도 포함됩니다.</string>
-    <string name="stylus_hover_scroll_speed_label">S Pen 호버 스크롤 속도</string>
     <string name="pad_tap">외부 터치패드: 합성 클릭</string>
     <string name="pad_tip">캡처된 외부 터치패드와 몰입 모드 외부 터치패드에서 한 손가락/두 손가락 탭과 길게 눌러 드래그를 제어합니다. 비활성화해도 물리 버튼은 계속 작동합니다. 화면 터치패드는 변경되지 않습니다.</string>
     <string name="pad_guard">스크롤 후 %1$d ms 동안 외부 터치패드 탭 무시 (0 = 끔)</string>

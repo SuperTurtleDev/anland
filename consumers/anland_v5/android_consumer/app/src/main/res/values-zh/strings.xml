@@ -200,10 +200,6 @@
     <!-- Custom layout editor -->
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">触摸板模式（相对移动）</string>
-    <string name="stylus_button_right_click_switch">手写笔侧键作为右键</string>
-    <string name="stylus_hover_scroll_switch">悬停时按住手写笔侧键滚动</string>
-    <string name="stylus_hover_scroll_hint">按住手写笔侧键并移动悬空的笔尖。滚动量取纵向位移，斜向移动也按其中的纵向分量计算。</string>
-    <string name="stylus_hover_scroll_speed_label">手写笔悬停滚动速度</string>
     <string name="touchpad_hint">开启：手指滑动移动鼠标光标（相对）。关闭：触摸直接映射到屏幕（绝对）。</string>
     <string name="pointer_capture_switch">捕获外接指针</string>
     <string name="pointer_capture_hint">开启后将外接鼠标或触摸板锁定在桌面画面内并使用相对移动，移到屏幕顶部或底部不会呼出 Android 状态栏或导航栏。按 Android 返回键可暂时释放，点击桌面画面重新捕获；屏幕触摸不受影响。</string>

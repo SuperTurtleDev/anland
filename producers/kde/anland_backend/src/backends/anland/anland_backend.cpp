@@ -128,9 +128,10 @@ AnlandBackend::~AnlandBackend()
     if (m_reconnectTimer) {
         m_reconnectTimer->stop();
     }
+    releaseTabletTools();
+    m_inputDevice.reset();
     // m_outputs are QObject children of this backend; ~QObject deletes them.
     m_outputs.clear();
-    m_inputDevice.reset();
     // The presentation facade owns the scene/device. DE code only borrows them.
     if (m_presentBackend) {
         anland_de_backend_destroy(m_presentBackend);
@@ -583,6 +584,24 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
         return;
     }
 
+    if (anland_tablet_is_event(ev.type)) {
+        anland_tablet_sample previous{};
+        anland_tablet_sample sample{};
+        const int result = anland_tablet_feed(&m_tabletAssembler, &ev, &previous, &sample);
+        if (result < 0) {
+            releaseTabletTools();
+            qCWarning(KWIN_ANLAND) << "invalid native tablet event, dropping consumer session";
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
+        } else if (result == 1) {
+            const QPointF position = m_outputs.isEmpty()
+                ? QPointF(sample.x, sample.y)
+                : mapInputToLogical(QPointF(sample.x, sample.y));
+            m_inputDevice->tabletFrame(previous, sample, position);
+        }
+        return;
+    }
+
     if (ev.type == ANLAND_DEVICE_IN_CLIPBOARD || ev.type == ANLAND_DEVICE_IN_TEXT_INPUT) {
         const uint32_t size = ev.type == ANLAND_DEVICE_IN_CLIPBOARD ? ev.clipboard.size : ev.text_input.size;
         if (size > ANLAND_DEVICE_MAX_PAYLOAD_SIZE) {
@@ -728,6 +747,7 @@ void AnlandBackend::enterFallback()
     if (m_inputDevice) {
         m_inputDevice->touchCancel();
     }
+    releaseTabletTools();
 
     // A frame may be in flight awaiting a buffer-ready that will never come now;
     // fail it so the RenderLoop's frame accounting does not stall.
@@ -764,6 +784,23 @@ void AnlandBackend::enterFallback()
 
     if (m_reconnectTimer) {
         m_reconnectTimer->start();
+    }
+}
+
+void AnlandBackend::releaseTabletTools()
+{
+    unsigned cursor = 0;
+    anland_tablet_sample previous{};
+    anland_tablet_sample sample{};
+
+    while (anland_tablet_release_next(&m_tabletAssembler, &cursor, &previous, &sample)) {
+        if (!m_inputDevice) {
+            continue;
+        }
+        const QPointF position = m_outputs.isEmpty()
+            ? QPointF(sample.x, sample.y)
+            : mapInputToLogical(QPointF(sample.x, sample.y));
+        m_inputDevice->tabletFrame(previous, sample, position);
     }
 }
 

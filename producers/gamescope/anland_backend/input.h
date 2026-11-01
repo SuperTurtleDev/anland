@@ -2,17 +2,19 @@
 #ifndef ANLAND_GAMESCOPE_INPUT_H
 #define ANLAND_GAMESCOPE_INPUT_H
 #include "anland_device.h"
+#include "anland_tablet.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
 enum anland_gamescope_input_kind { AG_KEY, AG_MOTION, AG_BUTTON, AG_AXIS,
-    AG_TOUCH_DOWN, AG_TOUCH_MOVE, AG_TOUCH_UP, AG_TOUCH_FRAME, AG_REFRESH, AG_RESOURCE_INVALID };
+    AG_TOUCH_DOWN, AG_TOUCH_MOVE, AG_TOUCH_UP, AG_TOUCH_FRAME, AG_REFRESH, AG_RESOURCE_INVALID, AG_TABLET };
 typedef struct anland_gamescope_input_event {
     enum anland_gamescope_input_kind kind;
     double x, y;
     double absolute_x, absolute_y;
     int32_t code, discrete;
     bool pressed;
+    anland_tablet_sample tablet;
 } anland_gamescope_input_event;
 typedef void (*anland_gamescope_input_sink)(void *, const anland_gamescope_input_event *);
 typedef struct anland_gamescope_input {
@@ -23,6 +25,7 @@ typedef struct anland_gamescope_input {
     void *resources_userdata;
     void (*text)(void *, uint32_t, const char *, size_t);
     void *text_userdata;
+    anland_tablet tablet_state;
 } anland_gamescope_input;
 void anland_gamescope_input_reset(anland_gamescope_input *input);
 /* Returns emitted event count, or -1: caller must invalidate the session.

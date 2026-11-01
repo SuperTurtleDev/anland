@@ -351,6 +351,7 @@ fn stop(
     client: &mut Client,
     capture: &mut CaptureSync,
 ) {
+    release_tablet_devices(events, seat);
     if let Err(error) = synchronize_pointer_capture(events, client, capture, false) {
         warn!(%error, "Anland capture release failed; session will be detached");
     }
@@ -368,6 +369,12 @@ fn stop(
     wayland_frontend::reset_all_input_devices(events);
     if let Some(frontend) = events.wayland.as_mut() {
         let _ = frontend.display_handle.flush_clients();
+    }
+}
+
+fn release_tablet_devices(events: &mut RuntimeState, seat: &mut AnlandInputBackend) {
+    for event in seat.take_tablet_releases() {
+        wayland_frontend::process_routed_input_event(events, event, "anland-consumer");
     }
 }
 
@@ -683,6 +690,13 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                         "anland-consumer",
                                     );
                                 }
+                                while let Some(event) = input_seat.pop_pending() {
+                                    flush_clients |= wayland_frontend::process_routed_input_event(
+                                        &mut events,
+                                        event,
+                                        "anland-consumer",
+                                    );
+                                }
                             }
                             Ok(Some(Message::Clipboard(text))) => {
                                 let current = events.clipboard.selection_epoch();
@@ -965,14 +979,22 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     audit_ticks += u64::from(progress.frame_tick.is_some());
                     audit_renders += u64::from(progress.render_requested);
                     audit_vsync += u64::from(progress.vsync_dispatched);
-                    audit_presented += progress.outcomes.iter().filter(|outcome| {
-                        matches!(outcome, super::submission::Outcome::Presented { .. })
-                    }).count() as u64;
+                    audit_presented += progress
+                        .outcomes
+                        .iter()
+                        .filter(|outcome| {
+                            matches!(outcome, super::submission::Outcome::Presented { .. })
+                        })
+                        .count() as u64;
                     if now.saturating_duration_since(audit_since) >= Duration::from_secs(1) {
-                        info!(clock_ticks = audit_ticks, raster_requests = audit_renders,
-                            flutter_vsync = audit_vsync, consumer_ack = audit_presented,
+                        info!(
+                            clock_ticks = audit_ticks,
+                            raster_requests = audit_renders,
+                            flutter_vsync = audit_vsync,
+                            consumer_ack = audit_presented,
                             elapsed_ms = now.saturating_duration_since(audit_since).as_millis(),
-                            "Anland frame statistics");
+                            "Anland frame statistics"
+                        );
                         audit_since = now;
                         audit_ticks = 0;
                         audit_renders = 0;
@@ -1176,6 +1198,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 Action::Reconnect | Action::Reopen => {
                     sources.invalidate();
                     input_stream.reset();
+                    release_tablet_devices(&mut events, &mut input_seat);
                     input_seat.reset();
                     clipboard_sync.reset_session();
                     pointer_capture.reset_session();
@@ -1215,8 +1238,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 // display rate on the input stream. Waiting for an Active output
                 // before reading that stream would make output creation depend
                 // on itself. Drain only while metadata/partial framing is pending.
-                let needs_initial_refresh = c.connected()
-                    && c.output().is_ok_and(|output| output.refresh_mhz == 0);
+                let needs_initial_refresh =
+                    c.connected() && c.output().is_ok_and(|output| output.refresh_mhz == 0);
                 if needs_initial_refresh && !waiting_initial_refresh {
                     info!(
                         "Anland consumer connected; waiting for initial refresh rate without dropping session"

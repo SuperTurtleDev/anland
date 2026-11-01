@@ -35,7 +35,10 @@ public class AutomaticImmersiveEntryTest {
         entry.arm(100);
         assertTrue(entry.retry(false, 600));
         assertTrue(entry.canAttempt(true, true, true));
-        assertFalse(entry.retry(false, 10_100));
+        assertTrue(entry.retry(false, 10_100));
+        assertTrue(entry.retry(false, 30_100));
+        assertTrue(entry.canAttempt(true, true, true));
+        assertFalse(entry.retry(false, 45_100));
         assertFalse(entry.canAttempt(true, true, true));
     }
 
