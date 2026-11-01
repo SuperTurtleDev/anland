@@ -224,7 +224,6 @@
     <string name="hud_import_layout">匯入 HUD 配置…</string>
     <string name="hud_export_done">已匯出 HUD 配置</string>
     <string name="hud_export_failed">無法匯出 HUD 配置</string>
-    <string name="hud_export_empty">還沒有可匯出的 HUD 配置</string>
     <string name="hud_import_done">已匯入 HUD 配置</string>
     <string name="hud_import_failed">無法匯入該配置檔案</string>
     <string name="hud_overlay_saved">配置已儲存</string>
@@ -240,8 +239,6 @@
     <string name="hud_overlay_orientation_title">方向提醒</string>
     <string name="hud_overlay_orientation_message">直向與橫向配置會分別儲存。\n\n請旋轉裝置，分別自訂各方向的按鈕與停駐位置。</string>
     <string name="hud_overlay_got_it">知道了</string>
-    <string name="hud_overlay_snap_on">對齊格線：開</string>
-    <string name="hud_overlay_snap_off">對齊格線：關</string>
     <string name="hud_overlay_copy_portrait_here">將直向配置複製到此處</string>
     <string name="hud_overlay_copy_landscape_here">將橫向配置複製到此處</string>
     <string name="hud_overlay_productivity_preset">桌面 / 生產力預設（10% 邊距）</string>
@@ -275,7 +272,6 @@
     <string name="hud_overlay_daemon_offline">守護程序離線</string>
     <string name="hud_overlay_toolbar_save">儲存</string>
     <string name="hud_overlay_toolbar_add">新增</string>
-    <string name="hud_overlay_toolbar_snap">對齊</string>
     <string name="hud_overlay_toolbar_layout">配置</string>
     <string name="hud_overlay_toolbar_exit">離開</string>
     <string name="hud_overlay_label_key">按鍵</string>

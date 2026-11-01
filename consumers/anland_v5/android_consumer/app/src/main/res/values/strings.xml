@@ -65,7 +65,6 @@
     <string name="hud_import_layout">Import HUD layout…</string>
     <string name="hud_export_done">HUD layout exported</string>
     <string name="hud_export_failed">Could not export HUD layout</string>
-    <string name="hud_export_empty">No HUD layout to export yet</string>
     <string name="hud_import_done">HUD layout imported</string>
     <string name="hud_import_failed">Could not import that layout file</string>
     <string name="hud_overlay_saved">Layout Saved</string>
@@ -81,8 +80,6 @@
     <string name="hud_overlay_orientation_title">ORIENTATION NOTICE</string>
     <string name="hud_overlay_orientation_message">Portrait and Landscape layouts are stored independently.\n\nRotate your device to customize buttons and dock positions for each orientation separately.</string>
     <string name="hud_overlay_got_it">GOT IT</string>
-    <string name="hud_overlay_snap_on">Snap to Grid: ON</string>
-    <string name="hud_overlay_snap_off">Snap to Grid: OFF</string>
     <string name="hud_overlay_copy_portrait_here">Copy Portrait Layout Here</string>
     <string name="hud_overlay_copy_landscape_here">Copy Landscape Layout Here</string>
     <string name="hud_overlay_productivity_preset">Desktop / Productivity Preset (10% Inset)</string>
@@ -116,7 +113,6 @@
     <string name="hud_overlay_daemon_offline">DAEMON OFFLINE</string>
     <string name="hud_overlay_toolbar_save">SAVE</string>
     <string name="hud_overlay_toolbar_add">ADD</string>
-    <string name="hud_overlay_toolbar_snap">SNAP</string>
     <string name="hud_overlay_toolbar_layout">LAYOUT</string>
     <string name="hud_overlay_toolbar_exit">EXIT</string>
     <string name="hud_overlay_label_key">KEY</string>

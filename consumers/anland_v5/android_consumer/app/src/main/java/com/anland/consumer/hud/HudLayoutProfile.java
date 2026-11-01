@@ -21,7 +21,7 @@ public final class HudLayoutProfile {
     public HudLayout keyboardPortraitLayout = new HudLayout();
     public HudLayout keyboardLandscapeLayout = new HudLayout();
 
-    // Slots 2 and 3 start empty, including their keyboard layers.
+    // Slot 2 has a built-in default; slot 3 starts empty.
     private final HudLayout[][] extraLayouts = {
             {new HudLayout(), new HudLayout(), new HudLayout(), new HudLayout()},
             {new HudLayout(), new HudLayout(), new HudLayout(), new HudLayout()}
@@ -42,6 +42,11 @@ public final class HudLayoutProfile {
     private void initDefaults() {
         portraitLayout = createDefaultPortraitLayout();
         landscapeLayout = createSteamDeckLayout();
+        try {
+            importSlot(new JSONObject(DefaultHudLayout2.JSON), 0, 1);
+        } catch (JSONException e) {
+            throw new IllegalStateException("Invalid built-in HUD layout 2", e);
+        }
     }
 
     /**

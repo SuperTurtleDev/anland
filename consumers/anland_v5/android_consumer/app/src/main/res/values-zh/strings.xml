@@ -61,7 +61,6 @@
     <string name="hud_import_layout">导入 HUD 布局…</string>
     <string name="hud_export_done">已导出 HUD 布局</string>
     <string name="hud_export_failed">无法导出 HUD 布局</string>
-    <string name="hud_export_empty">还没有可导出的 HUD 布局</string>
     <string name="hud_import_done">已导入 HUD 布局</string>
     <string name="hud_import_failed">无法导入该布局文件</string>
     <string name="hud_overlay_saved">布局已保存</string>
@@ -77,8 +76,6 @@
     <string name="hud_overlay_orientation_title">方向提示</string>
     <string name="hud_overlay_orientation_message">竖屏和横屏布局分别保存。\n\n旋转设备，即可分别自定义每种屏幕方向下的按键和停靠位置。</string>
     <string name="hud_overlay_got_it">知道了</string>
-    <string name="hud_overlay_snap_on">网格吸附：开</string>
-    <string name="hud_overlay_snap_off">网格吸附：关</string>
     <string name="hud_overlay_copy_portrait_here">将竖屏布局复制到此处</string>
     <string name="hud_overlay_copy_landscape_here">将横屏布局复制到此处</string>
     <string name="hud_overlay_productivity_preset">桌面 / 办公预设（10% 内缩）</string>
@@ -112,7 +109,6 @@
     <string name="hud_overlay_daemon_offline">守护进程未连接</string>
     <string name="hud_overlay_toolbar_save">保存</string>
     <string name="hud_overlay_toolbar_add">添加</string>
-    <string name="hud_overlay_toolbar_snap">吸附</string>
     <string name="hud_overlay_toolbar_layout">布局</string>
     <string name="hud_overlay_toolbar_exit">退出</string>
     <string name="hud_overlay_label_key">按键</string>

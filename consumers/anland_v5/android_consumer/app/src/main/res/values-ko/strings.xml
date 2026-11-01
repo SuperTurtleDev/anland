@@ -238,7 +238,6 @@
     <string name="hud_import_layout">HUD 레이아웃 가져오기…</string>
     <string name="hud_export_done">HUD 레이아웃을 내보냈습니다</string>
     <string name="hud_export_failed">HUD 레이아웃을 내보낼 수 없습니다</string>
-    <string name="hud_export_empty">내보낼 HUD 레이아웃이 없습니다</string>
     <string name="hud_import_done">HUD 레이아웃을 가져왔습니다</string>
     <string name="hud_import_failed">해당 레이아웃 파일을 가져올 수 없습니다</string>
     <string name="hud_overlay_saved">레이아웃 저장됨</string>
@@ -254,8 +253,6 @@
     <string name="hud_overlay_orientation_title">화면 방향 안내</string>
     <string name="hud_overlay_orientation_message">세로 및 가로 레이아웃은 별도로 저장됩니다.\n\n기기를 회전하여 각 방향의 버튼과 독 위치를 따로 사용자 지정하세요.</string>
     <string name="hud_overlay_got_it">확인</string>
-    <string name="hud_overlay_snap_on">그리드에 맞추기: 켜짐</string>
-    <string name="hud_overlay_snap_off">그리드에 맞추기: 꺼짐</string>
     <string name="hud_overlay_copy_portrait_here">세로 레이아웃을 여기에 복사</string>
     <string name="hud_overlay_copy_landscape_here">가로 레이아웃을 여기에 복사</string>
     <string name="hud_overlay_productivity_preset">데스크톱 / 생산성 프리셋 (10% 여백)</string>
@@ -289,7 +286,6 @@
     <string name="hud_overlay_daemon_offline">데몬 오프라인</string>
     <string name="hud_overlay_toolbar_save">저장</string>
     <string name="hud_overlay_toolbar_add">추가</string>
-    <string name="hud_overlay_toolbar_snap">맞춤</string>
     <string name="hud_overlay_toolbar_layout">레이아웃</string>
     <string name="hud_overlay_toolbar_exit">종료</string>
     <string name="hud_overlay_label_key">키</string>

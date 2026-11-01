@@ -108,7 +108,7 @@ The portrait hotkeys preset contains only the Super gesture, Q, OV, and CP. Add 
 
 ## Keyboard layer and settings
 
-Controls snap into alignment while dragging. Choose custom layout 1, 2, or 3 from **Layout**. Layout 1 retains the existing layout; layouts 2 and 3 start empty. Each custom layout stores regular HUD and keyboard layers separately in portrait and landscape. Add layout-switch buttons from **Mods & System** in the standard key picker; add a return button to an empty destination before switching to it. Tap **Edit keyboard** to see the keyboard and its HUD layer. This layer starts empty and accepts the controls described above. It is used while the virtual keyboard is visible; closing the keyboard returns to the regular HUD layer.
+Controls snap into alignment while dragging. Choose custom layout 1, 2, or 3 from **Layout**. Layout 1 retains the existing layout, layout 2 has a built-in default, and layout 3 starts empty. Saved layouts are preserved. Each custom layout stores regular HUD and keyboard layers separately in portrait and landscape. Add layout-switch buttons from **Mods & System** in the standard key picker; add a return button to an empty destination before switching to it. Tap **Edit keyboard** to see the keyboard and its HUD layer. This layer starts empty and accepts the controls described above. It is used while the virtual keyboard is visible; closing the keyboard returns to the regular HUD layer.
 
 Tap **Keyboard settings** on the keyboard layer:
 
