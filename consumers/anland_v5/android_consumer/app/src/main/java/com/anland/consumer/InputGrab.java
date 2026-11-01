@@ -671,7 +671,7 @@ final class InputGrab implements InputGrabTransport {
                         final int maxY = bb.getInt(rec + AUX0 + 12);
                         final int flags = bb.getInt(rec + AUX0 + 16);
                         main.post(() -> {
-                            if (running)
+                            if (running && !stopping)
                                 listener.onDevice(d, cls, minX, maxX, minY, maxY, flags);
                         });
                         break;
@@ -680,7 +680,7 @@ final class InputGrab implements InputGrabTransport {
                         batchLen = flush(batch, batchLen);
                         final int grabbed = bb.getInt(rec + AUX0);
                         main.post(() -> {
-                            if (running)
+                            if (running && !stopping)
                                 listener.onReady(grabbed);
                         });
                         break;
@@ -727,7 +727,7 @@ final class InputGrab implements InputGrabTransport {
         final int[] copy = new int[len];
         System.arraycopy(batch, 0, copy, 0, len);
         main.post(() -> {
-            if (running)
+            if (running && !stopping)
                 listener.onEvents(copy, copy.length);
         });
         return 0;

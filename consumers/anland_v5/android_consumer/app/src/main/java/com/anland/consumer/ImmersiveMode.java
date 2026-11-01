@@ -187,6 +187,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
     private boolean active = false;
     private boolean starting = false;
+    private boolean stopping = false;
     /** The user asked to leave, so the closing toast is theirs to see. */
     private boolean userExitPending = false;
     private boolean suppressToggleUntilUp = false;
@@ -247,6 +248,10 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
     boolean isActive() {
         return active || starting;
+    }
+
+    boolean isStopping() {
+        return stopping;
     }
 
     // ---- settings --------------------------------------------------------
@@ -386,6 +391,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             return false;
         }
         starting = true;
+        stopping = false;
         readyMessage = null;
         userExitPending = false;
         Log.i(TAG, "immersive toggle: configured=" + boundScanCode() + ", session=" + scan);
@@ -413,6 +419,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         unregisterScreenOff();
         if (!active && !starting)
             return;
+        stopping = true;
         readyMessage = null;
         grab.stop();
     }
@@ -522,6 +529,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         unregisterScreenOff();
         active = false;
         starting = false;
+        stopping = false;
         readyMessage = null;
         stats.removeCallbacks(statsTick);
         releaseEverything();

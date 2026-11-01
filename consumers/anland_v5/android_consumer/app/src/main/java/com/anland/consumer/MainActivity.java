@@ -302,6 +302,7 @@ public class MainActivity extends Activity
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             lifecycleHandler.removeCallbacks(delayedFocusStop);
+            scheduleAutomaticImmersiveEntry();
             // Become the accessibility-key target and the focused instance, so real
             // camera frames route to this window (others get blank frames).
             sInstance = this;
@@ -543,9 +544,36 @@ public class MainActivity extends Activity
     private static final long SOCKET_PROBE_RETRY_MS = 400L;
     private static final int SOCKET_PROBE_FAILURES_TO_CLOSE = 3;
     private int socketProbeFailures;
+    private final AutomaticImmersiveEntry automaticImmersive = new AutomaticImmersiveEntry();
+    private final Runnable automaticImmersiveEntry = this::tryAutomaticImmersiveEntry;
+
+    private void armAutomaticImmersiveEntry() {
+        automaticImmersive.arm(android.os.SystemClock.uptimeMillis());
+        scheduleAutomaticImmersiveEntry();
+    }
+
+    private void scheduleAutomaticImmersiveEntry() {
+        lifecycleHandler.removeCallbacks(automaticImmersiveEntry);
+        if (automaticImmersive.canAttempt(mResumed, surfaceReady, hasWindowFocus()))
+            lifecycleHandler.post(automaticImmersiveEntry);
+    }
+
+    private void tryAutomaticImmersiveEntry() {
+        if (!automaticImmersive.canAttempt(mResumed, surfaceReady, hasWindowFocus())
+                || immersive == null)
+            return;
+        boolean completed = immersive.enterAutomatically();
+        if (automaticImmersive.retry(completed, android.os.SystemClock.uptimeMillis()))
+            lifecycleHandler.postDelayed(automaticImmersiveEntry, 500L);
+        else if (!completed)
+            Log.w(TAG, "automatic immersive entry: input did not become ready");
+    }
+
     private final Runnable delayedFocusStop = () -> {
         if (!hasWindowFocus() && mResumed && immersive != null) {
             Log.i(TAG, "focus remained lost; stopping immersive input");
+            if (immersive.isActive())
+                armAutomaticImmersiveEntry();
             immersive.stop();
             releaseAllForwardedKeys();
             releaseScreenTouches();
@@ -555,6 +583,8 @@ public class MainActivity extends Activity
     private final Runnable delayedSurfaceStop = () -> {
         if (!surfaceReady && mResumed && immersive != null) {
             Log.i(TAG, "surface remained unavailable; stopping immersive input");
+            if (immersive.isActive())
+                armAutomaticImmersiveEntry();
             immersive.stop();
             releaseAllForwardedKeys();
             releaseScreenTouches();
@@ -1838,8 +1868,7 @@ public class MainActivity extends Activity
         // toggle never has to wait on an su round trip to know what Gold holds.
         if (immersive != null) {
             immersive.refreshGoldStatus();
-            // Gold-only can auto-enter while touch and Android gestures stay available.
-            immersive.enterAutomatically();
+            armAutomaticImmersiveEntry();
         }
 
         // The socket pref may have been edited in Settings; keep our dedup key current.
@@ -1851,6 +1880,8 @@ public class MainActivity extends Activity
         super.onPause();
         Log.i(TAG, "onPause: releasing immersive input");
         mResumed = false;
+        automaticImmersive.cancel();
+        lifecycleHandler.removeCallbacks(automaticImmersiveEntry);
         stylusHoverScroll.reset();
         lifecycleHandler.removeCallbacks(delayedFocusStop);
         lifecycleHandler.removeCallbacks(delayedSurfaceStop);
@@ -1892,6 +1923,8 @@ public class MainActivity extends Activity
         lifecycleHandler.removeCallbacks(delayedFocusStop);
         lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         mResumed = false;
+        automaticImmersive.cancel();
+        lifecycleHandler.removeCallbacks(automaticImmersiveEntry);
         abandonMediaAudioFocus();
         if (immersive != null) immersive.stop();
         OplusRefreshRateLease.release(this);
@@ -2017,6 +2050,7 @@ public class MainActivity extends Activity
         ensurePointerPosition();
         surfaceReady = true;
         scheduleReconnect(holder);
+        scheduleAutomaticImmersiveEntry();
 
         // ===== 更新屏幕尺寸并重置平滑状态 =====
         updateTouchpadBounds(null);
@@ -2602,6 +2636,10 @@ public class MainActivity extends Activity
         if (immersive != null)
             immersive.onSessionActiveChanged(active);
         if (active) {
+            // A manual start consumes a pending automatic attempt too. Its exit
+            // must not be undone by an availability retry already on the queue.
+            automaticImmersive.cancel();
+            lifecycleHandler.removeCallbacks(automaticImmersiveEntry);
             immersiveHudTouch = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                     .getBoolean(ImmersiveMode.KEY_HUD_TOUCH, ImmersiveMode.DEFAULT_HUD_TOUCH);
             // The pointer is grabbed at the evdev level for the whole session, so
