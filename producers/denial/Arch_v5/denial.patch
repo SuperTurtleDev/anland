@@ -2,12 +2,13 @@ diff --git a/compositor/Cargo.toml b/compositor/Cargo.toml
 index ae16400..bf07036 100644
 --- a/compositor/Cargo.toml
 +++ b/compositor/Cargo.toml
-@@ -13,6 +13,8 @@ resolver = "3"
+@@ -13,6 +13,9 @@ resolver = "3"
  
  [features]
  default = ["xwayland"]
 +external-output = ["flutter"]
 +anland = ["external-output"]
++anland-runtime-v2 = []
  flutter = [
      "kms",
      "control",

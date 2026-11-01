@@ -126,6 +126,8 @@ impl ImportedPool {
             render_view_id: self.identity.view,
             configuration_generation: self.identity.configuration,
             size: self.identity.size,
+            #[cfg(feature = "anland-runtime-v2")]
+            color: None,
             selection: PoolSelection::External {
                 generation: self.identity.generation,
                 selected: None,

@@ -13,7 +13,7 @@
     }
   },
   "patches": {
-    "mango.patch": "e9d89119d5f45241e565bdecd819573d2417fe88bebc2ebe376cd6366ac3d59a",
+    "mango.patch": "5d4dddc3f15989a3b4b1b81485865cbbcf3eda062419843199f361272ca42a69",
     "wlroots.patch": "aa6779bac078b448a31bd34dc1914aa99c7635cbfccc4ecd9a7d66543911c239",
     "scenefx.patch": "212c2a0972d6275180268869a6a7c2747d0f884b0831376eb9ef36b39743322c"
   },
