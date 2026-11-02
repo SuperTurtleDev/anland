@@ -227,7 +227,7 @@
     <string name="hud_import_done">已匯入 HUD 配置</string>
     <string name="hud_import_failed">無法匯入該配置檔案</string>
     <string name="hud_overlay_saved">配置已儲存</string>
-    <string name="hud_overlay_hidden_on">HUD 已隱藏，長按 KB 鍵可恢復</string>
+    <string name="hud_overlay_hidden_on">HUD 已隱藏，再次使用保留的控制項可恢復</string>
     <string name="hud_overlay_hidden_off">HUD 已恢復</string>
     <string name="hud_overlay_save_error">儲存配置時發生錯誤</string>
     <string name="hud_overlay_changes_discarded">已捨棄變更</string>
@@ -367,11 +367,18 @@
     <string name="hud_system_mouse_middle">滑鼠中鍵</string>
     <string name="hud_system_scroll_up">向上捲動</string>
     <string name="hud_system_scroll_down">向下捲動</string>
-    <string name="hud_system_steam_deck_mode">Steam Deck 模式</string>
-    <string name="hud_system_exit_deck_mode">離開 Deck 模式</string>
     <string name="hud_combo_slot">插槽 %1$d</string>
     <string name="hud_combo_builder_hint">最多選擇 3 個按鍵。使用中的插槽會醒目顯示；選擇按鍵即可填入。</string>
     <string name="hud_combo_clear_all">全部清除</string>
     <string name="hud_combo_apply">套用組合</string>
     <string name="hud_combo_empty">（空）</string>
+    <string name="hud_appearance">外觀</string>
+    <string name="hud_conditions">條件觸發</string>
+    <string name="hud_send_on_release">放開時送出（無法連續送出）</string>
+    <string name="hud_send_immediately">按下立即送出</string>
+    <string name="hud_system_toggle_hud_hidden">隱藏 / 恢復 HUD</string>
+    <string name="hud_long_press_action">長按觸發</string>
+    <string name="hud_long_press_delay">長按時間（毫秒）</string>
+    <string name="hud_long_press_hint">放開時送出模式下，長按觸發後不會送出主要動作；立即送出模式下，主要動作已經送出。</string>
+    <string name="hud_resize_panel">拖曳以調整屬性面板大小</string>
 </resources>

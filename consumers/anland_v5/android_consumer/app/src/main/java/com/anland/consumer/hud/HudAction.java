@@ -61,6 +61,12 @@ public final class HudAction {
         return a;
     }
 
+    static boolean isRemovedDeckCommand(JSONObject obj) {
+        if (obj == null || !TYPE_SYSTEM.equals(obj.optString("type"))) return false;
+        String command = obj.optString("command");
+        return "toggle_steam_deck".equals(command) || "exit_steam_deck".equals(command);
+    }
+
     public JSONObject toJSON() throws JSONException {
         JSONObject obj = new JSONObject();
         obj.put("type", type);
@@ -81,6 +87,8 @@ public final class HudAction {
 
     public static HudAction fromJSON(JSONObject obj) {
         if (obj == null) return key(0);
+        // Old profiles can still contain the removed mode in any action slot.
+        if (isRemovedDeckCommand(obj)) return key(0);
         HudAction a = new HudAction();
         a.type = obj.optString("type", TYPE_KEY);
         if ("gamepad".equals(a.type)) return key(0);

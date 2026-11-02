@@ -48,8 +48,6 @@ public class MainActivity extends Activity
         implements SurfaceHolder.Callback, SystemIME.Host, ImmersiveMode.Host {
     private static final String TAG = "Anland";
     private static final String KEY_USE_HUD_OVERLAY = "use_hud_overlay";
-    private static final String KEY_HUD_LAYOUT_PROFILE = "hud_layout_profile_v2";
-    private static final String KEY_STEAM_DECK_MODE = "steam_deck_mode";
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
@@ -857,12 +855,6 @@ public class MainActivity extends Activity
             }
             @Override public void openSettings() {
                 startActivity(new Intent(MainActivity.this, SettingsActivity.class));
-            }
-            @Override public void toggleSteamDeckMode() {
-                setHudSteamDeckMode(!hudPrefs.getBoolean(KEY_STEAM_DECK_MODE, false));
-            }
-            @Override public void exitSteamDeckMode() {
-                setHudSteamDeckMode(false);
             }
             @Override public void onLayoutSaved() {
                 if (mRoot != null) relayout();
@@ -2240,8 +2232,7 @@ public class MainActivity extends Activity
         boolean keyboardUp = virtualKeyboardView != null
                 && virtualKeyboardView.getVisibility() == View.VISIBLE;
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        boolean wantHud = prefs.getBoolean(KEY_USE_HUD_OVERLAY, true)
-                || prefs.getBoolean(KEY_STEAM_DECK_MODE, false);
+        boolean wantHud = prefs.getBoolean(KEY_USE_HUD_OVERLAY, true);
         mHudOverlay.setLayer(keyboardUp
                 ? com.anland.consumer.hud.HudOverlayView.LAYER_KEYBOARD
                 : com.anland.consumer.hud.HudOverlayView.LAYER_HUD);
@@ -2365,10 +2356,6 @@ public class MainActivity extends Activity
     // Apply the screen-orientation preference (default / landscape / portrait).
     private void applyOrientation() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        if (prefs.getBoolean(KEY_STEAM_DECK_MODE, false)) {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-            return;
-        }
         String mode = prefs.getString("screen_orientation", "default");
         switch (mode) {
             case "landscape":
@@ -2388,28 +2375,6 @@ public class MainActivity extends Activity
     @Override
     public com.anland.consumer.hud.IModifierProvider getModifierProvider() {
         return mHudOverlay;
-    }
-
-    private void setHudSteamDeckMode(boolean enabled) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        SharedPreferences.Editor edit = prefs.edit()
-                .putBoolean(KEY_STEAM_DECK_MODE, enabled);
-        if (enabled) {
-            edit.putBoolean(KEY_USE_HUD_OVERLAY, true);
-            try {
-                com.anland.consumer.hud.HudLayoutProfile profile =
-                        com.anland.consumer.hud.HudLayoutProfile.fromJSON(
-                                prefs.getString(KEY_HUD_LAYOUT_PROFILE, null));
-                profile.landscapeLayout =
-                        com.anland.consumer.hud.HudLayoutProfile.createSteamDeckLayout();
-                edit.putString(KEY_HUD_LAYOUT_PROFILE, profile.toJSON().toString());
-            } catch (Exception e) {
-                Log.e(TAG, "Unable to apply touchpad HUD layout", e);
-            }
-        }
-        edit.apply();
-        applyOrientation();
-        refreshHudOverlay();
     }
 
     // The IME was shown/hidden via SystemIME's toggle. In freeform mode the inset

@@ -19,15 +19,10 @@ public final class HudFreeformButtonView extends View {
     public interface ButtonActionListener {
         void onButtonPress(HudButton button, boolean isDown);
         void onPopupTrigger(HudButton button);
-        /**
-         * The press was held for {@link #LONG_PRESS_MS} without moving. The
-         * click that a short tap would have produced is suppressed.
-         */
+        /** A configured long-press action was triggered. */
         default void onButtonLongPress(HudButton button) {}
     }
 
-    /** How long the KB key has to be held to toggle the whole HUD. */
-    private static final long LONG_PRESS_MS = 1000L;
     /** Movement that cancels a pending long press, in dp. */
     private static final float LONG_PRESS_SLOP_DP = 12f;
 
@@ -36,12 +31,13 @@ public final class HudFreeformButtonView extends View {
     private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF mBounds = new RectF();
+    private final HudButtonPress mPress = new HudButtonPress();
 
     private boolean mIsPressed;
+    private float mDownX;
     private float mDownY;
     private boolean mPopupTriggered;
-    // Long press: only the KB key uses it, and while it is pending the click is
-    // held back so a hold never fires the tap action as well.
+    // A configured long-press action competes with the release and swipe actions.
     private boolean mLongPressArmed = false;
     private boolean mLongPressFired = false;
     // In edit mode the parent HudOverlayView already owns the touch stream
@@ -58,10 +54,7 @@ public final class HudFreeformButtonView extends View {
     private final Runnable mRepeatTick = new Runnable() {
         @Override public void run() {
             if (!mIsPressed || mListener == null) return;
-            // Close the previous press and open a new one so the desktop sees
-            // discrete key events, exactly like a hardware auto-repeat.
-            mListener.onButtonPress(mModel, false);
-            mListener.onButtonPress(mModel, true);
+            mPress.repeat(HudFreeformButtonView.this::sendPrimaryTap);
             mRepeatHandler.postDelayed(this, REPEAT_INTERVAL_MS);
         }
     };
@@ -70,14 +63,15 @@ public final class HudFreeformButtonView extends View {
         @Override public void run() {
             if (!mIsPressed || !mLongPressArmed) return;
             mLongPressFired = true;
+            mPress.cancel();
+            stopRepeat();
             if (isHapticEnabled()) performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
             if (mListener != null) mListener.onButtonLongPress(mModel);
         }
     };
 
-    /** The KB key is the only control with a hold gesture. */
     private boolean hasLongPress() {
-        return mModel != null && mModel.isVirtualKeyboardToggle();
+        return mModel != null && mModel.longPressAction != null;
     }
 
     private void dropLongPress() {
@@ -100,25 +94,25 @@ public final class HudFreeformButtonView extends View {
         if (editMode) stopRepeat();
     }
 
-    private boolean mHeldAction;
-
-    private void releaseHeldAction() {
-        if (mHeldAction && mListener != null) mListener.onButtonPress(mModel, false);
-        mHeldAction = false;
+    private void sendPrimaryTap() {
+        if (mListener == null) return;
+        mListener.onButtonPress(mModel, true);
+        mListener.onButtonPress(mModel, false);
     }
 
     @Override
     protected void onDetachedFromWindow() {
-        releaseHeldAction();
+        mIsPressed = false;
+        mPress.cancel();
         stopRepeat();
         dropLongPress();
         super.onDetachedFromWindow();
     }
 
     private boolean isRepeatable() {
-        if (mModel == null || mModel.action == null || !mModel.action.repeat) return false;
-        // A latched modifier must never repeat; it is a toggle, not a key.
-        return !HudAction.TYPE_MODIFIER.equals(mModel.action.type);
+        return mModel != null && !mModel.sendOnRelease && mModel.action != null
+                && HudAction.TYPE_KEY.equals(mModel.action.type)
+                && mModel.action.code > 0 && mModel.action.repeat;
     }
 
     private void startRepeat() {
@@ -201,6 +195,7 @@ public final class HudFreeformButtonView extends View {
 
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                mDownX = event.getX();
                 mDownY = y;
                 mIsPressed = true;
                 mPopupTriggered = false;
@@ -208,31 +203,27 @@ public final class HudFreeformButtonView extends View {
                 if (isHapticEnabled()) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 invalidate();
                 if (hasLongPress()) {
-                    // Wait: a tap still toggles the keyboard, a hold hides the HUD.
                     mLongPressArmed = true;
-                    mRepeatHandler.postDelayed(mLongPressTick, LONG_PRESS_MS);
-                } else {
-                    if (mListener != null) {
-                        mListener.onButtonPress(mModel, true);
-                        mHeldAction = mModel.action != null && (HudAction.TYPE_KEY.equals(mModel.action.type));
-                    }
-                    startRepeat();
+                    mRepeatHandler.postDelayed(mLongPressTick, Math.max(HudButton.LONG_PRESS_MIN_MS,
+                            Math.min(HudButton.LONG_PRESS_MAX_MS, mModel.longPressMs)));
                 }
+                mPress.down(mModel.sendOnRelease, this::sendPrimaryTap);
+                startRepeat();
                 return true;
 
             case MotionEvent.ACTION_MOVE:
-                if (mLongPressArmed && Math.abs(y - mDownY) > LONG_PRESS_SLOP_DP * density) {
+                if (mLongPressArmed && Math.hypot(event.getX() - mDownX, y - mDownY) > LONG_PRESS_SLOP_DP * density) {
                     dropLongPress();
                 }
-                if (mModel.popupAction != null && !mPopupTriggered && (mDownY - y) > 30 * density) {
+                if (!mLongPressFired && mModel.popupAction != null && !mPopupTriggered && (mDownY - y) > 30 * density) {
                     mPopupTriggered = true;
                     mIsPressed = false;
                     stopRepeat();
+                    dropLongPress();
+                    mPress.cancel();
                     if (isHapticEnabled()) performHapticFeedback(HapticFeedbackConstants.CONFIRM);
                     invalidate();
                     if (mListener != null) {
-                        mListener.onButtonPress(mModel, false);
-                        mHeldAction = false;
                         mListener.onPopupTrigger(mModel);
                     }
                 }
@@ -249,23 +240,13 @@ public final class HudFreeformButtonView extends View {
                     mLongPressFired = false;
                     return true;   // the hold already did its job
                 }
-                // A cancel is not a tap: the action that ran on touch-down may
-                // itself have hidden this view (the KB key does exactly that),
-                // and replaying the click here would undo it straight away.
+                // A cancellation must not trigger a deferred tap.
                 if (canceled) {
-                    releaseHeldAction();
+                    mPress.cancel();
                     return true;
                 }
-                if (hasLongPress()) {
-                    // A short tap on the KB key: replay it as a plain click.
-                    if (mListener != null) {
-                        mListener.onButtonPress(mModel, true);
-                        mListener.onButtonPress(mModel, false);
-                    }
-                } else if (mListener != null && !mPopupTriggered) {
-                    mListener.onButtonPress(mModel, false);
-                    mHeldAction = false;
-                }
+                if (mPopupTriggered) return true;
+                mPress.up(this::sendPrimaryTap);
                 return true;
         }
         return super.onTouchEvent(event);

@@ -69,8 +69,6 @@ public final class HudEditorActivity extends Activity {
                 startActivity(new Intent(HudEditorActivity.this, SettingsActivity.class));
             }
 
-            @Override public void toggleSteamDeckMode() {}
-            @Override public void exitSteamDeckMode() {}
             @Override public void onLayoutSaved() {}
             @Override public boolean isNativeReady() { return false; }
 

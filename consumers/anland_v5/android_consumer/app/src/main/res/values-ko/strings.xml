@@ -241,7 +241,7 @@
     <string name="hud_import_done">HUD 레이아웃을 가져왔습니다</string>
     <string name="hud_import_failed">해당 레이아웃 파일을 가져올 수 없습니다</string>
     <string name="hud_overlay_saved">레이아웃 저장됨</string>
-    <string name="hud_overlay_hidden_on">HUD 숨김 — KB 키를 길게 눌러 복원하세요</string>
+    <string name="hud_overlay_hidden_on">HUD 숨김 — 남아 있는 컨트롤로 복원하세요</string>
     <string name="hud_overlay_hidden_off">HUD 복원됨</string>
     <string name="hud_overlay_save_error">레이아웃 저장 오류</string>
     <string name="hud_overlay_changes_discarded">변경 사항 삭제됨</string>
@@ -367,8 +367,6 @@
     <string name="hud_system_mouse_middle">마우스 가운데</string>
     <string name="hud_system_scroll_up">위로 스크롤</string>
     <string name="hud_system_scroll_down">아래로 스크롤</string>
-    <string name="hud_system_steam_deck_mode">Steam Deck 모드</string>
-    <string name="hud_system_exit_deck_mode">Deck 모드 종료</string>
     <string name="hud_combo_slot">슬롯 %1$d</string>
     <string name="hud_combo_builder_hint">키를 최대 3개까지 선택하세요. 활성 슬롯이 강조 표시되며, 키를 선택하면 채워집니다.</string>
     <string name="hud_combo_clear_all">모두 지우기</string>

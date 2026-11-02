@@ -93,6 +93,7 @@ public final class HudLayoutProfile {
         btnQ.activeColor = 0xFF80DEEA;
         btnQ.action = HudAction.combo(125, 16); // Super + Q (Close window)
         btnQ.popupAction = HudAction.system("open_settings");
+        btnQ.sendOnRelease = true;
         layout.floatingButtons.add(btnQ);
 
         // 3. OV button (Super + O / Enter)
@@ -108,6 +109,7 @@ public final class HudLayoutProfile {
         btnOv.textColor = 0xFFFFFFFF;
         btnOv.activeColor = 0xFF80DEEA;
         btnOv.action = HudAction.combo(125, 24); // Super + O (Overview)
+        btnOv.sendOnRelease = true;
         btnOv.popupAction = HudAction.key(28);   // Enter
         layout.floatingButtons.add(btnOv);
 
@@ -124,6 +126,7 @@ public final class HudLayoutProfile {
         btnCp.textColor = 0xFFFFFFFF;
         btnCp.activeColor = 0xFF80DEEA;
         btnCp.action = HudAction.combo(29, 42, 47);      // Ctrl + Shift + V (Paste)
+        btnCp.sendOnRelease = true;
         btnCp.popupAction = HudAction.combo(29, 42, 46); // Ctrl + Shift + C (Copy)
         layout.floatingButtons.add(btnCp);
 
@@ -132,7 +135,7 @@ public final class HudLayoutProfile {
 
     /**
      * Authentic Steam Deck Handheld Console Preset (Based on user-refined ergonomics):
-     * - Left: keyboard D-pad, EXIT and Settings.
+     * - Left: keyboard D-pad and Settings.
      * - Right: horizontal scrollbar, touchpad and keyboard toggle.
      */
     /* Always the landscape handheld layout: this preset has no portrait
@@ -154,18 +157,7 @@ public final class HudLayoutProfile {
         dpad.posYPercent = 0.6173611f;
         layout.floatingButtons.add(dpad);
 
-        // 5. Bottom Left: EXIT and Settings
-        HudButton btnExit = new HudButton();
-        btnExit.label = "EXIT";
-        btnExit.action = HudAction.system("exit_steam_deck");
-        btnExit.bgColor = 0xE6882222;
-        btnExit.widthDp = 44;
-        btnExit.heightDp = 30;
-        btnExit.cornerRadiusDp = 8;
-        btnExit.posXPercent = 0.039375f;
-        btnExit.posYPercent = 0.9309028f;
-        layout.floatingButtons.add(btnExit);
-
+        // 5. Bottom Left: Settings
         HudButton btnSettings = new HudButton();
         btnSettings.label = "⚙";
         btnSettings.action = HudAction.system("open_settings");
@@ -210,6 +202,8 @@ public final class HudLayoutProfile {
         HudButton btnVk = new HudButton();
         btnVk.label = "KB";
         btnVk.action = HudAction.system("toggle_vk");
+        btnVk.sendOnRelease = true;
+        btnVk.longPressAction = HudAction.system("toggle_hud_hidden");
         btnVk.widthDp = 42;
         btnVk.heightDp = 30;
         btnVk.cornerRadiusDp = 8;
@@ -302,6 +296,7 @@ public final class HudLayoutProfile {
         btnQ.label = "Q";
         btnQ.action = HudAction.combo(125, 16);
         btnQ.popupAction = HudAction.system("open_settings");
+        btnQ.sendOnRelease = true;
         btnQ.widthDp = 38;
         btnQ.heightDp = 38;
         btnQ.cornerRadiusDp = 8;
@@ -312,6 +307,7 @@ public final class HudLayoutProfile {
         HudButton btnOv = new HudButton();
         btnOv.label = "OV";
         btnOv.action = HudAction.combo(125, 24);
+        btnOv.sendOnRelease = true;
         btnOv.popupAction = HudAction.key(28);
         btnOv.widthDp = 38;
         btnOv.heightDp = 38;
@@ -323,6 +319,7 @@ public final class HudLayoutProfile {
         HudButton btnCp = new HudButton();
         btnCp.label = "CP";
         btnCp.action = HudAction.combo(29, 42, 47);
+        btnCp.sendOnRelease = true;
         btnCp.popupAction = HudAction.combo(29, 42, 46);
         btnCp.widthDp = 38;
         btnCp.heightDp = 38;
@@ -354,6 +351,8 @@ public final class HudLayoutProfile {
         HudButton btnVk = new HudButton();
         btnVk.label = "KB";
         btnVk.action = HudAction.system("toggle_vk");
+        btnVk.sendOnRelease = true;
+        btnVk.longPressAction = HudAction.system("toggle_hud_hidden");
         btnVk.widthDp = 58;
         btnVk.heightDp = 34;
         btnVk.cornerRadiusDp = 8;

@@ -17,6 +17,7 @@ import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.Button;
@@ -44,8 +45,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         void toggleSystemKeyboard();
         void toggleVirtualKeyboard();
         void openSettings();
-        void toggleSteamDeckMode();
-        void exitSteamDeckMode();
         void onLayoutSaved();
         // True when the daemon socket is live and the native pipeline is
         // connected. False during editor-only mode when the daemon is offline.
@@ -61,7 +60,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
      * here too so this view can read and write the profile on its own. */
     private static final String PREF_KEY_PROFILE = "hud_layout_profile_v2";
     private static final String PREF_KEY_USE_HUD = "use_hud_overlay";
-    private static final String PREF_KEY_STEAM_DECK = "steam_deck_mode";
     /** Long-pressing the KB key hides every HUD control but the KB key itself. */
     private static final String PREF_KEY_HUD_HIDDEN = "hud_hidden_mode";
 
@@ -184,7 +182,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         @Override
         public void onButtonLongPress(HudButton btn) {
             if (mIsEditMode || btn == null) return;
-            if (btn.isVirtualKeyboardToggle()) toggleHudHidden();
+            dispatchHudAction(btn.longPressAction);
         }
     };
 
@@ -349,9 +347,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     }
 
     /**
-     * Flip clean-screen mode: hide every HUD control except the KB key and
-     * remember the choice, so it survives a restart until the user holds the KB
-     * key again.
+     * Hide the HUD while retaining controls that can toggle it back on.
      */
     private void toggleHudHidden() {
         mHudHidden = !mHudHidden;
@@ -478,10 +474,8 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 mProfile = new HudLayoutProfile();
             }
         }
-        boolean isSteamDeck = mPrefs.getBoolean(PREF_KEY_STEAM_DECK, false);
         int orientation = getResources().getConfiguration().orientation;
-        // In Steam Deck Mode, ALWAYS lock to landscape layout regardless of transient system orientation.
-        boolean wantLandscape = isSteamDeck || (orientation == Configuration.ORIENTATION_LANDSCAPE);
+        boolean wantLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE;
         return mProfile.getLayout(mLayoutSlot, wantLandscape, isKeyboardLayer());
     }
 
@@ -634,7 +628,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             }
             @Override
             public void onPickActionRequested(HudButton button, int targetSlot) {
-                // All five action slots (main / popup / 4 swipes) share a
+                // Main, popup, long press and directional slots share a
                 // single picker dialog. Temporarily hide the inspector view
                 // while the modal picker is open to eliminate background clutter.
                 mInspectorView.setVisibility(GONE);
@@ -647,6 +641,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                             break;
                         case 1:
                             button.popupAction = action;
+                            if (action != null && !button.action.repeat) button.sendOnRelease = true;
                             break;
                         case 2:
                             button.setDirectionalAction(2, action);
@@ -659,6 +654,10 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                             break;
                         case 5:
                             button.setDirectionalAction(5, action);
+                            break;
+                        case 6:
+                            button.longPressAction = action;
+                            if (action != null && !button.action.repeat) button.sendOnRelease = true;
                             break;
                     }
                     mInspectorView.bindButton(button);
@@ -1171,9 +1170,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         if (mIsEditMode) {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                selectButton(null, null);
-            }
             return true;
         }
         return super.onTouchEvent(event);
@@ -1259,6 +1255,17 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         }
         mFloatingContainer.removeAllViews();
         HudLayout layout = getActiveLayout();
+        if (mHudHidden && !mIsEditMode && !isKeyboardLayer()) {
+            boolean hasRestore = false;
+            for (HudButton button : layout.floatingButtons) {
+                if (button.canToggleHudVisibility()) { hasRestore = true; break; }
+            }
+            // A layout or orientation switch must never strand the user without a restore control.
+            if (!hasRestore) {
+                mHudHidden = false;
+                mPrefs.edit().putBoolean(PREF_KEY_HUD_HIDDEN, false).apply();
+            }
+        }
         mBuiltLayout = layout;
         // A rebuild supersedes any rebuild that was already queued: this call
         // is about to recreate the very views that one would have touched.
@@ -1313,10 +1320,9 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             if (b == mSelectedButton) {
                 mSelectedView = widgetView;
             }
-            // Clean-screen mode keeps only the KB key, which is also the way
-            // back. Editing always shows everything so the layout stays workable.
+            // Keep controls that can restore the HUD. Editing shows everything.
             if (mHudHidden && !mIsEditMode && !isKeyboardLayer()) {
-                if (b.isVirtualKeyboardToggle()) {
+                if (b.canToggleHudVisibility()) {
                     widgetView.setAlpha(0.6f);
                 } else {
                     widgetView.setVisibility(GONE);
@@ -1369,6 +1375,8 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             });
         }
 
+        final boolean[] dragging = {false};
+        final int touchSlop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
         view.setOnTouchListener((v, event) -> {
             if (!mIsEditMode) return false;
 
@@ -1377,7 +1385,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
 
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN: {
-                    selectButton(model, view);
+                    dragging[0] = false;
                     // Raise the dragged widget above its siblings. translationZ
                     // changes drawing order without touching the child index,
                     // which getSiblingBounds() relies on.
@@ -1412,6 +1420,12 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 }
 
                 case MotionEvent.ACTION_MOVE: {
+                    if (!dragging[0]) {
+                        float dx = rawX - mTouchDownX;
+                        float dy = rawY - mTouchDownY;
+                        if (dx * dx + dy * dy <= touchSlop * touchSlop) return true;
+                        dragging[0] = true;
+                    }
                     mHasUnsavedChanges = true;
                     float targetX = mInitialBtnLeft + (rawX - mTouchDownX);
                     float targetY = mInitialBtnTop + (rawY - mTouchDownY);
@@ -1470,6 +1484,10 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                     if (target != null) {
                         view.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
                         moveWidgetIntoGroup(target.getModel(), model);
+                    } else if (!dragging[0]) {
+                        float dx = rawX - mTouchDownX;
+                        float dy = rawY - mTouchDownY;
+                        if (dx * dx + dy * dy <= touchSlop * touchSlop) selectButton(model, view);
                     }
                     return true;
                 }
@@ -1568,7 +1586,8 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         group.children.add(widget);
         ensureGroupFits(group);
         mHasUnsavedChanges = true;
-        selectButton(group, null);
+        if (mSelectedButton == widget) selectButton(null, null);
+        else if (mSelectedButton == group) mInspectorView.bindButton(group);
         rebuildActiveLayout();
         Toast.makeText(getContext(), R.string.hud_group_moved_in, Toast.LENGTH_SHORT).show();
     }
@@ -1779,9 +1798,8 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             else if ("switch_layout_3".equals(action.systemCommand)) post(() -> switchLayoutSlot(2));
             else if ("toggle_ime".equals(action.systemCommand)) mHost.toggleSystemKeyboard();
             else if ("toggle_vk".equals(action.systemCommand)) mHost.toggleVirtualKeyboard();
+            else if ("toggle_hud_hidden".equals(action.systemCommand)) toggleHudHidden();
             else if ("open_settings".equals(action.systemCommand)) mHost.openSettings();
-            else if ("toggle_steam_deck".equals(action.systemCommand)) mHost.toggleSteamDeckMode();
-            else if ("exit_steam_deck".equals(action.systemCommand)) mHost.exitSteamDeckMode();
             else if ("mouse_left".equals(action.systemCommand)) {
                 mHost.sendMouseButton(0x110, true);
                 postDelayed(() -> mHost.sendMouseButton(0x110, false), 50);

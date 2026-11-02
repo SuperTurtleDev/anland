@@ -64,7 +64,7 @@
     <string name="hud_import_done">已导入 HUD 布局</string>
     <string name="hud_import_failed">无法导入该布局文件</string>
     <string name="hud_overlay_saved">布局已保存</string>
-    <string name="hud_overlay_hidden_on">HUD 已隐藏，长按 KB 键可恢复</string>
+    <string name="hud_overlay_hidden_on">HUD 已隐藏，再次使用保留的控件可恢复</string>
     <string name="hud_overlay_hidden_off">HUD 已恢复</string>
     <string name="hud_overlay_save_error">保存布局失败</string>
     <string name="hud_overlay_changes_discarded">已放弃更改</string>
@@ -369,8 +369,6 @@
     <string name="hud_system_mouse_middle">鼠标中键</string>
     <string name="hud_system_scroll_up">向上滚动</string>
     <string name="hud_system_scroll_down">向下滚动</string>
-    <string name="hud_system_steam_deck_mode">Steam Deck 模式</string>
-    <string name="hud_system_exit_deck_mode">退出 Deck 模式</string>
     <string name="hud_combo_slot">槽位 %1$d</string>
     <string name="hud_combo_builder_hint">最多选择 3 个按键。高亮槽位为当前槽位，选择按键即可填入。</string>
     <string name="hud_combo_clear_all">清除全部</string>
@@ -385,4 +383,13 @@
     <string name="hud_export_choose">选择要导出的布局</string>
     <string name="hud_import_choose">选择要覆盖的布局</string>
     <string name="hud_import_source_choose">选择备份中的布局</string>
+    <string name="hud_appearance">外观</string>
+    <string name="hud_conditions">条件触发</string>
+    <string name="hud_send_on_release">松手发送（无法连续发送）</string>
+    <string name="hud_send_immediately">按下立即发送</string>
+    <string name="hud_system_toggle_hud_hidden">隐藏 / 恢复 HUD</string>
+    <string name="hud_long_press_action">长按触发</string>
+    <string name="hud_long_press_delay">长按时间（毫秒）</string>
+    <string name="hud_long_press_hint">松手发送模式下，长按触发后不会发送主动作；立即发送模式下，主动作已经发送。</string>
+    <string name="hud_resize_panel">拖动以调整属性面板大小</string>
 </resources>

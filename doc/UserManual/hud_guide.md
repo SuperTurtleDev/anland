@@ -50,18 +50,23 @@ These options immediately replace the current canvas controls; save afterwards t
 
 ## Properties panel
 
-Tap a control on the canvas to open its panel. Drag the panel header to move it, or tap its close button to dismiss it. Options vary by control.
+Tap a control on the canvas to open its panel. Drag the header to move it or drag the bottom-right corner to resize it; the size is saved automatically. Tap the close button to dismiss it. Options vary by control.
 
 | Item or button | Purpose |
 | --- | --- |
 | **Display Label** | Change the visible text without changing the action. |
+| **Appearance** | Open size, corner, opacity and color settings. |
 | **Width, Height (dp)** | Adjust size with a slider or numeric input. dp is a density-related size unit. |
 | **Corner (dp)** | Adjust corner roundness. |
 | **Opacity (%)** | Adjust visibility; lower values are more transparent. |
 | **Main Action** | Tap its action button to choose an action; hold the button to clear it. |
 | **Popup Action (Swipe Up)** | Action for swiping up on a standard key; tap to choose or hold to clear. |
 | **Swipe Actions: Left / Right / Up / Down** | Actions for each Super Gesture or sliding-cross direction; tap to choose or hold to clear. |
-| **Repeat while held** | Repeat applicable key actions, useful for arrows, Backspace, or page keys. |
+| **Trigger conditions** | Set a standard button's popup and long-press actions, send timing and repeat behavior. |
+| **Long-press action** | Choose an action to trigger after holding for 500–3000 ms, adjustable with the slider or numeric field. Hold the action selector to clear it. |
+| **Send on release** | Send the primary action on release; an upward swipe replaces it with the popup action. Repeat is unavailable. |
+| **Send immediately on press** | Send the primary action as soon as the button is touched; a subsequent swipe cannot undo it. |
+| **Repeat while held** | In immediate mode, repeat ordinary key actions, useful for arrows, Backspace, or page keys. |
 | **Mode** | Cycle TrackPoint between mouse and scroll; switch the scroll bar between vertical and horizontal. |
 | **Sensitivity (×10)** | Adjust response speed for the relevant pointer or scrolling control. |
 | **Deadzone (dp)** | Adjust the area around the center that does not trigger movement. |
@@ -82,7 +87,7 @@ Tap an action in the properties panel to open the picker. Switch categories at t
 | Category | Contents |
 | --- | --- |
 | **Keys** | Ordinary keys including letters, digits, and function keys. |
-| **MODS & SYS** | Modifiers such as Ctrl and Alt, plus Android soft keyboard, Anland virtual keyboard, Settings, mouse buttons, scroll, Steam Deck mode, and other system actions. |
+| **MODS & SYS** | Modifiers such as Ctrl and Alt, plus Android soft keyboard, Anland virtual keyboard, Settings, mouse buttons, scroll, and other system actions. |
 | **Combo** | Build an action with up to three keys. |
 
 In the combo builder, tap a slot and choose its key. **Clear All** empties the slots; **Apply Combo** applies the selection. For example, select the three slots and fill them with Ctrl, Shift, and C, then apply. A modifier action toggles its active state when tapped and automatically releases after the next key is sent.

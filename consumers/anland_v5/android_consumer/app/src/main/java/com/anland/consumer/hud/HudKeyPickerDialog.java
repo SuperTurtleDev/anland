@@ -404,14 +404,13 @@ public final class HudKeyPickerDialog {
         list.add(new KeyEntry(context.getString(R.string.hud_layout_3), HudAction.system("switch_layout_3")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_soft_keyboard), HudAction.system("toggle_ime")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_virtual_keyboard), HudAction.system("toggle_vk")));
+        list.add(new KeyEntry(context.getString(R.string.hud_system_toggle_hud_hidden), HudAction.system("toggle_hud_hidden")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_settings), HudAction.system("open_settings")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_mouse_left), HudAction.system("mouse_left")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_mouse_right), HudAction.system("mouse_right")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_mouse_middle), HudAction.system("mouse_middle")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_scroll_up), HudAction.system("mouse_scroll_up")));
         list.add(new KeyEntry(context.getString(R.string.hud_system_scroll_down), HudAction.system("mouse_scroll_down")));
-        list.add(new KeyEntry(context.getString(R.string.hud_system_steam_deck_mode), HudAction.system("toggle_steam_deck")));
-        list.add(new KeyEntry(context.getString(R.string.hud_system_exit_deck_mode), HudAction.system("exit_steam_deck")));
         return list;
     }
 

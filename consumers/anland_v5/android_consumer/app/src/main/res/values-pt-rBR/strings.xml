@@ -209,7 +209,7 @@
     <string name="hud_import_done">Layout HUD importado</string>
     <string name="hud_import_failed">Não foi possível importar esse arquivo de layout</string>
     <string name="hud_overlay_saved">Layout Salvo</string>
-    <string name="hud_overlay_hidden_on">HUD oculta — segure a tecla KB para restaurar</string>
+    <string name="hud_overlay_hidden_on">HUD oculta — use o controle visível para restaurar</string>
     <string name="hud_overlay_hidden_off">HUD restaurada</string>
     <string name="hud_overlay_save_error">Erro ao salvar o layout</string>
     <string name="hud_overlay_changes_discarded">Alterações Descartadas</string>
@@ -380,8 +380,6 @@
     <string name="hud_system_mouse_middle">Mouse do Meio</string>
     <string name="hud_system_scroll_up">Rolar Para Cima</string>
     <string name="hud_system_scroll_down">Rolar Para Baixo</string>
-    <string name="hud_system_steam_deck_mode">Modo Steam Deck</string>
-    <string name="hud_system_exit_deck_mode">Sair do Modo Deck</string>
     <string name="hud_combo_slot">Slot %1$d</string>
     <string name="hud_combo_builder_hint">Escolha até 3 teclas. O slot ativo fica destacado; escolha uma tecla para preenchê-lo.</string>
     <string name="hud_combo_clear_all">LIMPAR TUDO</string>

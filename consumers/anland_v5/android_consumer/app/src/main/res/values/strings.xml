@@ -68,7 +68,7 @@
     <string name="hud_import_done">HUD layout imported</string>
     <string name="hud_import_failed">Could not import that layout file</string>
     <string name="hud_overlay_saved">Layout Saved</string>
-    <string name="hud_overlay_hidden_on">HUD hidden — hold the KB key to bring it back</string>
+    <string name="hud_overlay_hidden_on">HUD hidden — use the visible control to restore it</string>
     <string name="hud_overlay_hidden_off">HUD restored</string>
     <string name="hud_overlay_save_error">Error saving layout</string>
     <string name="hud_overlay_changes_discarded">Changes Discarded</string>
@@ -385,8 +385,6 @@
     <string name="hud_system_mouse_middle">Mouse Middle</string>
     <string name="hud_system_scroll_up">Scroll Up</string>
     <string name="hud_system_scroll_down">Scroll Down</string>
-    <string name="hud_system_steam_deck_mode">Steam Deck Mode</string>
-    <string name="hud_system_exit_deck_mode">Exit Deck Mode</string>
     <string name="hud_combo_slot">Slot %1$d</string>
     <string name="hud_combo_builder_hint">Pick up to 3 keys. Active slot is highlighted; pick a key to fill it.</string>
     <string name="hud_combo_clear_all">CLEAR ALL</string>
@@ -401,4 +399,13 @@
     <string name="hud_export_choose">Choose a layout to export</string>
     <string name="hud_import_choose">Choose a layout to replace</string>
     <string name="hud_import_source_choose">Choose a layout from the backup</string>
+    <string name="hud_appearance">Appearance</string>
+    <string name="hud_conditions">Trigger conditions</string>
+    <string name="hud_send_on_release">Send on release (repeat unavailable)</string>
+    <string name="hud_send_immediately">Send immediately on press</string>
+    <string name="hud_system_toggle_hud_hidden">Hide / restore HUD</string>
+    <string name="hud_long_press_action">Long-press action</string>
+    <string name="hud_long_press_delay">Hold time (ms)</string>
+    <string name="hud_long_press_hint">Send on release suppresses the main action after a long press. In immediate mode, the main action has already been sent.</string>
+    <string name="hud_resize_panel">Drag to resize the properties panel</string>
 </resources>

@@ -56,6 +56,8 @@ public final class HudButton {
 
     // Action mappings
     public HudAction action = new HudAction();
+    /** Defer the primary action until release, allowing an upward swipe to replace it. */
+    public boolean sendOnRelease = false;
 
     /**
      * Children of a WIDGET_GROUP container. They are drawn by HudGroupView,
@@ -65,6 +67,10 @@ public final class HudButton {
      */
     public List<HudButton> children = new ArrayList<>();
     public HudAction popupAction = null; // optional swipe-up secondary action
+    public HudAction longPressAction = null;
+    public static final int LONG_PRESS_MIN_MS = 500;
+    public static final int LONG_PRESS_MAX_MS = 3000;
+    public int longPressMs = 1000;
 
     // Super gesture specific mappings
     public HudAction swipeLeftAction = HudAction.combo(125, 105);   // Super + Left
@@ -145,9 +151,13 @@ public final class HudButton {
         obj.put("text_color", textColor);
         obj.put("active_color", activeColor);
         obj.put("action", action.toJSON());
+        obj.put("send_on_release", sendOnRelease);
         if (popupAction != null) {
             obj.put("popup_action", actionJSON(popupAction));
         }
+        // Explicit null distinguishes a cleared binding from a pre-migration profile.
+        obj.put("long_press_action", actionJSON(longPressAction));
+        obj.put("long_press_ms", longPressMs);
 
         if (WIDGET_SUPER_GESTURE.equals(widgetType)) {
             obj.put("swipe_left", actionJSON(swipeLeftAction));
@@ -182,6 +192,10 @@ public final class HudButton {
         JSONObject oldAction = obj.optJSONObject("action");
         if (WIDGET_STANDARD.equals(obj.optString("widget_type", WIDGET_STANDARD))
                 && oldAction != null && "gamepad".equals(oldAction.optString("type"))) return null;
+        // Drop dedicated obsolete mode buttons, but keep buttons with a separate popup action.
+        if (WIDGET_STANDARD.equals(obj.optString("widget_type", WIDGET_STANDARD))
+                && HudAction.isRemovedDeckCommand(oldAction)
+                && obj.optJSONObject("popup_action") == null) return null;
         HudButton b = new HudButton();
         b.id = obj.optString("id", UUID.randomUUID().toString());
         b.widgetType = obj.optString("widget_type", WIDGET_STANDARD);
@@ -199,6 +213,18 @@ public final class HudButton {
         if (obj.has("popup_action")) {
             b.popupAction = HudAction.fromJSON(obj.optJSONObject("popup_action"));
         }
+        if (obj.has("long_press_action")) {
+            JSONObject longAction = obj.optJSONObject("long_press_action");
+            b.longPressAction = longAction == null ? null : HudAction.fromJSON(longAction);
+        } else if (WIDGET_STANDARD.equals(b.widgetType) && b.isVirtualKeyboardToggle()) {
+            // Preserve the old hard-coded keyboard hold as an ordinary editable binding.
+            b.longPressAction = HudAction.system("toggle_hud_hidden");
+        }
+        b.longPressMs = Math.max(LONG_PRESS_MIN_MS,
+                Math.min(LONG_PRESS_MAX_MS, obj.optInt("long_press_ms", 1000)));
+        // Existing popup buttons need to defer their primary action for the swipe to replace it.
+        b.sendOnRelease = obj.optBoolean("send_on_release",
+                ((b.popupAction != null || b.longPressAction != null) && !b.action.repeat));
 
         if (obj.has("swipe_left")) b.swipeLeftAction = HudAction.fromJSON(obj.optJSONObject("swipe_left"));
         if (obj.has("swipe_right")) b.swipeRightAction = HudAction.fromJSON(obj.optJSONObject("swipe_right"));
@@ -238,6 +264,27 @@ public final class HudButton {
                 && "toggle_vk".equals(action.systemCommand);
     }
 
+    /** Controls that can bring the HUD back remain visible when it is hidden. */
+    public boolean canToggleHudVisibility() {
+        if (WIDGET_STANDARD.equals(widgetType) && (isHudVisibilityAction(action)
+                || isHudVisibilityAction(popupAction) || isHudVisibilityAction(longPressAction))) return true;
+        if (WIDGET_SUPER_GESTURE.equals(widgetType)
+                && (isHudVisibilityAction(action) || isHudVisibilityAction(swipeLeftAction) || isHudVisibilityAction(swipeRightAction)
+                || isHudVisibilityAction(swipeUpAction) || isHudVisibilityAction(swipeDownAction))) return true;
+        if (WIDGET_DPAD.equals(widgetType)
+                && (isHudVisibilityAction(dpadUpAction) || isHudVisibilityAction(dpadDownAction)
+                || isHudVisibilityAction(dpadLeftAction) || isHudVisibilityAction(dpadRightAction))) return true;
+        if (WIDGET_GROUP.equals(widgetType)) {
+            for (HudButton child : children) if (child.canToggleHudVisibility()) return true;
+        }
+        return false;
+    }
+
+    private static boolean isHudVisibilityAction(HudAction action) {
+        return action != null && HudAction.TYPE_SYSTEM.equals(action.type)
+                && "toggle_hud_hidden".equals(action.systemCommand);
+    }
+
     public HudButton duplicate() {
         HudButton d = new HudButton();
         d.id = UUID.randomUUID().toString();
@@ -253,7 +300,10 @@ public final class HudButton {
         d.textColor = this.textColor;
         d.activeColor = this.activeColor;
         d.action = this.action.copy();
+        d.sendOnRelease = this.sendOnRelease;
         if (this.popupAction != null) d.popupAction = copyAction(this.popupAction);
+        d.longPressAction = copyAction(this.longPressAction);
+        d.longPressMs = this.longPressMs;
         d.swipeLeftAction = copyAction(this.swipeLeftAction);
         d.swipeRightAction = copyAction(this.swipeRightAction);
         d.swipeUpAction = copyAction(this.swipeUpAction);
