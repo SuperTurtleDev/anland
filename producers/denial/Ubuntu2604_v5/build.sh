@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ubuntu 26.04 (resolute) ARM64 Denial producer for Anland v5.
 #
-# The integration is rebased on Denial's moving `dev` head at build time:
+# The integration targets Denial main's v0.6.0 release commit:
 # denial.patch carries the Anland backend registration, the Flutter-side
 # Impeller fix-ups live in flutter-engine.patch, and the Anland backend body
 # (denial_backend/) is copied from the shared producer layer, never forked.
@@ -22,7 +22,8 @@
 #   ANLAND_INSTALL       install the produced .debs afterwards (0/1, default 0)
 #   ANLAND_OFFLINE       forbid network access (0/1, default 0)
 #   DENIAL_COMMIT        build this Denial commit instead of resolving DENIAL_BRANCH
-#   DENIAL_BRANCH        branch resolved when DENIAL_COMMIT is empty (default dev)
+#   DENIAL_BRANCH        branch resolved when DENIAL_COMMIT is empty (default main)
+#   DENIAL_PACKAGE_VERSION  override the generated package version
 #   GLIBC_BASELINE       libc6 minimum written into package metadata (default: host glibc)
 #
 # Nothing in this script starts a graphical session, installs packages or
@@ -42,7 +43,7 @@ if [[ -r "$SCRIPT_DIR/sources.conf" ]]; then
     source "$SCRIPT_DIR/sources.conf"
 fi
 : "${DENIAL_URL:=https://github.com/denialwm/denial.git}"
-: "${DENIAL_BRANCH:=dev}"
+: "${DENIAL_BRANCH:=main}"
 : "${DENIAL_COMMIT:=}"
 : "${DENIAL_PC_TOOL:=tools/denial-pc}"
 : "${DENIAL_FLUTTER_TOOL:=tools/denial-flutter-engine}"
@@ -183,8 +184,7 @@ fetch_denial() {
         log "fetching Denial $DENIAL_BRANCH $rev"
         git -C "$SRC" fetch --quiet --no-tags --depth=1 origin "$rev"
     fi
-    # Version numbering needs the release tags and their ancestry. Denial's
-    # `dev` diverges from the branch the tags are on, so a shallow,
+    # Version numbering needs the release tags and their ancestry. A shallow,
     # tag-less clone cannot name the release this build extends and the
     # package version collapses to 0.0.0.r1. Fetch only when they are absent;
     # a complete history also keeps offline builds reproducible.
@@ -214,15 +214,17 @@ fetch_denial() {
     [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || die 'SOURCE_DATE_EPOCH must be a Unix timestamp'
     export SOURCE_DATE_EPOCH
 
-    # The release tag this development build extends. It is resolved before
-    # denial.patch touches the tree, so the count is the branch's own commits
-    # and does not depend on the integration patch being applied.
+    # Resolve the latest release reachable from this revision. A later tag on
+    # main must not change the version of a build pinned to an older commit.
     DENIAL_VERSION_BASE_TAG="${DENIAL_VERSION_BASE_TAG:-}"
     if [[ -z "$DENIAL_VERSION_BASE_TAG" ]]; then
-        DENIAL_VERSION_BASE_TAG="$(
-            git -C "$SRC" tag --list 'v*' --sort=-v:refname \
-                | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1
-        )"
+        local candidate
+        while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                DENIAL_VERSION_BASE_TAG="$candidate"
+                break
+            fi
+        done < <(git -C "$SRC" tag --merged HEAD --list 'v*' --sort=-v:refname)
     fi
     if [[ -n "$DENIAL_VERSION_BASE_TAG" ]]; then
         git -C "$SRC" rev-parse --verify --quiet \
@@ -481,6 +483,13 @@ stage_packages() {
     # revision the patches were built from; a ".dirty" suffix would only hide
     # which integration went in.
     export DENIAL_PACKAGE_ALLOW_DIRTY=1
+    # The pinned release is identified by its immutable commit even when an
+    # offline checkout has no tags. Other revisions retain upstream's
+    # development version unless the caller supplies an explicit override.
+    if [[ "$DENIAL_REV" == d65792d4309a93f2a4877bfc16bc96df6151506c \
+        && ! ${DENIAL_PACKAGE_VERSION+x} ]]; then
+        export DENIAL_PACKAGE_VERSION=0.6.0
+    fi
     if [[ -n "${DENIAL_VERSION_BASE_TAG:-}" ]]; then
         export DENIAL_VERSION_BASE_TAG
     fi

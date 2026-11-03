@@ -196,7 +196,6 @@ args=(
     --wayland
     --render-device "$render"
     --flutter-bundle "$bundle"
-    --flutter-renderer impeller
     --output-config "$output_config"
 )
 if ((full)); then

@@ -214,21 +214,6 @@ checkout() {
         die "cached revision differs: $tree; move it aside before changing upstream version"
 }
 
-# The version is derived from release tags, which a --depth=1 fetch does not
-# carry. Complete the history once per cached checkout; both the tags and the
-# merge base need it. A completed clone satisfies the guard, so the network
-# round trip happens once and not on every build. A pinned base tag needs no
-# history at all. Offline builds keep whatever the cache already holds.
-ensure_version_history() {
-    local tree=$1 url=$2
-    [[ -z ${DENIAL_VERSION_BASE_TAG:-} && $ANLAND_OFFLINE == 0 ]] || return 0
-    [[ $(git -C "$tree" rev-parse --is-shallow-repository) == false ]] &&
-        [[ -n $(git -C "$tree" tag --list 'v*' | head -n 1) ]] && return 0
-    log 'completing the Denial history and release tags for version numbering'
-    git -C "$tree" fetch --quiet --tags --unshallow "$url" 2>/dev/null ||
-        git -C "$tree" fetch --quiet --tags "$url" ||
-        log 'cannot complete the Denial history; the version stays 0.0.0-based'
-}
 resolve_flutter_dependencies() {
     # Read only the selected DEPS expressions; never execute upstream DEPS code.
     python3 - "$1/DEPS" "$FLUTTER_URL" "$FLUTTER_REV" <<'PY_FLUTTER_SOURCES'
@@ -276,7 +261,7 @@ PY_FLUTTER_SOURCES
 
 prepare_sources() {
     log 'Prepare Denial and Anland sources'
-    local latest_result latest_tree base_version flutter_tree
+    local latest_result latest_tree flutter_tree
     latest_result=$(anland_prepare_latest_git_source denial "$DENIAL_URL" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE" '' shallow "$DENIAL_REVISION") ||
         die 'cannot resolve the Denial revision supported by the backend patch'
     IFS=$'\t' read -r latest_tree DENIAL_REV <<< "$latest_result"
@@ -308,64 +293,35 @@ prepare_sources() {
         ENGINE=$(realpath -m -- "$WORKDIR/engine/build/$FLUTTER_REV/out/denial_host_release_arm64_anland_ganesh") ||
             die 'invalid Flutter engine output path'
     fi
-    # Denial's compositor/Cargo.toml is pinned at 0.0.0 and upstream never bumps
-    # it, so the release a build extends exists only in its git tags. The tags
-    # live on `main` while the producer tracks `dev`, so `tag --merged HEAD`
-    # alone finds nothing: pick the newest release tag that shares history, then
-    # count from the merge base rather than from the tag commit.
-    ensure_version_history "$SOURCE" "$DENIAL_URL"
-    [[ -z ${DENIAL_VERSION_BASE_TAG:-} ]] || git -C "$SOURCE" rev-parse --verify --quiet \
-        "${DENIAL_VERSION_BASE_TAG}^{commit}" >/dev/null ||
-        die "DENIAL_VERSION_BASE_TAG is not a commit: ${DENIAL_VERSION_BASE_TAG:-<unset>}"
-    local version_tag="${DENIAL_VERSION_BASE_TAG:-}" base_commit revision_count revision
-    if [[ -z $version_tag ]]; then
-        while IFS= read -r candidate; do
-            if git -C "$SOURCE" merge-base "$candidate" HEAD >/dev/null 2>&1; then
-                version_tag=$candidate
-                break
-            fi
-        done < <(git -C "$SOURCE" tag --list 'v*' --sort=-v:refname |
-            grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')
-    fi
-    if [[ -n $version_tag ]]; then
-        base_commit=$(git -C "$SOURCE" merge-base "$version_tag" HEAD) ||
-            die "no merge base between $version_tag and HEAD"
-        revision_count=$(git -C "$SOURCE" rev-list --count "$base_commit..HEAD") ||
-            die "cannot count commits since $version_tag"
-        revision=$(git -C "$SOURCE" rev-parse --short=8 HEAD) || die 'cannot identify the Denial revision'
-        base_version="${version_tag#v}.r$revision_count.g$revision"
-        log "version base: $version_tag ($revision_count commits on this branch)"
-    else
-        log 'no release tag shares history with this revision; the version stays 0.0.0-based'
-        base_version='0.0.0'
-    fi
-    [[ $base_version =~ ^[A-Za-z0-9][A-Za-z0-9.+_-]*$ ]] || die 'invalid current Denial package version'
-    # Every platform ships the same version string; Anland no longer appends a
-    # packaging suffix, so Arch, Debian, Fedora and Ubuntu stay comparable.
-    DENIAL_VERSION="$base_version"
+    # The patch and release version belong to the exact commit in sources.conf.
+    # Avoid deriving a release from unrelated tags or missing shallow history.
+    [[ $DENIAL_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'invalid pinned Denial release version'
     export DENIAL_BUILD_VERSION="$DENIAL_VERSION" FLUTTER_GIT_URL="$FLUTTER_URL" FLUTTER_ROOT="$FLUTTER"
-    local patch="$WORKDIR/denial.pending.patch" previous="$WORKDIR/denial.applied.patch" file target
-    # denial.patch carries the whole Denial-side integration; the Flutter engine
-    # hunks live apart so they apply only in the source-selected Flutter checkout.
+    local patch="$WORKDIR/denial.pending.patch" previous="$WORKDIR/denial.$DENIAL_REV.applied.patch" file target
+    # Validate exact context for the selected release; do not fuzz upstream drift.
     [[ -s $SCRIPT_DIR/denial.patch ]] || die 'missing component patch: denial.patch'
     cat -- "$SCRIPT_DIR/denial.patch" > "$patch" || die 'cannot read denial.patch'
     [[ -s $SCRIPT_DIR/flutter-engine.patch ]] || die 'missing component patch: flutter-engine.patch'
     cp -- "$SCRIPT_DIR/flutter-engine.patch" "$ENGINE_PATCH" || die 'cannot read flutter-engine.patch'
-    if ! cmp -s "$patch" "$previous"; then
-        # Several blocks touch the same file. A dry run cannot see changes from
-        # earlier blocks, so validate the complete sequence on a disposable copy.
+    if git -C "$SOURCE" apply --check "$patch"; then
+        run git -C "$SOURCE" apply "$patch"
+    elif git -C "$SOURCE" apply --reverse --check "$patch" 2>/dev/null; then
+        log 'Denial integration patch is already applied'
+    else
+        [[ -f $previous ]] || die 'source has conflicting edits; refusing to overwrite them'
+        # Prove the transition on a copy before changing the managed checkout.
         local probe
         probe=$(mktemp -d "$WORKDIR/.patch-check.XXXXXX") || die 'cannot create patch check tree'
         run cp -a --reflink=auto "$SOURCE/." "$probe/"
-        local applies=0
-        patch --batch --forward --fuzz=2 --no-backup-if-mismatch -p1 -d "$probe" -i "$patch" >/dev/null 2>&1 && applies=1
-        run rm -rf -- "$probe"
-        if [[ $applies == 0 ]]; then
-            [[ -f $previous ]] || die 'source has conflicting edits; refusing to overwrite them'
-            run patch --batch --force --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" --reverse --dry-run -i "$previous"
-            run patch --batch --force --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" --reverse -i "$previous"
+        if ! git -C "$probe" apply --reverse --check "$previous" ||
+           ! git -C "$probe" apply --reverse "$previous" ||
+           ! git -C "$probe" apply --check "$patch"; then
+            run rm -rf -- "$probe"
+            die 'Denial patch transition failed; source changes preserved'
         fi
-        run patch --batch --forward --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" -i "$patch"
+        run rm -rf -- "$probe"
+        run git -C "$SOURCE" apply --reverse "$previous"
+        run git -C "$SOURCE" apply "$patch"
     fi
     run cp "$patch" "$previous"
     target="$SOURCE/compositor/src/bin/deniald/anland_backend"

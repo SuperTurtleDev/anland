@@ -1,5 +1,5 @@
 diff --git a/compositor/Cargo.toml b/compositor/Cargo.toml
-index ae16400..bf07036 100644
+index fc9067f..b98956a 100644
 --- a/compositor/Cargo.toml
 +++ b/compositor/Cargo.toml
 @@ -13,6 +13,9 @@ resolver = "3"
@@ -7,14 +7,14 @@ index ae16400..bf07036 100644
  [features]
  default = ["xwayland"]
 +external-output = ["flutter"]
-+anland = ["external-output"]
++anland = ["external-output", "anland-runtime-v2"]
 +anland-runtime-v2 = []
  flutter = [
      "kms",
      "control",
 diff --git a/compositor/build.rs b/compositor/build.rs
 new file mode 100644
-index 0000000..f54f20b
+index 0000000..bb08ec8
 --- /dev/null
 +++ b/compositor/build.rs
 @@ -0,0 +1,23 @@
@@ -42,10 +42,10 @@ index 0000000..f54f20b
 +    println!("cargo:rustc-link-arg-bin=deniald=-Wl,-rpath,$ORIGIN:$ORIGIN/../lib");
 +}
 diff --git a/compositor/flutter-engine/src/host.rs b/compositor/flutter-engine/src/host.rs
-index 5965112..9dfc650 100644
+index 48439a2..bc985ae 100644
 --- a/compositor/flutter-engine/src/host.rs
 +++ b/compositor/flutter-engine/src/host.rs
-@@ -729,6 +729,51 @@ impl EngineHost {
+@@ -680,6 +680,51 @@ impl EngineHost {
              .expect("Flutter engine is shut down")
      }
  
@@ -97,7 +97,7 @@ index 5965112..9dfc650 100644
      pub fn run_scheduled_task(&self, task: ScheduledTask) -> Result<(), EngineError> {
          self.engine().run_task(&task.as_flutter_task())
      }
-@@ -771,6 +816,27 @@ impl EngineHost {
+@@ -722,6 +767,27 @@ impl EngineHost {
      }
  }
  
@@ -126,20 +126,20 @@ index 5965112..9dfc650 100644
      state: &CallbackState,
      engine: sys::FlutterEngine,
 diff --git a/compositor/flutter-engine/src/lib.rs b/compositor/flutter-engine/src/lib.rs
-index ed7284a..c6a633d 100644
+index a45523d..b0bc8f4 100644
 --- a/compositor/flutter-engine/src/lib.rs
 +++ b/compositor/flutter-engine/src/lib.rs
 @@ -42,7 +42,7 @@ type SetTexturePresentationCallback = unsafe extern "C" fn(
  pub use host::{
      BackingStoreRequest, CompositorBackingStore, DartRuntimeMode, EngineEvent, EngineHost,
-     EngineProject, HostError, OpenGlHandler, ParseRendererBackendError, PlatformMessage,
--    PresentFrame, PresentView, RendererBackend, ScheduledTask,
-+    PresentFrame, PresentView, RenderOperationResult, RendererBackend, ScheduledTask,
+     EngineProject, HostError, OpenGlHandler, PlatformMessage, PresentFrame, PresentView,
+-    ScheduledTask,
++    RenderOperationResult, ScheduledTask,
  };
  
  #[derive(Clone, Copy, Debug, PartialEq)]
 diff --git a/compositor/src/bin/deniald.rs b/compositor/src/bin/deniald.rs
-index 057af62..2be886a 100644
+index 506c4ef..200c69d 100644
 --- a/compositor/src/bin/deniald.rs
 +++ b/compositor/src/bin/deniald.rs
 @@ -1,6 +1,10 @@
@@ -150,10 +150,10 @@ index 057af62..2be886a 100644
 +#[path = "deniald/anland_backend/mod.rs"]
 +mod anland_backend;
 +
- #[path = "deniald/application_theming.rs"]
- mod application_theming;
  #[cfg(feature = "flutter")]
-@@ -24,6 +28,12 @@ mod fingerprint_presentation;
+ #[path = "deniald/ambient_display.rs"]
+ mod ambient_display;
+@@ -33,6 +37,12 @@ mod fingerprint_presentation;
  #[path = "deniald/flutter_event_loop.rs"]
  mod flutter_event_loop;
  #[cfg(feature = "flutter")]
@@ -166,7 +166,7 @@ index 057af62..2be886a 100644
  #[path = "deniald/flutter_runtime.rs"]
  mod flutter_runtime;
  #[cfg(feature = "flutter")]
-@@ -41,6 +51,9 @@ mod flutter_settings_sync;
+@@ -50,6 +60,9 @@ mod flutter_settings_sync;
  #[path = "deniald/frame_loop.rs"]
  mod frame_loop;
  #[cfg(feature = "flutter")]
@@ -244,10 +244,10 @@ index 8292089..e7fbaf1 100644
          if state.locked {
 diff --git a/compositor/src/bin/deniald/flutter_desktop.rs b/compositor/src/bin/deniald/flutter_desktop.rs
 new file mode 100644
-index 0000000..8629fc3
+index 0000000..30501ad
 --- /dev/null
 +++ b/compositor/src/bin/deniald/flutter_desktop.rs
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,209 @@
 +//! Desktop services and Flutter callback processing shared by display backends.
 +use super::*;
 +#[cfg(feature = "external-output")]
@@ -302,7 +302,7 @@ index 0000000..8629fc3
 +    let initial_settings_document_revision = output_control
 +        .as_ref()
 +        .map(|publisher| publisher.settings_document_revision());
-+    let events = RuntimeState {
++    let mut events = RuntimeState {
 +        wayland,
 +        gamma_control,
 +        native_escape_shortcut,
@@ -322,6 +322,7 @@ index 0000000..8629fc3
 +        output_control,
 +        ..RuntimeState::default()
 +    };
++    events.text_prediction = flutter_event_loop::start_text_prediction(event_loop)?;
 +    synchronize_fingerprint_unlock(&events);
 +    if let Some(settings_path) = events
 +        .wayland
@@ -458,7 +459,7 @@ index 0000000..8629fc3
 +}
 diff --git a/compositor/src/bin/deniald/flutter_desktop/session.rs b/compositor/src/bin/deniald/flutter_desktop/session.rs
 new file mode 100644
-index 0000000..83ac43b
+index 0000000..3cec6fb
 --- /dev/null
 +++ b/compositor/src/bin/deniald/flutter_desktop/session.rs
 @@ -0,0 +1,72 @@
@@ -468,6 +469,7 @@ index 0000000..83ac43b
 +use crate::flutter_launcher::FlutterLauncher;
 +use crate::flutter_runtime::FlutterRuntime;
 +use crate::options::RuntimeLimit;
++use crate::session_activation::SystemdEnvironmentRestore;
 +use crate::wayland_frontend::WaylandFrontend;
 +use std::path::Path;
 +use tracing::warn;
@@ -475,7 +477,7 @@ index 0000000..83ac43b
 +pub(crate) struct Startup {
 +    enabled: bool,
 +    activated: bool,
-+    systemd_started: bool,
++    systemd_restore: Option<SystemdEnvironmentRestore>,
 +    polkit_agent: bool,
 +}
 +
@@ -484,7 +486,7 @@ index 0000000..83ac43b
 +        Self {
 +            enabled: limit == RuntimeLimit::UntilLogout && desktop_enabled,
 +            activated: false,
-+            systemd_started: false,
++            systemd_restore: None,
 +            polkit_agent,
 +        }
 +    }
@@ -514,214 +516,54 @@ index 0000000..83ac43b
 +            control_socket.map(Path::as_os_str),
 +            self.polkit_agent,
 +        ) {
-+            Ok(activation) => self.systemd_started = activation.starts_systemd_target(),
++            Ok(activation) => self.systemd_restore = activation.into_systemd_restore(),
 +            Err(error) => warn!(%error, "could not activate the desktop session environment"),
 +        }
 +        super::start_startup_applications(
 +            runtime,
 +            self.polkit_agent,
-+            self.systemd_started,
++            self.systemd_restore.is_some(),
 +            launcher.plugin_rebuild_needed(),
 +        );
 +    }
 +
 +    pub fn stop(&mut self) {
-+        if self.systemd_started {
-+            self.systemd_started = false;
-+            if let Err(error) = crate::stop_systemd_graphical_session() {
++        if let Some(restore) = self.systemd_restore.take() {
++            if let Err(error) = crate::stop_systemd_graphical_session(&restore) {
 +                warn!(%error, "could not retire the desktop graphical-session target");
 +            }
 +        }
 +    }
 +}
 diff --git a/compositor/src/bin/deniald/flutter_event_loop.rs b/compositor/src/bin/deniald/flutter_event_loop.rs
-index 951663c..2774e12 100644
+index ff2206e..61845f9 100644
 --- a/compositor/src/bin/deniald/flutter_event_loop.rs
 +++ b/compositor/src/bin/deniald/flutter_event_loop.rs
-@@ -1,5 +1,6 @@
- //! Bounded calloop dispatch for Flutter, Wayland, KMS, and control-plane events.
+@@ -23,6 +23,12 @@ mod screenshots;
+ #[path = "flutter_event_loop/services.rs"]
+ mod services;
  
-+use super::flutter_desktop::{process_flutter_event_batch, synchronize_periodic_shell_services};
- use super::kms_pipeline::{
-     HotplugRequest, ResidentModeRequest, apply_hotplug_topology, apply_resident_mode_topology,
- };
-@@ -68,54 +69,6 @@ fn output_transaction_waiting(
-     ready_output_apply || pending_output_apply || resident_geometry_reconfigure_requested
- }
++pub(super) fn start_text_prediction(
++    event_loop: &mut EventLoop<'_, RuntimeState>,
++) -> Result<Option<text_prediction::TextPredictionService>, Box<dyn Error>> {
++    services::start_text_prediction(event_loop)
++}
++
+ const BACKGROUND_SERVICE_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
+ const BACKGROUND_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
  
--fn start_notification_server(
--    event_loop: &mut EventLoop<'_, RuntimeState>,
--) -> Result<Option<NotificationServer>, Box<dyn Error>> {
--    let notification_events = Arc::new(Mutex::new(VecDeque::with_capacity(
--        NOTIFICATION_EVENT_QUEUE_CAPACITY,
--    )));
--    let notification_publish_queue = Arc::clone(&notification_events);
--    let (notification_sender, notification_source) = channel();
--    match NotificationServer::start(move |event, _| {
--        let should_wake = {
--            let mut queue = notification_publish_queue
--                .lock()
--                .unwrap_or_else(std::sync::PoisonError::into_inner);
--            let should_wake = queue.is_empty();
--            if queue.len() == NOTIFICATION_EVENT_QUEUE_CAPACITY {
--                queue.pop_front();
--            }
--            queue.push_back(event);
--            should_wake
--        };
--        if should_wake {
--            // One calloop message wakes the compositor for the complete
--            // coalesced batch; the notification worker never busy-waits.
--            let _ = notification_sender.send(());
--        }
--    }) {
--        Ok(server) => {
--            let notification_dispatch_queue = Arc::clone(&notification_events);
--            event_loop.handle().insert_source(
--                notification_source,
--                move |event, _, state: &mut RuntimeState| {
--                    if let ChannelEvent::Msg(()) = event {
--                        let mut queue = notification_dispatch_queue
--                            .lock()
--                            .unwrap_or_else(std::sync::PoisonError::into_inner);
--                        state.pending_notification_events.extend(queue.drain(..));
--                    }
--                },
--            )?;
--            Ok(Some(server))
--        }
--        Err(error) => {
--            error!(%error, "Denial could not start its notification service");
--            Ok(None)
--        }
--    }
--}
--
- fn start_orientation_sensor(
-     event_loop: &mut EventLoop<'_, RuntimeState>,
- ) -> Result<Option<orientation_sensor::OrientationSensor>, Box<dyn Error>> {
-@@ -2045,28 +1998,6 @@ fn freeze_prepared_screenshot_frame(
-     Ok(())
- }
- 
--fn process_flutter_event_batch(
--    runtime: &mut flutter_runtime::FlutterRuntime,
--    events: &mut RuntimeState,
--) -> Result<(), Box<dyn Error>> {
--    if events.flutter_input.has_pending() {
--        runtime.process_input_batch(&mut events.flutter_input)?;
--    }
--    // Drain in place so the callback queue retains its allocation across the
--    // steady-state AwaitVSync and platform-task hot path.
--    let event_count = events
--        .flutter_events
--        .len()
--        .min(MAX_FLUTTER_EVENTS_PER_ITERATION);
--    runtime.process_events(events.flutter_events.drain(..event_count))?;
--    if runtime.take_native_window_fallback() {
--        events.scene_sync.mark_dirty();
--    }
--    synchronize_authentication_boundary(events);
--    synchronize_flutter_window_commands(runtime, events)?;
--    Ok(())
--}
--
- fn dispatch_when_background_slice_expires(
-     started: Instant,
-     event_loop: &mut EventLoop<'_, RuntimeState>,
-@@ -2094,19 +2025,6 @@ fn synchronize_periodic_power_configuration(
-     Ok(())
- }
- 
--fn synchronize_periodic_shell_services(
--    runtime: &mut flutter_runtime::FlutterRuntime,
--    events: &mut RuntimeState,
--) -> Result<(), Box<dyn Error>> {
--    synchronize_clipboard(runtime, events)?;
--    synchronize_system_control_events(runtime, events)?;
--    synchronize_notification_events(runtime, events)?;
--    synchronize_xembed_tray(runtime, events)?;
--    synchronize_shell_keyboard(runtime, events)?;
--    synchronize_settings(runtime, events)?;
--    Ok(())
--}
--
- fn cancel_invalid_screenshot_selection(
-     manager: &mut Option<screenshot::ScreenshotManager>,
-     runtime: &mut flutter_runtime::FlutterRuntime,
-@@ -2555,51 +2473,17 @@ pub(super) fn run_flutter_event_loop(
-                 .ok_or("Flutter session duration exceeds the monotonic clock range")
-         })
-         .transpose()?;
--    let system_controls = wayland
--        .as_ref()
--        .map(|_| SystemControls::new())
--        .transpose()?;
--    let notification_server = start_notification_server(event_loop)?;
--    let initial_runtime = flutter
--        .as_ref()
--        .ok_or("Flutter runtime was not initialized")?;
--    let authentication = Some(initial_runtime.authentication());
--    let clipboard = initial_runtime.clipboard();
--    let native_escape_shortcut = wayland
--        .as_ref()
--        .map(|frontend| frontend.shortcuts.engine())
--        .unwrap_or_default();
--    let initial_theme_snapshot = portal_ipc.as_ref().map(|publisher| publisher.snapshot());
--    let initial_settings_document_revision = output_control.settings_document_revision();
--    let mut events = RuntimeState {
-+    let mut events = flutter_desktop::initialize(
-+        event_loop,
-+        flutter
-+            .as_ref()
-+            .ok_or("Flutter runtime was not initialized")?,
-         wayland,
-+        swapchain.desktop_size(),
-         gamma_control,
--        native_escape_shortcut,
--        clipboard,
--        system_controls,
--        notification_server,
-+        Some(output_control.clone()),
-         portal_ipc,
--        published_theme_snapshot: initial_theme_snapshot,
--        published_settings_document_revision: Some(initial_settings_document_revision),
--        resolved_theme_accent: initial_theme_snapshot
--            .map_or_else(DesktopAccentColor::default, |snapshot| {
--                snapshot.accent_color
--            }),
--        authentication,
--        flutter_active: true,
--        flutter_input: flutter_runtime::InputQueue::new(swapchain.desktop_size()),
--        output_control: Some(output_control.clone()),
--        ..RuntimeState::default()
--    };
--    synchronize_fingerprint_unlock(&events);
--    if let Some(settings_path) = events
--        .wayland
--        .as_ref()
--        .map(|frontend| frontend.settings.path().to_path_buf())
--        && let Err(error) = settings_watch::install(&event_loop.handle(), &settings_path)
--    {
--        warn!(%error, path = %settings_path.display(), "could not watch Denial settings for external edits");
--    }
-+    )?;
-     let _orientation_sensor = start_orientation_sensor(event_loop)?;
-     let (volition_wake, volition_wake_source) = make_ping()?;
-     // Queued Volition records are acknowledged at the top of each iteration.
 diff --git a/compositor/src/bin/deniald/flutter_launcher.rs b/compositor/src/bin/deniald/flutter_launcher.rs
 new file mode 100644
-index 0000000..1d779e1
+index 0000000..5e224b8
 --- /dev/null
 +++ b/compositor/src/bin/deniald/flutter_launcher.rs
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,396 @@
 +//! Shared Flutter shell launch, recovery, authentication and development state.
 +use super::*;
 +use smithay::backend::egl::EGLContext;
 +
 +pub(super) struct FlutterLauncher {
 +    factory: Option<flutter_runtime::FlutterRuntimeFactory>,
-+    renderer_backend: denial_flutter_engine::RendererBackend,
 +    offscreen_blit: bool,
 +    active_mode: ui_development::UiRuntimeMode,
 +    resident_jit_engine_fingerprint: Option<[u8; 32]>,
@@ -738,7 +580,6 @@ index 0000000..1d779e1
 +
 +pub(super) struct FlutterLaunchConfiguration<'a> {
 +    pub(super) bundle: &'a Path,
-+    pub(super) renderer_backend: denial_flutter_engine::RendererBackend,
 +    pub(super) offscreen_blit: bool,
 +    pub(super) debug_bundle: Option<PathBuf>,
 +    pub(super) ui_workspace: Option<PathBuf>,
@@ -747,6 +588,10 @@ index 0000000..1d779e1
 +impl FlutterLauncher {
 +    pub(super) fn plugin_rebuild_needed(&self) -> bool {
 +        self.ui_development.plugin_rebuild_needed()
++    }
++
++    pub(super) fn ui_development_deadline(&self, now: Instant) -> Option<Instant> {
++        self.ui_development.plugin_health_deadline(now)
 +    }
 +
 +    pub(super) fn new(
@@ -767,9 +612,7 @@ index 0000000..1d779e1
 +            factory: Some(flutter_runtime::FlutterRuntimeFactory::new(
 +                configuration.bundle,
 +                denial_flutter_engine::DartRuntimeMode::Aot,
-+                configuration.renderer_backend,
 +            )?),
-+            renderer_backend: configuration.renderer_backend,
 +            offscreen_blit: configuration.offscreen_blit,
 +            active_mode: ui_development::UiRuntimeMode::OfficialOptimized,
 +            resident_jit_engine_fingerprint: None,
@@ -799,7 +642,6 @@ index 0000000..1d779e1
 +            shared_context,
 +            pools,
 +            desktop_size,
-+            self.renderer_backend,
 +            self.offscreen_blit,
 +            self.events.clone(),
 +        )
@@ -890,24 +732,28 @@ index 0000000..1d779e1
 +        refresh_millihz: u32,
 +        prepared: Option<flutter_runtime::PreparedFlutterRenderer>,
 +    ) -> Result<flutter_runtime::FlutterRuntime, Box<dyn Error>> {
++        let launch = flutter_runtime::FlutterLaunch {
++            factory: self
++                .factory
++                .as_ref()
++                .ok_or("Flutter launcher has no active runtime factory")?,
++            generation: self.generation,
++            offscreen_blit: self.offscreen_blit,
++            events: self.events.clone(),
++            authentication: Arc::clone(&self.authentication),
++            clipboard: self.clipboard.clone(),
++            work_area: self.work_area.clone(),
++            wayland_display: self.wayland_display.clone(),
++            x11_display: self.x11_display.clone(),
++            output_control_socket: self.output_control_socket.clone(),
++        };
 +        flutter_runtime::FlutterRuntime::start(
++            launch,
 +            shared_context,
 +            output_pools,
 +            snapshot,
 +            atlas,
 +            refresh_millihz,
-+            self.offscreen_blit,
-+            self.factory
-+                .as_ref()
-+                .ok_or("Flutter launcher has no active runtime factory")?,
-+            self.events.clone(),
-+            Arc::clone(&self.authentication),
-+            self.clipboard.clone(),
-+            self.work_area.clone(),
-+            self.generation,
-+            self.wayland_display.clone(),
-+            self.x11_display.clone(),
-+            self.output_control_socket.clone(),
 +            prepared,
 +        )
 +    }
@@ -987,14 +833,9 @@ index 0000000..1d779e1
 +                        .bundle_for(ui_development::UiRuntimeMode::OfficialOptimized)
 +                        .expect("packaged recovery bundle"),
 +                    runtime,
-+                    self.renderer_backend,
 +                )?
 +            } else {
-+                flutter_runtime::FlutterRuntimeFactory::new(
-+                    &bundle,
-+                    runtime,
-+                    self.renderer_backend,
-+                )?
++                flutter_runtime::FlutterRuntimeFactory::new(&bundle, runtime)?
 +            },
 +        );
 +        if let Some(fingerprint) = jit_engine_fingerprint {
@@ -1114,11 +955,11 @@ index 0000000..1d779e1
 +    Ok(())
 +}
 diff --git a/compositor/src/bin/deniald/flutter_runtime.rs b/compositor/src/bin/deniald/flutter_runtime.rs
-index b2d30bf..e52b847 100644
+index efb0acb..a80979c 100644
 --- a/compositor/src/bin/deniald/flutter_runtime.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime.rs
-@@ -77,10 +77,21 @@ mod engine_session;
- pub(crate) use engine_session::PreparedFlutterRenderer;
+@@ -79,10 +79,21 @@ mod engine_session;
+ pub(crate) use engine_session::{FlutterLaunch, PreparedFlutterRenderer};
  #[path = "flutter_runtime/event_pipeline.rs"]
  mod event_pipeline;
 +#[path = "flutter_runtime/external_pool.rs"]
@@ -1139,7 +980,7 @@ index b2d30bf..e52b847 100644
  #[path = "flutter_runtime/output_runtime.rs"]
  mod output_runtime;
  #[path = "flutter_runtime/platform_dispatch.rs"]
-@@ -168,13 +179,14 @@ const OUTPUT_ROTATION_ANIMATION_DURATION: Duration = Duration::from_millis(300);
+@@ -169,13 +180,14 @@ const OUTPUT_ROTATION_ANIMATION_DURATION: Duration = Duration::from_millis(300);
  const OUTPUT_ROTATION_RESIZE_PROGRESS: f64 = 0.78;
  
  /// Borrowed native storage used only while constructing the Flutter EGL
@@ -1153,10 +994,10 @@ index b2d30bf..e52b847 100644
      pub size: PixelSize,
 -    pub initial_scanout: usize,
 +    pub selection: PoolSelection,
+     /// Gamut correction for the copy from an off-screen target to scanout.
+     pub color: Option<crate::output_color::OutputColor>,
      pub dmabufs: Vec<(&'a Dmabuf, Option<&'a Dmabuf>)>,
-     /// None preserves direct same-device rendering. Source slots and final
-     /// scanout slots share an index, but have distinct storage and completion.
-@@ -572,9 +584,11 @@ pub struct FlutterRuntime {
+@@ -579,9 +591,11 @@ pub struct FlutterRuntime {
      key_event_scratch: Vec<u8>,
      device_pixel_ratio: f64,
      frame_interval: Duration,
@@ -1167,9 +1008,9 @@ index b2d30bf..e52b847 100644
 +    #[cfg(feature = "external-output")]
 +    scene_recovery: Option<scene_recovery::RecoveryGate>,
      fingerprint_scene: fingerprint_scene::FingerprintScene,
-     published_text_input_state: Option<(bool, bool, bool, u32, u32, u64)>,
+     published_text_input_state: Option<crate::wayland_frontend::SoftwareKeyboardState>,
      frame_ready_observed: bool,
-@@ -754,3 +768,6 @@ fn parse_posix_locale(value: &str) -> Option<EngineLocale> {
+@@ -760,3 +774,6 @@ fn parse_posix_locale(value: &str) -> Option<EngineLocale> {
  fn first_file(paths: &[PathBuf]) -> Option<PathBuf> {
      paths.iter().find(|path| path.is_file()).cloned()
  }
@@ -1177,7 +1018,7 @@ index b2d30bf..e52b847 100644
 +// These contracts are descendants of the private native broker; no production
 +// visibility is widened just to expose internals to a sibling test module.
 diff --git a/compositor/src/bin/deniald/flutter_runtime/engine_session.rs b/compositor/src/bin/deniald/flutter_runtime/engine_session.rs
-index 55de97f..3ea3302 100644
+index 8c53bf8..d4bab88 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/engine_session.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/engine_session.rs
 @@ -20,7 +20,7 @@ struct PreparedOutputPool {
@@ -1189,7 +1030,7 @@ index 55de97f..3ea3302 100644
      // Keep the native allocations alive and compare their identity, not just
      // dimensions/format: a newly allocated pool requires newly imported FBOs.
      dmabufs: Vec<(Dmabuf, Option<Dmabuf>)>,
-@@ -50,7 +50,7 @@ impl PreparedRendererConfiguration {
+@@ -48,7 +48,7 @@ impl PreparedRendererConfiguration {
                      render_view_id: pool.render_view_id,
                      configuration_generation: pool.configuration_generation,
                      size: pool.size,
@@ -1198,7 +1039,7 @@ index 55de97f..3ea3302 100644
                      transfer_ids: pool
                          .transfers
                          .iter()
-@@ -331,9 +331,11 @@ impl FlutterRuntime {
+@@ -341,9 +341,11 @@ impl FlutterRuntime {
              key_event_scratch: Vec::with_capacity(160),
              device_pixel_ratio,
              frame_interval,
@@ -1211,7 +1052,7 @@ index 55de97f..3ea3302 100644
              fingerprint_scene: fingerprint_scene::FingerprintScene::default(),
              published_text_input_state: None,
              frame_ready_observed: false,
-@@ -498,7 +500,7 @@ impl FlutterRuntime {
+@@ -508,7 +510,7 @@ impl FlutterRuntime {
                      generation,
                      event: EngineEvent::Vsync(baton),
                  } if generation == self.generation => {
@@ -1220,7 +1061,7 @@ index 55de97f..3ea3302 100644
                          if !self.handler.try_request_frame() {
                              return Err(
                                  "Flutter requested a timed vsync while its producer was busy"
-@@ -615,7 +617,11 @@ impl FlutterRuntime {
+@@ -640,7 +642,11 @@ impl FlutterRuntime {
      }
  
      pub fn enable_kms_frame_clock(&mut self) {
@@ -1233,6 +1074,37 @@ index 55de97f..3ea3302 100644
      }
  
      /// Mirrors physical desktop visibility into Flutter's standard lifecycle.
+diff --git a/compositor/src/bin/deniald/flutter_runtime/engine_session/tests.rs b/compositor/src/bin/deniald/flutter_runtime/engine_session/tests.rs
+index 78e390d..c85e019 100644
+--- a/compositor/src/bin/deniald/flutter_runtime/engine_session/tests.rs
++++ b/compositor/src/bin/deniald/flutter_runtime/engine_session/tests.rs
+@@ -22,7 +22,7 @@ fn configuration(buffers: &[Dmabuf]) -> PreparedRendererConfiguration {
+             render_view_id: RenderViewId::for_output(OutputId(1)).unwrap(),
+             configuration_generation: 2,
+             size: PixelSize::new(1920, 1080),
+-            initial_scanout: 0,
++            selection: PoolSelection::Automatic { initial_scanout: 0 },
+             color: None,
+             dmabufs: buffers.iter().map(|buffer| (buffer, None)).collect(),
+         }],
+@@ -44,7 +44,7 @@ fn prepared_pool_accepts_cloned_handles_but_rejects_reallocated_buffers() {
+     replacement.swap(0, 1);
+     assert!(prepared.validate(&configuration(&replacement)).is_err());
+     let mut expected = configuration(&buffers);
+-    expected.pools[0].initial_scanout = 1;
++    expected.pools[0].selection = PoolSelection::Automatic { initial_scanout: 1 };
+     assert!(prepared.validate(&expected).is_err());
+ }
+ 
+@@ -83,7 +83,7 @@ fn prepared_blit_pool_requires_the_same_render_allocation() {
+         render_view_id: RenderViewId::for_output(OutputId(1)).unwrap(),
+         configuration_generation: 2,
+         size: PixelSize::new(1920, 1080),
+-        initial_scanout: 0,
++        selection: PoolSelection::Automatic { initial_scanout: 0 },
+         color: None,
+         dmabufs: vec![(&scanout, render)],
+     };
 diff --git a/compositor/src/bin/deniald/flutter_runtime/external_pool.rs b/compositor/src/bin/deniald/flutter_runtime/external_pool.rs
 new file mode 100644
 index 0000000..0d903e3
@@ -1334,7 +1206,7 @@ index 7e02a6f..5b67ea9 100644
          Ok(())
      }
 diff --git a/compositor/src/bin/deniald/flutter_runtime/output_pipeline.rs b/compositor/src/bin/deniald/flutter_runtime/output_pipeline.rs
-index 580987c..ca5808e 100644
+index d3543ed..1017c42 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/output_pipeline.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/output_pipeline.rs
 @@ -51,7 +51,7 @@ pub(super) struct OutputPoolDescriptor<'a> {
@@ -1354,7 +1226,7 @@ index 580987c..ca5808e 100644
      pub(super) authorized_request: Option<AuthorizedOutputRequest>,
      capture_revision: u64,
  }
-@@ -131,8 +132,7 @@ impl OutputBufferBroker {
+@@ -139,8 +140,7 @@ impl OutputBufferBroker {
                  || !render_view_ids.insert(descriptor.render_view_id)
                  || descriptor.size.width == 0
                  || descriptor.size.height == 0
@@ -1364,7 +1236,7 @@ index 580987c..ca5808e 100644
                  || descriptor
                      .framebuffers
                      .iter()
-@@ -149,7 +149,7 @@ impl OutputBufferBroker {
+@@ -157,7 +157,7 @@ impl OutputBufferBroker {
                  .map(|(index, framebuffer)| OutputBufferSlot {
                      framebuffer,
                      state: BufferState::Free,
@@ -1373,7 +1245,7 @@ index 580987c..ca5808e 100644
                      fence: None,
                      ready_damage: None,
                      damage: DamageRegion::full(descriptor.size.width, descriptor.size.height),
-@@ -166,6 +166,7 @@ impl OutputBufferBroker {
+@@ -174,6 +174,7 @@ impl OutputBufferBroker {
                  configuration_generation: descriptor.configuration_generation,
                  size: descriptor.size,
                  slots,
@@ -1381,7 +1253,7 @@ index 580987c..ca5808e 100644
                  authorized_request: None,
                  capture_revision: next_capture_revision(),
              });
-@@ -182,6 +183,23 @@ impl OutputBufferBroker {
+@@ -190,6 +191,23 @@ impl OutputBufferBroker {
          })
      }
  
@@ -1404,8 +1276,8 @@ index 580987c..ca5808e 100644
 +
      pub(super) fn begin_transaction(&mut self) {
          self.transaction = self.transaction.wrapping_add(1).max(1);
-         for pool in &mut self.pools {
-@@ -211,12 +229,96 @@ impl OutputBufferBroker {
+         self.retire_abandoned_renders();
+@@ -228,12 +246,96 @@ impl OutputBufferBroker {
                          .iter()
                          .any(|slot| slot.state != BufferState::Free)
                      && pool
@@ -1503,7 +1375,7 @@ index 580987c..ca5808e 100644
      pub(super) fn authorize(
          &mut self,
          request: OutputFrameRequest,
-@@ -242,6 +344,7 @@ impl OutputBufferBroker {
+@@ -259,6 +361,7 @@ impl OutputBufferBroker {
          for pool in &mut self.pools {
              if render_view_ids.contains(&pool.render_view_id.get()) {
                  pool.authorized_request = None;
@@ -1511,7 +1383,7 @@ index 580987c..ca5808e 100644
              }
          }
      }
-@@ -256,6 +359,7 @@ impl OutputBufferBroker {
+@@ -273,6 +376,7 @@ impl OutputBufferBroker {
              });
              if should_expire {
                  pool.authorized_request = None;
@@ -1519,7 +1391,7 @@ index 580987c..ca5808e 100644
                  expired += 1;
              }
          }
-@@ -277,6 +381,11 @@ impl OutputBufferBroker {
+@@ -294,6 +398,11 @@ impl OutputBufferBroker {
                  .is_some_and(|authorization| authorization.completion_id == Some(completion_id))
              {
                  pool.authorized_request = None;
@@ -1531,7 +1403,7 @@ index 580987c..ca5808e 100644
                  released += 1;
              }
          }
-@@ -315,15 +424,19 @@ impl OutputBufferBroker {
+@@ -332,15 +441,19 @@ impl OutputBufferBroker {
          {
              return Err(RenderTargetBlocked::ReadyHandoff);
          }
@@ -1556,8 +1428,76 @@ index 580987c..ca5808e 100644
          slot.state = BufferState::Rendering;
          slot.fence = None;
          slot.ready_damage = None;
+@@ -615,7 +728,7 @@ mod capture_tests {
+             render_view_id: view,
+             configuration_generation: 1,
+             size,
+-            initial_scanout: 0,
++            selection: PoolSelection::Automatic { initial_scanout: 0 },
+             framebuffers: &[11, 12, 13],
+         }])
+         .unwrap();
+@@ -632,6 +745,7 @@ mod capture_tests {
+             dirty_serial: 1,
+             lock_frame_token: 0,
+             fingerprint_epoch: 0,
++            scene_recovery_token: 0,
+         };
+         broker.begin_transaction();
+         assert_eq!(broker.authorize(request, now, None), Some(view.get()));
+@@ -707,7 +821,7 @@ mod capture_tests {
+             render_view_id: view,
+             configuration_generation: 1,
+             size,
+-            initial_scanout: 0,
++            selection: PoolSelection::Automatic { initial_scanout: 0 },
+             framebuffers: &[11, 12, 13],
+         }])
+         .unwrap();
+@@ -724,6 +838,7 @@ mod capture_tests {
+             dirty_serial: 1,
+             lock_frame_token: 0,
+             fingerprint_epoch: 0,
++            scene_recovery_token: 0,
+         };
+         assert_eq!(broker.authorize(request, now, Some(41)), Some(view.get()));
+         assert_eq!(
+@@ -756,7 +871,7 @@ mod capture_tests {
+             render_view_id: view,
+             configuration_generation: 1,
+             size,
+-            initial_scanout: 0,
++            selection: PoolSelection::Automatic { initial_scanout: 0 },
+             framebuffers: &[11, 12, 13],
+         }])
+         .unwrap();
+@@ -773,6 +888,7 @@ mod capture_tests {
+             dirty_serial: 1,
+             lock_frame_token: 0,
+             fingerprint_epoch: 0,
++            scene_recovery_token: 0,
+         };
+         assert_eq!(broker.authorize(request, now, Some(41)), Some(view.get()));
+         broker.begin_authorization(41);
+@@ -794,7 +910,7 @@ mod capture_tests {
+             render_view_id: view,
+             configuration_generation: 1,
+             size,
+-            initial_scanout: 0,
++            selection: PoolSelection::Automatic { initial_scanout: 0 },
+             framebuffers: &[11, 12, 13],
+         }])
+         .unwrap();
+@@ -820,6 +936,7 @@ mod capture_tests {
+                 dirty_serial: sequence,
+                 lock_frame_token: 0,
+                 fingerprint_epoch: 0,
++                scene_recovery_token: 0,
+             };
+             assert_eq!(broker.authorize(request, now, None), Some(view.get()));
+             let framebuffer = broker.acquire(view.get(), size).unwrap();
 diff --git a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
-index 6c99ee6..206f805 100644
+index 7cfa290..214d59e 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
 @@ -211,6 +211,91 @@ impl FlutterRuntime {
@@ -1652,7 +1592,7 @@ index 6c99ee6..206f805 100644
      pub fn publish_output(&self, output: &ReadyOutputFrame) -> Result<(), Box<dyn Error>> {
          self.handler.publish_output(output).map_err(Into::into)
      }
-@@ -383,23 +468,42 @@ impl FlutterRuntime {
+@@ -385,23 +470,42 @@ impl FlutterRuntime {
          Ok(true)
      }
  
@@ -1699,7 +1639,7 @@ index 6c99ee6..206f805 100644
          }
          let completion_id = self
              .host
-@@ -416,7 +520,7 @@ impl FlutterRuntime {
+@@ -418,7 +522,7 @@ impl FlutterRuntime {
              completion_id,
          );
          if self.render_view_scratch.is_empty() {
@@ -1708,7 +1648,7 @@ index 6c99ee6..206f805 100644
          }
  
          let flutter_tick = flutter_output.and_then(|output_id| {
-@@ -469,7 +573,7 @@ impl FlutterRuntime {
+@@ -477,7 +581,7 @@ impl FlutterRuntime {
              let Some(baton) = baton else {
                  self.handler
                      .cancel_output_authorizations(&self.render_view_scratch);
@@ -1717,7 +1657,7 @@ index 6c99ee6..206f805 100644
              };
              Some(baton)
          } else {
-@@ -565,7 +669,10 @@ impl FlutterRuntime {
+@@ -573,7 +677,10 @@ impl FlutterRuntime {
                  .cancel_output_authorizations(&self.render_view_scratch);
              return Err(error.into());
          }
@@ -1730,7 +1670,7 @@ index 6c99ee6..206f805 100644
  }
  
 diff --git a/compositor/src/bin/deniald/flutter_runtime/platform_dispatch.rs b/compositor/src/bin/deniald/flutter_runtime/platform_dispatch.rs
-index b0da8ca..881aef4 100644
+index 29c61c3..3bb7d3d 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/platform_dispatch.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/platform_dispatch.rs
 @@ -74,6 +74,28 @@ impl FlutterRuntime {
@@ -1838,10 +1778,10 @@ index 0000000..1651b9c
 +    }
 +}
 diff --git a/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs b/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
-index 4a6cab4..95939f2 100644
+index 5ab657d..ba2fede 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
-@@ -23,7 +23,7 @@ pub(in crate::flutter_runtime) struct FlutterGlHandler {
+@@ -129,7 +129,7 @@ pub(in crate::flutter_runtime) struct FlutterGlHandler {
      display: Arc<EGLDisplayHandle>,
      gl: GlApi,
      targets: Mutex<Vec<GlTarget>>,
@@ -1849,34 +1789,27 @@ index 4a6cab4..95939f2 100644
 +    transfers: Mutex<HashMap<u32, Arc<crate::gpu_transfer::TransferTarget>>>,
      pub(in crate::flutter_runtime) completion_owner: Mutex<Weak<FlutterGlHandler>>,
      shader_blit: Mutex<Option<ShaderBlit>>,
-     depth_stencils: Mutex<Vec<u32>>,
-@@ -58,6 +58,8 @@ pub(in crate::flutter_runtime) struct FlutterGlHandler {
+     /// App ids by external texture, for app looks.
+@@ -167,6 +167,7 @@ pub(in crate::flutter_runtime) struct FlutterGlHandler {
      desktop_size: PixelSize,
      producer: ProducerArbiter,
      shutdown_started: AtomicBool,
 +    backing_store_borrows: std::sync::atomic::AtomicUsize,
-+    renderer_backend: RendererBackend,
  }
  
  impl FlutterGlHandler {
-@@ -84,16 +86,115 @@ impl FlutterGlHandler {
+@@ -190,15 +191,110 @@ impl FlutterGlHandler {
+         let gl = GlApi::load()?;
          let render_audit_active = render_audit_enabled();
          let gpu_timing = render_audit_active.then(GpuTimingState::load).flatten();
-         let needs_depth_stencil = renderer_backend == RendererBackend::ImpellerGles;
 -        let mut depth_stencils = Vec::new();
          info!(
-             %renderer_backend,
              offscreen_blit,
              "creating Flutter physical-output texture targets"
          );
 +
-+        let imported = Self::import_output_targets(
-+            &render_context,
-+            output_pools,
-+            gl,
-+            needs_depth_stencil,
-+            offscreen_blit,
-+        );
++        let imported =
++            Self::import_output_targets(&render_context, output_pools, gl, true, offscreen_blit);
 +        render_context.unbind()?;
 +        let (targets, depth_stencils, transfers, shader_blit, broker) = imported?;
 +        let render_audit = render_audit_active.then(|| {
@@ -1907,6 +1840,8 @@ index 4a6cab4..95939f2 100644
 +            transfers: Mutex::new(transfers),
 +            completion_owner: Mutex::new(Weak::new()),
 +            shader_blit: Mutex::new(shader_blit),
++            texture_apps: Mutex::new(HashMap::new()),
++            window_grades: Mutex::new(WindowGrades::default()),
 +            depth_stencils: Mutex::new(depth_stencils),
 +            broker: Mutex::new(broker),
 +            pending_output_presentation: Mutex::new(None),
@@ -1946,7 +1881,6 @@ index 4a6cab4..95939f2 100644
 +            producer: ProducerArbiter::new(),
 +            shutdown_started: AtomicBool::new(false),
 +            backing_store_borrows: std::sync::atomic::AtomicUsize::new(0),
-+            renderer_backend,
 +        }))
 +    }
 +
@@ -1978,23 +1912,23 @@ index 4a6cab4..95939f2 100644
          for pool in output_pools {
              let width =
                  i32::try_from(pool.size.width).map_err(|_| "Flutter output width exceeds GLES")?;
-@@ -128,7 +229,6 @@ impl FlutterGlHandler {
-                     );
-                     destroy_depth_stencils(gl, &mut depth_stencils);
-                     destroy_targets(gl, &display, &mut targets);
--                    render_context.unbind()?;
-                     return Err("could not allocate Impeller GLES depth/stencil storage".into());
-                 }
+@@ -227,7 +323,6 @@ impl FlutterGlHandler {
+                 );
+                 destroy_depth_stencils(gl, &mut depth_stencils);
+                 destroy_targets(gl, &display, &mut targets);
+-                render_context.unbind()?;
+                 return Err("could not allocate Impeller GLES depth/stencil storage".into());
              }
-@@ -145,7 +245,6 @@ impl FlutterGlHandler {
+ 
+@@ -246,7 +341,6 @@ impl FlutterGlHandler {
                      Err(error) => {
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
 -                        render_context.unbind()?;
-                         return Err(error.into());
+                         return Err(error);
                      }
                  };
-@@ -255,7 +354,6 @@ impl FlutterGlHandler {
+@@ -363,7 +457,6 @@ impl FlutterGlHandler {
                      destroy_targets(gl, &display, &mut failed);
                      destroy_targets(gl, &display, &mut targets);
                      destroy_depth_stencils(gl, &mut depth_stencils);
@@ -2002,31 +1936,31 @@ index 4a6cab4..95939f2 100644
                      return Err(format!(
                          "Flutter output {:?} buffer {buffer_index} ({width}x{height}, {:?}) scanout framebuffer failed: status={framebuffer_status:#x}, import_error={import_error:#x}, attachment_error={attachment_error:#x}",
                          pool.output_id, scanout_dmabuf.format(),
-@@ -268,7 +366,6 @@ impl FlutterGlHandler {
+@@ -376,7 +469,6 @@ impl FlutterGlHandler {
                          destroy_targets(gl, &display, &mut failed);
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
 -                        render_context.unbind()?;
-                         return Err(
-                             "offscreen blit target is missing its linear render DMA-BUF".into()
-                         );
-@@ -281,7 +378,6 @@ impl FlutterGlHandler {
+                         return Err("offscreen blit target is missing its render DMA-BUF".into());
+                     };
+                     // The scene matches scanout, or is half float for an HDR
+@@ -390,7 +482,6 @@ impl FlutterGlHandler {
                          destroy_targets(gl, &display, &mut failed);
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
 -                        render_context.unbind()?;
                          return Err(format!(
-                             "offscreen Flutter render target is not linear XR24: {render_format:?}"
-                         )
-@@ -297,7 +393,6 @@ impl FlutterGlHandler {
+                             "offscreen Flutter render target {render_format:?} does not match {:?} scanout",
+                             scanout_format.code
+@@ -406,7 +497,6 @@ impl FlutterGlHandler {
                              destroy_targets(gl, &display, &mut failed);
                              destroy_targets(gl, &display, &mut targets);
                              destroy_depth_stencils(gl, &mut depth_stencils);
 -                            render_context.unbind()?;
-                             return Err(error.into());
+                             return Err(error);
                          }
                      };
-@@ -385,7 +480,6 @@ impl FlutterGlHandler {
+@@ -492,7 +582,6 @@ impl FlutterGlHandler {
                          destroy_targets(gl, &display, &mut failed);
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
@@ -2034,7 +1968,7 @@ index 4a6cab4..95939f2 100644
                          return Err("a Flutter offscreen output framebuffer is incomplete".into());
                      }
                  } else {
-@@ -405,7 +499,7 @@ impl FlutterGlHandler {
+@@ -512,7 +601,7 @@ impl FlutterGlHandler {
                  pool.render_view_id,
                  pool.configuration_generation,
                  pool.size,
@@ -2043,7 +1977,7 @@ index 4a6cab4..95939f2 100644
                  framebuffers,
              ));
          }
-@@ -414,7 +508,6 @@ impl FlutterGlHandler {
+@@ -521,7 +610,6 @@ impl FlutterGlHandler {
              Err(error) => {
                  destroy_targets(gl, &display, &mut targets);
                  destroy_depth_stencils(gl, &mut depth_stencils);
@@ -2051,7 +1985,7 @@ index 4a6cab4..95939f2 100644
                  return Err(error);
              }
          };
-@@ -425,15 +518,11 @@ impl FlutterGlHandler {
+@@ -532,15 +620,11 @@ impl FlutterGlHandler {
              (gl.bind_texture)(gl::TEXTURE_2D, 0);
              (gl.bind_renderbuffer)(gl::RENDERBUFFER, 0);
          }
@@ -2068,7 +2002,7 @@ index 4a6cab4..95939f2 100644
              return Err("Flutter presentation needs physical output buffer pools".into());
          }
          let broker = match OutputBufferBroker::new(broker_descriptors.iter().map(
-@@ -443,7 +532,7 @@ impl FlutterGlHandler {
+@@ -550,7 +634,7 @@ impl FlutterGlHandler {
                      render_view_id: *render_view_id,
                      configuration_generation: *configuration_generation,
                      size: *size,
@@ -2077,7 +2011,7 @@ index 4a6cab4..95939f2 100644
                      framebuffers,
                  }
              },
-@@ -452,13 +541,9 @@ impl FlutterGlHandler {
+@@ -559,13 +643,9 @@ impl FlutterGlHandler {
              Err(error) => {
                  // Keep the constructor's new validation path leak-free: GL
                  // targets do not own automatic destructors.
@@ -2091,7 +2025,7 @@ index 4a6cab4..95939f2 100644
                  return Err(error.into());
              }
          };
-@@ -469,73 +554,94 @@ impl FlutterGlHandler {
+@@ -576,75 +656,96 @@ impl FlutterGlHandler {
              render_modifier = ?offscreen_blit.then_some(Modifier::Linear),
              "imported native output pools into Flutter EGL context"
          );
@@ -2152,6 +2086,7 @@ index 4a6cab4..95939f2 100644
 +                render_view_id: view,
 +                configuration_generation: configuration,
 +                size,
++                color: None,
 +                selection: PoolSelection::External {
 +                    generation,
 +                    selected: None,
@@ -2160,10 +2095,11 @@ index 4a6cab4..95939f2 100644
 +                dmabufs: buffers.iter().map(|b| (b, None)).collect(),
 +            }],
 +            self.gl,
-+            self.renderer_backend == RendererBackend::ImpellerGles,
++            true,
 +            false,
 +        );
-+        let Ok((mut targets, mut depth_stencils, transfers, mut shader_blit, broker)) = imported else {
++        let Ok((mut targets, mut depth_stencils, transfers, mut shader_blit, broker)) = imported
++        else {
 +            return if context.clear_current() {
 +                Rejected
 +            } else {
@@ -2209,6 +2145,8 @@ index 4a6cab4..95939f2 100644
 -            transfers,
 -            completion_owner: Mutex::new(Weak::new()),
 -            shader_blit: Mutex::new(shader_blit),
+-            texture_apps: Mutex::new(HashMap::new()),
+-            window_grades: Mutex::new(WindowGrades::default()),
 -            depth_stencils: Mutex::new(depth_stencils),
 -            broker: Mutex::new(broker),
 -            pending_output_presentation: Mutex::new(None),
@@ -2251,7 +2189,7 @@ index 4a6cab4..95939f2 100644
      }
  
      pub(in crate::flutter_runtime) fn take_ready_frame(
-@@ -598,6 +704,43 @@ impl FlutterGlHandler {
+@@ -707,6 +808,43 @@ impl FlutterGlHandler {
          lock(&self.broker).cancel_authorizations(render_view_ids);
      }
  
@@ -2296,10 +2234,10 @@ index 4a6cab4..95939f2 100644
          lock(&self.broker).begin_authorization(completion_id);
      }
 diff --git a/compositor/src/bin/deniald/flutter_runtime/renderer/handler/open_gl.rs b/compositor/src/bin/deniald/flutter_runtime/renderer/handler/open_gl.rs
-index 448ae41..05b0d83 100644
+index 7eb70a4..a904f0d 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/renderer/handler/open_gl.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/renderer/handler/open_gl.rs
-@@ -425,12 +425,30 @@ impl OpenGlHandler for FlutterGlHandler {
+@@ -445,12 +445,30 @@ impl OpenGlHandler for FlutterGlHandler {
              self.rearm_abandoned_samples();
              let batch = self.seal_sampled_buffers();
              if batch.is_some() {
@@ -2336,15 +2274,15 @@ index 448ae41..05b0d83 100644
              }
          }
      }
-@@ -519,6 +537,7 @@ impl OpenGlHandler for FlutterGlHandler {
-         if let Some(gpu_timing) = &self.gpu_timing {
-             lock(gpu_timing).begin(framebuffer);
-         }
+@@ -543,6 +561,7 @@ impl OpenGlHandler for FlutterGlHandler {
+             .iter()
+             .find(|target| target.render_framebuffer == framebuffer)
+             .map_or(gl::RGBA8, |target| target.gl_format);
 +        self.backing_store_borrows.fetch_add(1, Ordering::AcqRel);
          Some(CompositorBackingStore {
              framebuffer,
-             format: gl::RGBA8,
-@@ -533,10 +552,17 @@ impl OpenGlHandler for FlutterGlHandler {
+             format,
+@@ -557,10 +576,17 @@ impl OpenGlHandler for FlutterGlHandler {
          // Flutter returns only its temporary render-target borrow. The native
          // target stays in OutputBufferBroker and is recycled after KMS ownership is
          // released, not when the engine destroys its wrapper.
@@ -2364,7 +2302,7 @@ index 448ae41..05b0d83 100644
      }
  
      fn present_view(&self, view: PresentView<'_>) -> bool {
-@@ -790,7 +816,7 @@ impl OpenGlHandler for FlutterGlHandler {
+@@ -814,7 +840,7 @@ impl OpenGlHandler for FlutterGlHandler {
              *lock(&self.sampled_buffer_release_fence) = release_fence;
              let rendered_at = self.render_audit.as_ref().map(|_| Instant::now());
              let sampled_feedback = std::mem::take(&mut *lock(&self.raster_sampled_feedback));
@@ -2373,7 +2311,7 @@ index 448ae41..05b0d83 100644
                  let Some(source_fence) = fence else {
                      return false;
                  };
-@@ -866,7 +892,7 @@ impl OpenGlHandler for FlutterGlHandler {
+@@ -896,7 +922,7 @@ impl OpenGlHandler for FlutterGlHandler {
              true
          })();
          if presented
@@ -2534,7 +2472,7 @@ index 0000000..8e9c1f3
 +    }
 +}
 diff --git a/compositor/src/bin/deniald/flutter_runtime/service_bridge.rs b/compositor/src/bin/deniald/flutter_runtime/service_bridge.rs
-index 7c7351e..779dadd 100644
+index 2083e77..0853a01 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/service_bridge.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/service_bridge.rs
 @@ -21,7 +21,12 @@ impl FlutterRuntime {
@@ -2551,7 +2489,7 @@ index 7c7351e..779dadd 100644
      }
  
      pub fn recycle_input_layout(&mut self, layout: wire::InputLayoutSnapshot) {
-@@ -42,6 +47,28 @@ impl FlutterRuntime {
+@@ -60,6 +65,28 @@ impl FlutterRuntime {
              .map(|snapshot| (self.generation, snapshot))
      }
  
@@ -2798,20 +2736,10 @@ index 221c164..ebf4768 100644
              self.render_texture_ids
                  .extend(dirty.texture_ids.keys().copied());
 diff --git a/compositor/src/bin/deniald/kms_state.rs b/compositor/src/bin/deniald/kms_state.rs
-index d8d81ce..94ff1ac 100644
+index 6833208..021e0d0 100644
 --- a/compositor/src/bin/deniald/kms_state.rs
 +++ b/compositor/src/bin/deniald/kms_state.rs
-@@ -12,9 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
- 
- use smithay::reexports::rustix::{io, ioctl};
- 
--#[cfg(feature = "flutter")]
--use smithay::backend::egl::EGLContext;
--
- const SCANOUT_BYTES_PER_PIXEL: u64 = 4;
- const MAX_SCANOUT_DIMENSION: u32 = 16_384;
- const MAX_SCANOUT_POOL_BYTES: u64 = 1024 * 1024 * 1024;
-@@ -1182,7 +1179,9 @@ fn flutter_render_target_pools(
+@@ -1317,7 +1317,9 @@ fn flutter_render_target_pools(
              render_view_id: pool.render_view_id,
              configuration_generation: pool.configuration_generation,
              size: pool.size,
@@ -2819,16 +2747,15 @@ index d8d81ce..94ff1ac 100644
 +            selection: flutter_runtime::PoolSelection::Automatic {
 +                initial_scanout: pool.current,
 +            },
+             color: pool.color,
              transfers: pool
                  .buffers
-                 .iter()
-@@ -1224,91 +1223,20 @@ pub(super) struct LayoutTransition {
+@@ -1360,90 +1362,20 @@ pub(super) struct LayoutTransition {
  }
  
  #[cfg(feature = "flutter")]
 -pub(super) struct FlutterLauncher {
 -    factory: Option<flutter_runtime::FlutterRuntimeFactory>,
--    renderer_backend: denial_flutter_engine::RendererBackend,
 -    offscreen_blit: bool,
 -    active_mode: ui_development::UiRuntimeMode,
 -    resident_jit_engine_fingerprint: Option<[u8; 32]>,
@@ -2846,7 +2773,6 @@ index d8d81ce..94ff1ac 100644
 -#[cfg(feature = "flutter")]
 -pub(super) struct FlutterLaunchConfiguration<'a> {
 -    pub(super) bundle: &'a Path,
--    pub(super) renderer_backend: denial_flutter_engine::RendererBackend,
 -    pub(super) offscreen_blit: bool,
 -    pub(super) debug_bundle: Option<PathBuf>,
 -    pub(super) ui_workspace: Option<PathBuf>,
@@ -2857,6 +2783,10 @@ index d8d81ce..94ff1ac 100644
  impl FlutterLauncher {
 -    pub(super) fn plugin_rebuild_needed(&self) -> bool {
 -        self.ui_development.plugin_rebuild_needed()
+-    }
+-
+-    pub(super) fn ui_development_deadline(&self, now: Instant) -> Option<Instant> {
+-        self.ui_development.plugin_health_deadline(now)
 -    }
 -
 -    pub(super) fn new(
@@ -2877,9 +2807,7 @@ index d8d81ce..94ff1ac 100644
 -            factory: Some(flutter_runtime::FlutterRuntimeFactory::new(
 -                configuration.bundle,
 -                denial_flutter_engine::DartRuntimeMode::Aot,
--                configuration.renderer_backend,
 -            )?),
--            renderer_backend: configuration.renderer_backend,
 -            offscreen_blit: configuration.offscreen_blit,
 -            active_mode: ui_development::UiRuntimeMode::OfficialOptimized,
 -            resident_jit_engine_fingerprint: None,
@@ -2910,13 +2838,12 @@ index d8d81ce..94ff1ac 100644
              renderer.egl_context(),
              flutter_render_target_pools(swapchains),
              desktop_size,
--            self.renderer_backend,
 -            self.offscreen_blit,
 -            self.events.clone(),
          )
      }
  
-@@ -1332,83 +1260,6 @@ impl FlutterLauncher {
+@@ -1466,74 +1398,6 @@ impl FlutterLauncher {
          snapshot: &TopologySnapshot,
          atlas: &AtlasPlan,
          prepared: Option<flutter_runtime::PreparedFlutterRenderer>,
@@ -2936,19 +2863,13 @@ index d8d81ce..94ff1ac 100644
 -            );
 -            self.replace_factory(ui_development::UiRuntimeMode::OfficialOptimized)?;
 -        }
--        let refresh_millihz = scanouts
--            .iter()
--            .map(|scanout| OutputMode::from(scanout.output.mode).refresh)
--            .max()
--            .ok_or("Flutter runtime has no output refresh")?;
 -        let using_prepared = prepared.is_some();
 -        let runtime = self.start_with_current_factory(
--            renderer.egl_context(),
--            flutter_render_target_pools(output_swapchains),
+-            renderer,
+-            output_swapchains,
+-            scanouts,
 -            snapshot,
 -            atlas,
--            scanouts,
--            u32::try_from(refresh_millihz)?,
 -            prepared,
 -        );
 -        let mut runtime = match runtime {
@@ -2970,12 +2891,11 @@ index d8d81ce..94ff1ac 100644
 -                    return Err(error);
 -                }
 -                self.start_with_current_factory(
--                    renderer.egl_context(),
--                    flutter_render_target_pools(output_swapchains),
+-                    renderer,
+-                    output_swapchains,
+-                    scanouts,
 -                    snapshot,
 -                    atlas,
--                    scanouts,
--                    u32::try_from(refresh_millihz)?,
 -                    None,
 -                )?
 -            }
@@ -2987,50 +2907,43 @@ index d8d81ce..94ff1ac 100644
 -        Ok(runtime)
 -    }
 -
--    #[allow(clippy::too_many_arguments)]
--    fn start_with_current_factory<'a>(
+-    fn start_with_current_factory(
 -        &self,
--        shared_context: &EGLContext,
--        output_pools: impl IntoIterator<Item = flutter_runtime::OutputRenderTargetPool<'a>>,
+-        renderer: &GlesRenderer,
+-        output_swapchains: &OutputSwapchains,
+-        scanouts: &[Scanout],
 -        snapshot: &TopologySnapshot,
 -        atlas: &AtlasPlan,
--        scanouts: &[Scanout],
--        refresh_millihz: u32,
 -        prepared: Option<flutter_runtime::PreparedFlutterRenderer>,
      ) -> Result<flutter_runtime::FlutterRuntime, Box<dyn Error>> {
          if let Some(scanout) = scanouts
              .iter()
-@@ -1420,230 +1271,20 @@ impl FlutterLauncher {
-             )
-             .into());
-         }
--        flutter_runtime::FlutterRuntime::start(
--            shared_context,
--            output_pools,
-+        let refresh_millihz = scanouts
-+            .iter()
-+            .map(|scanout| OutputMode::from(scanout.output.mode).refresh)
-+            .max()
-+            .ok_or("Flutter runtime has no output refresh")?;
-+        self.start_with_pools(
-+            renderer.egl_context(),
-+            flutter_render_target_pools(output_swapchains),
-             snapshot,
-             atlas,
--            refresh_millihz,
--            self.offscreen_blit,
--            self.factory
+@@ -1550,23 +1414,7 @@ impl FlutterLauncher {
+             .map(|scanout| OutputMode::from(scanout.output.mode).refresh)
+             .max()
+             .ok_or("Flutter runtime has no output refresh")?;
+-        let launch = flutter_runtime::FlutterLaunch {
+-            factory: self
+-                .factory
 -                .as_ref()
 -                .ok_or("Flutter launcher has no active runtime factory")?,
--            self.events.clone(),
--            Arc::clone(&self.authentication),
--            self.clipboard.clone(),
--            self.work_area.clone(),
--            self.generation,
--            self.wayland_display.clone(),
--            self.x11_display.clone(),
--            self.output_control_socket.clone(),
-+            u32::try_from(refresh_millihz)?,
+-            generation: self.generation,
+-            offscreen_blit: self.offscreen_blit,
+-            events: self.events.clone(),
+-            authentication: Arc::clone(&self.authentication),
+-            clipboard: self.clipboard.clone(),
+-            work_area: self.work_area.clone(),
+-            wayland_display: self.wayland_display.clone(),
+-            x11_display: self.x11_display.clone(),
+-            output_control_socket: self.output_control_socket.clone(),
+-        };
+-        flutter_runtime::FlutterRuntime::start(
+-            launch,
++        self.start_with_pools(
+             renderer.egl_context(),
+             flutter_render_target_pools(output_swapchains),
+             snapshot,
+@@ -1575,205 +1423,10 @@ impl FlutterLauncher {
              prepared,
          )
      }
@@ -3110,14 +3023,9 @@ index d8d81ce..94ff1ac 100644
 -                        .bundle_for(ui_development::UiRuntimeMode::OfficialOptimized)
 -                        .expect("packaged recovery bundle"),
 -                    runtime,
--                    self.renderer_backend,
 -                )?
 -            } else {
--                flutter_runtime::FlutterRuntimeFactory::new(
--                    &bundle,
--                    runtime,
--                    self.renderer_backend,
--                )?
+-                flutter_runtime::FlutterRuntimeFactory::new(&bundle, runtime)?
 -            },
 -        );
 -        if let Some(fingerprint) = jit_engine_fingerprint {
@@ -3203,9 +3111,9 @@ index d8d81ce..94ff1ac 100644
 -    pub(super) fn set_work_area(&mut self, work_area: options::WorkAreaOptions) {
 -        self.work_area = work_area;
 -    }
--}
--
--#[cfg(feature = "flutter")]
+ }
+ 
+ #[cfg(feature = "flutter")]
 -fn resolve_ui_development_publication(
 -    reload_requested: bool,
 -    publication: Result<(), Box<dyn Error>>,
@@ -3237,14 +3145,16 @@ index d8d81ce..94ff1ac 100644
 -        );
 -    }
 -    Ok(())
- }
+-}
++pub(super) use crate::flutter_launcher::ensure_resident_jit_engine_matches;
  
- fn common_xrgb8888_modifiers<'a>(
+ /// An atlas pixel format and the modifiers every consumer can use with it.
+ #[derive(Clone, Debug, PartialEq, Eq)]
 diff --git a/compositor/src/bin/deniald/native_shortcut.rs b/compositor/src/bin/deniald/native_shortcut.rs
-index 0f4e2ad..cebbf0e 100644
+index b07d225..daa697f 100644
 --- a/compositor/src/bin/deniald/native_shortcut.rs
 +++ b/compositor/src/bin/deniald/native_shortcut.rs
-@@ -1843,6 +1843,7 @@ enum WindowSwitcherRelease {
+@@ -1894,6 +1894,7 @@ enum WindowSwitcherRelease {
  #[derive(Clone, Debug)]
  pub(super) struct ShortcutEngine {
      bindings: Vec<CompiledShortcut>,
@@ -3252,7 +3162,7 @@ index 0f4e2ad..cebbf0e 100644
      available_plugin_actions: HashSet<String>,
      ctrl_keys: u8,
      alt_keys: u8,
-@@ -1862,8 +1863,17 @@ impl Default for ShortcutEngine {
+@@ -1913,8 +1914,17 @@ impl Default for ShortcutEngine {
  
  impl ShortcutEngine {
      fn from_file(file: &ShortcutFile) -> Result<Self, ShortcutError> {
@@ -3270,7 +3180,7 @@ index 0f4e2ad..cebbf0e 100644
              available_plugin_actions: HashSet::new(),
              ctrl_keys: 0,
              alt_keys: 0,
-@@ -2014,7 +2024,23 @@ impl ShortcutEngine {
+@@ -2065,7 +2075,23 @@ impl ShortcutEngine {
      }
  
      /// Observe a Linux evdev keycode before it enters Smithay's seat state.
@@ -3294,7 +3204,7 @@ index 0f4e2ad..cebbf0e 100644
          let logo_modifier = match evdev_keycode {
              KEY_LEFT_META => Some(LEFT_MODIFIER),
              KEY_RIGHT_META => Some(RIGHT_MODIFIER),
-@@ -2176,7 +2202,7 @@ impl ShortcutEngine {
+@@ -2227,7 +2253,7 @@ impl ShortcutEngine {
          }
      }
  
@@ -3304,10 +3214,10 @@ index 0f4e2ad..cebbf0e 100644
      pub(super) fn super_pressed(&self) -> bool {
          self.logo_keys != 0
 diff --git a/compositor/src/bin/deniald/options.rs b/compositor/src/bin/deniald/options.rs
-index 57e5c31..17e9d1a 100644
+index 2220708..d836fd0 100644
 --- a/compositor/src/bin/deniald/options.rs
 +++ b/compositor/src/bin/deniald/options.rs
-@@ -103,8 +103,12 @@ fn parse_maximize_padding(value: &str) -> Result<f64, Box<dyn Error>> {
+@@ -101,8 +101,12 @@ fn parse_maximize_padding(value: &str) -> Result<f64, Box<dyn Error>> {
      Ok(padding)
  }
  
@@ -3320,7 +3230,7 @@ index 57e5c31..17e9d1a 100644
      pub(super) device: PathBuf,
      pub(super) render_device: Option<PathBuf>,
      commit_seconds: u64,
-@@ -150,6 +154,7 @@ pub(super) enum RuntimeLimit {
+@@ -146,6 +150,7 @@ pub(super) enum RuntimeLimit {
  impl Options {
      fn terminal() -> Self {
          Self {
@@ -3328,7 +3238,7 @@ index 57e5c31..17e9d1a 100644
              device: PathBuf::from(DEFAULT_DEVICE),
              render_device: None,
              commit_seconds: 0,
-@@ -188,7 +193,8 @@ impl Options {
+@@ -182,7 +187,8 @@ impl Options {
          Self::parse_from(std::env::args().skip(1))
      }
  
@@ -3338,7 +3248,7 @@ index 57e5c31..17e9d1a 100644
          let mut device = PathBuf::from(DEFAULT_DEVICE);
          let mut render_device = None;
          let mut commit_seconds = 0;
-@@ -225,6 +231,11 @@ impl Options {
+@@ -217,6 +223,11 @@ impl Options {
  
          while let Some(argument) = args.next() {
              match argument.as_str() {
@@ -3350,7 +3260,7 @@ index 57e5c31..17e9d1a 100644
                  "--device" => device = PathBuf::from(args.next().ok_or("--device needs a path")?),
                  "--render-device" => {
                      render_device = Some(PathBuf::from(
-@@ -345,7 +356,7 @@ impl Options {
+@@ -326,7 +337,7 @@ impl Options {
                  }
                  "--help" | "-h" => {
                      println!(
@@ -3359,7 +3269,7 @@ index 57e5c31..17e9d1a 100644
                           [--output-config PATH] \
                           [--output-position NAME=X,Y] \
                           [--next-output-position NAME=X,Y --reconfigure-at-frame N] \
-@@ -481,6 +492,7 @@ impl Options {
+@@ -457,6 +468,7 @@ impl Options {
              return Err("--wayland without Flutter currently requires --frames".into());
          }
          Ok(Self {
@@ -3367,11 +3277,23 @@ index 57e5c31..17e9d1a 100644
              device,
              render_device,
              commit_seconds,
+diff --git a/compositor/src/bin/deniald/output_scheduler/delivery_trace.rs b/compositor/src/bin/deniald/output_scheduler/delivery_trace.rs
+index e08033d..6927043 100644
+--- a/compositor/src/bin/deniald/output_scheduler/delivery_trace.rs
++++ b/compositor/src/bin/deniald/output_scheduler/delivery_trace.rs
+@@ -210,6 +210,7 @@ mod tests {
+                 dirty_serial: 5,
+                 lock_frame_token: 0,
+                 fingerprint_epoch: 0,
++                scene_recovery_token: 0,
+             },
+             rendered_at: Some(now),
+             published_at: now,
 diff --git a/compositor/src/bin/deniald/startup.rs b/compositor/src/bin/deniald/startup.rs
-index af3cbf3..658d1d1 100644
+index 08d59f5..b16d756 100644
 --- a/compositor/src/bin/deniald/startup.rs
 +++ b/compositor/src/bin/deniald/startup.rs
-@@ -80,6 +80,12 @@ fn physical_drm_identity(path: &Path) -> Result<std::path::PathBuf, Box<dyn Erro
+@@ -120,6 +120,12 @@ fn physical_drm_identity(path: &Path) -> Result<std::path::PathBuf, Box<dyn Erro
  }
  
  pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
@@ -3384,7 +3306,7 @@ index af3cbf3..658d1d1 100644
      #[cfg(not(feature = "flutter"))]
      if options.flutter_bundle.is_some() {
          return Err("this deniald binary was built without the `flutter` Cargo feature".into());
-@@ -381,9 +387,9 @@ pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
+@@ -427,9 +433,9 @@ pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
          let frontend = wayland_frontend::WaylandFrontend::new(
              event_loop,
              &snapshot,
@@ -3394,9 +3316,9 @@ index af3cbf3..658d1d1 100644
 -            drm_fd.clone(),
 +            Some(drm_fd.clone()),
              render_fd.clone(),
-             options.xwayland,
-             options.work_area.clone(),
-@@ -726,23 +732,10 @@ pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
+             wayland_frontend::FrontendConfig {
+                 xwayland_enabled: options.xwayland,
+@@ -753,23 +759,10 @@ pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
  
      #[cfg(feature = "flutter")]
      let mut flutter_launcher = if let Some(bundle) = options.flutter_bundle.as_deref() {
@@ -3421,54 +3343,29 @@ index af3cbf3..658d1d1 100644
          Some(FlutterLauncher::new(
              FlutterLaunchConfiguration {
                  bundle,
-@@ -823,60 +816,19 @@ pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
-                 }
-             }
-         }
--        // Non-systemd sessions also get the dedicated authentication agent.
--        // This starts its backend only; the agent opens UI on a Polkit challenge.
--        #[cfg(feature = "flutter")]
--        if runtime_limit == RuntimeLimit::UntilLogout
--            && !graphical_session_started
--            && wayland.is_some()
--            && options.polkit_agent
--            && std::env::var("DENIAL_POLKIT_AGENT").as_deref() != Ok("0")
--            && let Some(runtime) = flutter.as_mut()
--        {
--            let binary = std::env::var("DENIAL_POLKIT_BINARY")
--                .unwrap_or_else(|_| "denial-polkit-agent".into());
--            if let Err(error) =
--                runtime.start_startup_application(vec![binary], "dev.denial.Polkit.desktop")
--            {
--                warn!(%error, "could not start authentication agent");
--            }
--        }
--        // Onboarding belongs to compositor startup, not a systemd/XDG
--        // autostart generator (which may be absent or already active).
--        // The native application checks its completion marker before opening a window.
--        // Bounded diagnostics and tests must never launch user applications.
--        #[cfg(feature = "flutter")]
--        if runtime_limit == RuntimeLimit::UntilLogout
--            && wayland.is_some()
+@@ -874,35 +867,16 @@ pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
+         #[cfg(feature = "flutter")]
+         if runtime_limit == RuntimeLimit::UntilLogout
+             && wayland.is_some()
 -            && let Some(runtime) = flutter.as_mut()
 -            && let Some(arguments) = welcome::launch_arguments()
 -            && let Err(error) =
 -                runtime.start_startup_application(arguments, "dev.denial.Welcome.desktop")
--        {
++            && let Some(runtime) = flutter.as_ref()
+         {
 -            warn!(%error, "could not start Welcome");
 -        }
 -        // Denial was updated under a confirmed plugin composition. The plugin
 -        // manager rebuilds it in the background, keeps the user informed and
 -        // applies it at a quiet moment; the packaged shell runs meanwhile.
-         #[cfg(feature = "flutter")]
-         if runtime_limit == RuntimeLimit::UntilLogout
-             && wayland.is_some()
+-        #[cfg(feature = "flutter")]
+-        if runtime_limit == RuntimeLimit::UntilLogout
+-            && wayland.is_some()
 -            && flutter_launcher
 -                .as_ref()
 -                .is_some_and(FlutterLauncher::plugin_rebuild_needed)
 -            && let Some(runtime) = flutter.as_mut()
-+            && let Some(runtime) = flutter.as_ref()
-         {
+-        {
 -            if let Some(arguments) = plugin_bundle::resume_arguments() {
 -                if let Err(error) =
 -                    runtime.start_startup_application(arguments, "dev.denial.PluginManager.desktop")
@@ -3483,7 +3380,7 @@ index af3cbf3..658d1d1 100644
 +            flutter_desktop::start_startup_applications(
 +                runtime,
 +                options.polkit_agent,
-+                graphical_session_started,
++                systemd_environment_restore.is_some(),
 +                flutter_launcher
 +                    .as_ref()
 +                    .is_some_and(FlutterLauncher::plugin_rebuild_needed),
@@ -3492,7 +3389,7 @@ index af3cbf3..658d1d1 100644
          if options.flutter_bundle.is_some() {
              #[cfg(feature = "flutter")]
 diff --git a/compositor/src/bin/deniald/wayland_frontend.rs b/compositor/src/bin/deniald/wayland_frontend.rs
-index e367984..bcfce9f 100644
+index 0577048..44d5757 100644
 --- a/compositor/src/bin/deniald/wayland_frontend.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend.rs
 @@ -142,6 +142,8 @@ use super::wire::{
@@ -3503,8 +3400,8 @@ index e367984..bcfce9f 100644
 +mod capture_policy;
  #[path = "wayland_frontend/clipboard.rs"]
  mod clipboard_io;
- #[path = "wayland_frontend/cursor_state.rs"]
-@@ -161,6 +163,8 @@ mod idle_inhibit;
+ #[path = "wayland_frontend/color_management.rs"]
+@@ -163,6 +165,8 @@ mod idle_inhibit;
  #[cfg(feature = "flutter")]
  #[path = "wayland_frontend/idle_notify.rs"]
  mod idle_notify;
@@ -3513,7 +3410,7 @@ index e367984..bcfce9f 100644
  #[path = "wayland_frontend/input.rs"]
  mod input;
  #[cfg(feature = "flutter")]
-@@ -214,6 +218,8 @@ pub(crate) use surface_pipeline::canvas_rect_to_buffer;
+@@ -225,6 +229,8 @@ pub(crate) use surface_pipeline::canvas_rect_to_buffer;
  mod surface_snapshot;
  #[path = "wayland_frontend/text_input.rs"]
  mod text_input;
@@ -3522,7 +3419,7 @@ index e367984..bcfce9f 100644
  #[path = "wayland_frontend/topology.rs"]
  mod topology;
  #[cfg(feature = "flutter")]
-@@ -252,6 +258,8 @@ use focus::{ClientSurface, KeyboardFocusTarget};
+@@ -265,6 +271,8 @@ use focus::{ClientSurface, KeyboardFocusTarget};
  use handlers::{MAX_WAYLAND_CLIENTS, WaylandClientBudget};
  #[cfg(feature = "flutter")]
  use idle_inhibit::IdleInhibitors;
@@ -3531,7 +3428,7 @@ index e367984..bcfce9f 100644
  #[cfg(feature = "flutter")]
  use input::{ClientInputRoute, RoutedPointerTarget};
  pub(super) use input::{init_libinput, reset_all_input_devices};
-@@ -419,7 +427,7 @@ fn cursor_position_for_modality(pointer_visible: bool, position: (f64, f64)) ->
+@@ -433,7 +441,7 @@ fn cursor_position_for_modality(pointer_visible: bool, position: (f64, f64)) ->
  mod output_metadata;
  
  pub(super) struct WaylandFrontend {
@@ -3540,7 +3437,7 @@ index e367984..bcfce9f 100644
      pub start_time: Instant,
      socket_name: OsString,
      loop_handle: LoopHandle<'static, RuntimeState>,
-@@ -440,6 +448,8 @@ pub(super) struct WaylandFrontend {
+@@ -454,6 +462,8 @@ pub(super) struct WaylandFrontend {
      _tablet_manager_state: TabletManagerState,
      pub shm_state: ShmState,
      pub dmabuf_state: DmabufState,
@@ -3549,7 +3446,7 @@ index e367984..bcfce9f 100644
      drm_syncobj_state: Option<DrmSyncobjState>,
      dmabuf_global: Option<DmabufGlobal>,
      dmabuf_render_node: Option<DrmNode>,
-@@ -624,9 +634,9 @@ pub(super) struct WaylandFrontend {
+@@ -638,11 +648,11 @@ pub(super) struct WaylandFrontend {
      wlr_data_control_state: WlrDataControlState,
      pub popups: PopupManager,
      pub seat: Seat<RuntimeState>,
@@ -3558,13 +3455,16 @@ index e367984..bcfce9f 100644
      layer_shell_state: WlrLayerShellState,
 -    libinput: smithay::reexports::input::Libinput,
 +    libinput: Option<smithay::reexports::input::Libinput>,
+     #[cfg(feature = "flutter")]
+-    input_rescan: input_hotplug::InputRescan,
++    input_rescan: Option<input_hotplug::InputRescan>,
      pub(super) settings: SettingsManager,
      pub(super) shortcuts: ShortcutManager,
      pub(super) keyboard_layout_names: Vec<String>,
-@@ -1252,3 +1262,6 @@ pub(super) fn fingerprint_test_client(uid: Option<u32>) -> Arc<dyn ClientData> {
- #[cfg(feature = "flutter")]
- #[path = "wayland_frontend/wake_gesture.rs"]
- mod wake_gesture;
+@@ -1272,3 +1282,6 @@ pub(super) fn fingerprint_test_client(uid: Option<u32>) -> Arc<dyn ClientData> {
+     data.peer_uid = uid;
+     Arc::new(data)
+ }
 +
 +#[cfg(feature = "external-output")]
 +pub(crate) use input::dispatch_consumer_keyboard_text;
@@ -3682,7 +3582,7 @@ index e8ae1eb..0f10499 100644
          self.frame_timeline.reset();
      }
 diff --git a/compositor/src/bin/deniald/wayland_frontend/handlers.rs b/compositor/src/bin/deniald/wayland_frontend/handlers.rs
-index 97d6552..c88446d 100644
+index 2d34add..5dd2410 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/handlers.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/handlers.rs
 @@ -212,14 +212,13 @@ const fn commit_has_visual_update(
@@ -3726,7 +3626,7 @@ index 97d6552..c88446d 100644
          Some(super::SurfaceCommitKind::BufferOnly)
      } else {
          Some(super::SurfaceCommitKind::Metadata)
-@@ -563,6 +564,18 @@ fn install_frame_deadline_blocker(
+@@ -556,6 +557,18 @@ fn install_frame_deadline_blocker(
      })
  }
  
@@ -3745,13 +3645,17 @@ index 97d6552..c88446d 100644
  fn install_surface_readiness_hook(surface: &WlSurface) {
      add_pre_commit_hook::<RuntimeState, _>(surface, |state, _display, surface| {
          // LoopHandle is deliberately fetched at invocation time: Smithay's
-@@ -627,6 +640,14 @@ fn install_surface_readiness_hook(surface: &WlSurface) {
+@@ -611,6 +624,18 @@ fn install_surface_readiness_hook(surface: &WlSurface) {
              }
              return;
          };
 +        #[cfg(feature = "flutter")]
 +        if defer_implicit_readiness_wait(
-+            state.wayland.as_ref().expect("missing Wayland frontend").defer_implicit_dmabuf_wait,
++            state
++                .wayland
++                .as_ref()
++                .expect("missing Wayland frontend")
++                .defer_implicit_dmabuf_wait,
 +            acquire_point.is_some(),
 +            frame_target.is_some(),
 +        ) {
@@ -3760,9 +3664,9 @@ index 97d6552..c88446d 100644
          let Some(client) = surface.client() else {
              warn!(surface_id = ?surface.id(), "DMA-BUF commit has no owning Wayland client");
              #[cfg(feature = "flutter")]
-@@ -1364,6 +1385,13 @@ impl CompositorHandler for RuntimeState {
+@@ -1313,6 +1338,13 @@ impl CompositorHandler for RuntimeState {
          let mut committed_window_metadata_changed = false;
-         let frontend = self.wayland.as_mut().expect("missing Wayland frontend");
+         let frontend = self.frontend_mut();
          #[cfg(feature = "flutter")]
 +        if has_damage && !buffer_attached && !buffer_removed {
 +            // Republish SHM pixels at the parent transaction boundary as well
@@ -3774,7 +3678,7 @@ index 97d6552..c88446d 100644
          let sampling_changed = previous_sampling
              != with_renderer_surface_state(surface, |state| {
                  (
-@@ -1380,6 +1408,7 @@ impl CompositorHandler for RuntimeState {
+@@ -1329,6 +1361,7 @@ impl CompositorHandler for RuntimeState {
              buffer_attached,
              buffer_removed,
              sampling_changed,
@@ -3825,7 +3729,7 @@ index 0000000..2a9b5dc
 +    map
 +}
 diff --git a/compositor/src/bin/deniald/wayland_frontend/input.rs b/compositor/src/bin/deniald/wayland_frontend/input.rs
-index d498a58..1298558 100644
+index 6f64af7..0cc79e2 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/input.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/input.rs
 @@ -5,8 +5,9 @@ use std::ffi::OsStr;
@@ -3840,7 +3744,7 @@ index d498a58..1298558 100644
  };
  #[cfg(feature = "flutter")]
  use smithay::backend::input::{Switch, SwitchState, SwitchToggleEvent};
-@@ -135,9 +136,9 @@ pub(super) fn cancel_touch_for_surface(state: &mut RuntimeState, surface: &WlSur
+@@ -133,9 +134,9 @@ pub(super) fn cancel_touch_for_surface(state: &mut RuntimeState, surface: &WlSur
      affected
  }
  
@@ -3852,7 +3756,7 @@ index d498a58..1298558 100644
  ) -> Option<&'a super::WaylandOutput> {
      if let Some(name) = device.output_name() {
          return frontend
-@@ -161,22 +162,41 @@ pub(super) fn touch_output_for_device<'a>(
+@@ -159,22 +160,41 @@ pub(super) fn touch_output_for_device<'a>(
          })
  }
  
@@ -3898,7 +3802,7 @@ index d498a58..1298558 100644
  {
      project_touch_position(
          bounds,
-@@ -531,6 +551,122 @@ pub(crate) fn dispatch_shell_keyboard(
+@@ -554,6 +574,122 @@ pub(crate) fn dispatch_shell_keyboard(
      }
  }
  
@@ -4019,9 +3923,9 @@ index d498a58..1298558 100644
 +}
 +
  #[cfg(feature = "flutter")]
- #[derive(Clone)]
- pub(super) struct ClientInputRoute {
-@@ -1211,13 +1347,18 @@ pub(in super::super) fn init_libinput(
+ fn type_shell_text(
+     state: &mut RuntimeState,
+@@ -1248,15 +1384,22 @@ pub(in super::super) fn init_libinput(
  
  impl WaylandFrontend {
      pub(in super::super) fn suspend_input_session(&mut self) {
@@ -4032,9 +3936,14 @@ index d498a58..1298558 100644
      }
  
      pub(in super::super) fn resume_input_session(&mut self) -> Result<(), &'static str> {
+         #[cfg(feature = "flutter")]
+-        self.input_rescan.request();
 -        self.libinput
 -            .resume()
 -            .map_err(|()| "libinput rejected session resume")
++        if let Some(input_rescan) = self.input_rescan.as_ref() {
++            input_rescan.request();
++        }
 +        if let Some(libinput) = self.libinput.as_mut() {
 +            libinput
 +                .resume()
@@ -4044,7 +3953,7 @@ index d498a58..1298558 100644
      }
  }
  
-@@ -1232,6 +1373,9 @@ fn process_keyboard_transition(
+@@ -1271,6 +1414,9 @@ fn process_keyboard_transition(
      if intercept_native_escape(state, keycode.raw(), key_state) {
          return true;
      }
@@ -4054,7 +3963,7 @@ index d498a58..1298558 100644
      if !state.secure_session_locked() {
          focus_exclusive_layer_for_keyboard_event(state);
      }
-@@ -1730,6 +1874,48 @@ fn process_input_event(
+@@ -1765,6 +1911,48 @@ fn process_input_event(
          return reset.any() || tablet_clients_changed;
      }
  
@@ -4077,7 +3986,7 @@ index d498a58..1298558 100644
 +    if let Some(flush_clients) = process_touchpad_gesture_event(state, &event) {
 +        return flush_clients;
 +    }
-+    if tablet::process_event(state, &event) || tablet_clients_changed {
++    if tablet_clients_changed {
 +        return true;
 +    }
 +    let power_device = match &event {
@@ -4103,36 +4012,32 @@ index d498a58..1298558 100644
      #[cfg(feature = "flutter")]
      if let InputEvent::Keyboard {
          event: key_event, ..
-@@ -1739,10 +1922,9 @@ fn process_input_event(
-         // sequence before note_user_activity: waking first would invert an
-         // off-to-on toggle, and routing the release would undo on-to-off.
-         if key_event.key_code().raw() == 116 + 8 {
--            state.power_button.note_key(
--                key_event.device().sysname(),
--                key_event.state() == KeyState::Pressed,
--            );
-+            state
-+                .power_button
-+                .note_key(power_device, key_event.state() == KeyState::Pressed);
-             return false;
+@@ -1785,7 +1973,7 @@ fn process_input_event(
          }
-         return process_keyboard_transition(
-@@ -1789,9 +1971,12 @@ fn process_input_event(
+         if key_event.key_code().raw() == 116 + 8 {
+             state.power_button.note_key(
+-                key_event.device().sysname(),
++                power_device,
+                 key_event.state() == KeyState::Pressed,
+                 chords,
+             );
+@@ -1858,10 +2046,10 @@ fn process_input_event(
              // The root fingerprint listener has its own read-only evdev stream.
              // Only its bounded presentation or an explicit wake gesture/button
              // may wake this panel; raw DOWN/MOTION must not expose the lock UI.
+-            if state
+-                .screen_off_touch
+-                .suppress(device.sysname(), touch, powered)
+-            {
 +            // The generic route cannot name a libinput sysname; Device::id()
 +            // is that same sysname for a libinput device.
 +            let power_key = Device::id(&device);
-             if state
-                 .screen_off_touch
--                .suppress(device.sysname(), touch, powered)
-+                .suppress(&power_key, touch, powered)
-             {
++            if state.screen_off_touch.suppress(&power_key, touch, powered) {
                  return false;
              }
-@@ -1831,19 +2016,6 @@ fn process_input_event(
-         state.note_user_activity();
+         }
+@@ -1924,19 +2112,6 @@ fn process_input_event(
+         }
      }
  
 -    #[cfg(feature = "flutter")]
@@ -4151,7 +4056,7 @@ index d498a58..1298558 100644
      #[cfg(not(feature = "flutter"))]
      match &event {
          InputEvent::Keyboard {
-@@ -1872,6 +2044,61 @@ fn process_input_event(
+@@ -1965,6 +2140,61 @@ fn process_input_event(
      true
  }
  
@@ -4213,7 +4118,7 @@ index d498a58..1298558 100644
  pub(in super::super) fn reset_all_input_devices(state: &mut RuntimeState) {
      #[cfg(feature = "flutter")]
      {
-@@ -2433,8 +2660,9 @@ fn execute_shortcut_disposition_at(
+@@ -2567,8 +2797,9 @@ fn execute_shortcut_disposition_at(
              let result = if let Some(frontend) = state.wayland.as_mut() {
                  frontend
                      .session
@@ -4226,7 +4131,7 @@ index d498a58..1298558 100644
                  Err("Wayland frontend is unavailable".to_owned())
              };
 diff --git a/compositor/src/bin/deniald/wayland_frontend/input/flutter_route.rs b/compositor/src/bin/deniald/wayland_frontend/input/flutter_route.rs
-index 68efa76..6e1a86d 100644
+index 556701a..14b747b 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/input/flutter_route.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/input/flutter_route.rs
 @@ -109,10 +109,13 @@ fn claim_edge_swipe(
@@ -4246,7 +4151,7 @@ index 68efa76..6e1a86d 100644
      debug_assert!(!matches!(&event, InputEvent::Keyboard { .. }));
      let secure_locked = state.secure_session_locked();
      match &event {
-@@ -874,7 +877,7 @@ pub(super) fn pointer_constraint_reactivation_suppressed(
+@@ -783,7 +786,7 @@ pub(super) fn pointer_constraint_reactivation_suppressed(
  }
  
  #[cfg(feature = "flutter")]
@@ -4255,7 +4160,7 @@ index 68efa76..6e1a86d 100644
      state: &mut RuntimeState,
      event: &E,
  ) -> bool {
-@@ -914,7 +917,7 @@ fn route_super_scrolling_layout_wheel<E: PointerAxisEvent<LibinputInputBackend>>
+@@ -823,7 +826,7 @@ fn route_super_scrolling_layout_wheel<E: PointerAxisEvent<LibinputInputBackend>>
      true
  }
  
@@ -4264,11 +4169,256 @@ index 68efa76..6e1a86d 100644
      state: &mut RuntimeState,
      event: &E,
  ) {
+diff --git a/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs b/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
+index c923ee9..5f3be67 100644
+--- a/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
++++ b/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
+@@ -2,6 +2,9 @@
+ 
+ use super::*;
+ 
++#[cfg(feature = "anland")]
++use crate::anland_backend::seat_input::AnlandDevice;
++
+ use smithay::backend::input::{
+     ProximityState, TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent,
+     TabletToolTipEvent, TabletToolTipState,
+@@ -93,18 +96,98 @@ fn tablet_output_mapping(
+     })
+ }
+ 
+-fn tablet_position<E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++pub(super) trait TabletOutputDevice: Device + Sized {
++    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++    where
++        B: InputBackend<Device = Self>,
++        E: AbsolutePositionEvent<B> + Event<B>;
++
++    fn device_added(_state: &mut RuntimeState, _device: &Self) -> bool {
++        false
++    }
++
++    fn device_removed(_state: &mut RuntimeState, _device: &Self) -> bool {
++        false
++    }
++
++    fn proximity_out(_frontend: &mut WaylandFrontend, _device: &Self) {}
++}
++
++impl TabletOutputDevice for LibinputDevice {
++    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++    where
++        B: InputBackend<Device = Self>,
++        E: AbsolutePositionEvent<B> + Event<B>,
++    {
++        let mapping = tablet_output_mapping(frontend, &event.device())?;
++        let position =
++            output_bound_absolute_position::<B, E>(event, mapping.bounds, mapping.transform);
++        Some(frontend.clamp_pointer(position))
++    }
++
++    fn proximity_out(frontend: &mut WaylandFrontend, device: &Self) {
++        frontend.tablet_output_mappings.remove(device.sysname());
++    }
++}
++
++#[cfg(feature = "anland")]
++impl TabletOutputDevice for AnlandDevice {
++    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++    where
++        B: InputBackend<Device = Self>,
++        E: AbsolutePositionEvent<B> + Event<B>,
++    {
++        let position = super::output_bound_absolute_position::<B, E>(
++            event,
++            frontend.touch_bounds,
++            frontend.touch_transform,
++        );
++        Some(frontend.clamp_pointer(position))
++    }
++
++    fn device_added(state: &mut RuntimeState, device: &Self) -> bool {
++        if !Device::has_capability(device, DeviceCapability::TabletTool) {
++            return false;
++        }
++        let (tablet_seat, display_handle) = {
++            let frontend = state.wayland.as_ref().expect("missing Wayland frontend");
++            (frontend.seat.tablet_seat(), frontend.display_handle.clone())
++        };
++        tablet_seat.add_wp_tablet(&display_handle, &TabletDescriptor::from(device));
++        true
++    }
++
++    fn device_removed(state: &mut RuntimeState, device: &Self) -> bool {
++        if !Device::has_capability(device, DeviceCapability::TabletTool) {
++            return false;
++        }
++        let tablet_seat = state
++            .wayland
++            .as_ref()
++            .expect("missing Wayland frontend")
++            .seat
++            .tablet_seat();
++        tablet_seat.remove_tablet(&TabletDescriptor::from(device));
++        if tablet_seat.count_tablets() == 0 {
++            tablet_seat.clear_tools();
++        }
++        true
++    }
++}
++
++fn tablet_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
+ where
+-    E: AbsolutePositionEvent<LibinputInputBackend> + Event<LibinputInputBackend>,
++    B: InputBackend,
++    B::Device: TabletOutputDevice,
++    E: AbsolutePositionEvent<B> + Event<B>,
+ {
+-    let mapping = tablet_output_mapping(frontend, &event.device())?;
+-    let position = output_bound_absolute_position(event, mapping.bounds, mapping.transform);
+-    Some(frontend.clamp_pointer(position))
++    <B::Device as TabletOutputDevice>::map_position::<B, E>(frontend, event)
+ }
+ 
+-fn tool_handle<E>(state: &mut RuntimeState, event: &E) -> TabletToolHandle<RuntimeState>
++fn tool_handle<B, E>(state: &mut RuntimeState, event: &E) -> TabletToolHandle<RuntimeState>
+ where
+-    E: TabletToolEvent<LibinputInputBackend>,
++    B: InputBackend,
++    E: TabletToolEvent<B>,
+ {
+     let (tablet_seat, display_handle) = {
+         let frontend = state.frontend();
+@@ -116,9 +199,10 @@ where
+         .unwrap_or_else(|| tablet_seat.add_wp_tool(state, &display_handle, &descriptor))
+ }
+ 
+-fn axis_frame<E>(event: &E) -> AxisFrame
++fn axis_frame<B, E>(event: &E) -> AxisFrame
+ where
+-    E: TabletToolEvent<LibinputInputBackend>,
++    B: InputBackend,
++    E: TabletToolEvent<B>,
+ {
+     AxisFrame {
+         pressure: event
+@@ -184,15 +268,17 @@ struct RoutedToolMotion {
+ /// Move the tool to the event's position, entering proximity first when the
+ /// tool is not yet over a tablet. The caller adds its own events and ends the
+ /// tool frame.
+-fn route_tool_motion<E>(state: &mut RuntimeState, event: &E) -> Option<RoutedToolMotion>
++fn route_tool_motion<B, E>(state: &mut RuntimeState, event: &E) -> Option<RoutedToolMotion>
+ where
+-    E: TabletToolEvent<LibinputInputBackend>,
++    B: InputBackend,
++    B::Device: TabletOutputDevice,
++    E: TabletToolEvent<B>,
+ {
+     let position = {
+         let frontend = state.frontend_mut();
+         tablet_position(frontend, event)?
+     };
+-    let tool = tool_handle(state, event);
++    let tool = tool_handle::<B, E>(state, event);
+     let (focus, _route) = tablet_focus(state, position);
+     let serial = SERIAL_COUNTER.next_serial();
+     let time = event.time();
+@@ -211,13 +297,13 @@ where
+             tablet,
+             &ProximityInEvent {
+                 location: position,
+-                axis: Some(axis_frame(event)),
++                axis: Some(axis_frame::<B, E>(event)),
+                 serial,
+                 time,
+             },
+         );
+     } else {
+-        tool.axis(state, axis_frame(event));
++        tool.axis(state, axis_frame::<B, E>(event));
+         tool.motion(
+             state,
+             focus,
+@@ -286,10 +372,13 @@ pub(super) fn unregister_device(state: &mut RuntimeState, device: &LibinputDevic
+     true
+ }
+ 
+-pub(super) fn process_event(
++pub(super) fn process_event<B: InputBackend>(
+     state: &mut RuntimeState,
+-    event: &InputEvent<LibinputInputBackend>,
+-) -> bool {
++    event: &InputEvent<B>,
++) -> bool
++where
++    B::Device: TabletOutputDevice,
++{
+     #[cfg(feature = "flutter")]
+     if state.secure_session_locked() {
+         let tool = match event {
+@@ -314,8 +403,18 @@ pub(super) fn process_event(
+     }
+ 
+     match event {
++        InputEvent::DeviceAdded { device }
++            if Device::has_capability(device, DeviceCapability::TabletTool) =>
++        {
++            return <B::Device as TabletOutputDevice>::device_added(state, device);
++        }
++        InputEvent::DeviceRemoved { device }
++            if Device::has_capability(device, DeviceCapability::TabletTool) =>
++        {
++            return <B::Device as TabletOutputDevice>::device_removed(state, device);
++        }
+         InputEvent::TabletToolAxis { event, .. } => {
+-            if let Some(result) = route_tool_motion(state, event) {
++            if let Some(result) = route_tool_motion::<B, _>(state, event) {
+                 result.tool.frame(state, event.time());
+                 return true;
+             }
+@@ -323,7 +422,7 @@ pub(super) fn process_event(
+         }
+         InputEvent::TabletToolProximity { event, .. } => match event.state() {
+             ProximityState::In => {
+-                if let Some(result) = route_tool_motion(state, event) {
++                if let Some(result) = route_tool_motion::<B, _>(state, event) {
+                     result.tool.frame(state, event.time());
+                     return true;
+                 }
+@@ -332,9 +431,7 @@ pub(super) fn process_event(
+             ProximityState::Out => {
+                 let frontend = state.frontend_mut();
+                 let tool = frontend.seat.tablet_seat().get_tool(&event.tool());
+-                frontend
+-                    .tablet_output_mappings
+-                    .remove(event.device().sysname());
++                <B::Device as TabletOutputDevice>::proximity_out(frontend, &event.device());
+                 if let Some(tool) = tool.filter(|tool| tool.current_tablet().is_some()) {
+                     let serial = SERIAL_COUNTER.next_serial();
+                     tool.proximity_out(
+@@ -350,7 +447,7 @@ pub(super) fn process_event(
+             }
+         },
+         InputEvent::TabletToolTip { event, .. } => {
+-            let Some(result) = route_tool_motion(state, event) else {
++            let Some(result) = route_tool_motion::<B, _>(state, event) else {
+                 return true;
+             };
+             let tool = result.tool;
+@@ -396,7 +493,7 @@ pub(super) fn process_event(
+             true
+         }
+         InputEvent::TabletToolButton { event, .. } => {
+-            let Some(result) = route_tool_motion(state, event) else {
++            let Some(result) = route_tool_motion::<B, _>(state, event) else {
+                 return true;
+             };
+             result.tool.button(
 diff --git a/compositor/src/bin/deniald/wayland_frontend/input/wayland_route.rs b/compositor/src/bin/deniald/wayland_frontend/input/wayland_route.rs
-index 04e37b4..5c71a72 100644
+index e1d83b9..1e13fef 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/input/wayland_route.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/input/wayland_route.rs
-@@ -78,21 +78,34 @@ fn activate_surface_at(
+@@ -64,14 +64,24 @@ fn activate_surface_at(
      }
  }
  
@@ -4297,19 +4447,8 @@ index 04e37b4..5c71a72 100644
              event.state(),
              event.time(),
          ),
-         InputEvent::PointerMotion { event, .. } => {
-             let (position, under) = {
-                 let frontend = state.wayland.as_mut().expect("missing Wayland frontend");
--                let position = frontend.clamp_pointer(frontend.pointer_location + event.delta());
-+                let delta = event.delta();
-+                let scale = frontend.atlas_scale.max(f64::EPSILON);
-+                let delta = Point::from((delta.x / scale, delta.y / scale));
-+                let position = frontend.clamp_pointer(frontend.pointer_location + delta);
-                 (position, frontend.surface_under(position))
-             };
-             let pointer = state
 diff --git a/compositor/src/bin/deniald/wayland_frontend/input_method.rs b/compositor/src/bin/deniald/wayland_frontend/input_method.rs
-index dd52cb4..0970fe1 100644
+index 1e1ac3f..cdf30a2 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/input_method.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/input_method.rs
 @@ -121,7 +121,7 @@ pub(super) struct EditorSnapshot {
@@ -4321,7 +4460,7 @@ index dd52cb4..0970fe1 100644
          !matches!(self.content_purpose, PASSWORD_PURPOSE | PIN_PURPOSE)
      }
  }
-@@ -358,6 +358,8 @@ pub(super) struct InputMethodManager {
+@@ -360,6 +360,8 @@ pub(super) struct InputMethodManager {
      instance: Option<InputMethodInstance>,
      editor: Option<EditorSnapshot>,
      blocked: bool,
@@ -4330,7 +4469,7 @@ index dd52cb4..0970fe1 100644
      popups: Vec<InputMethodPopup>,
      keyboard_route: InputMethodKeyboardRoute,
      virtual_keyboards: Vec<ZwpVirtualKeyboardV1>,
-@@ -386,6 +388,8 @@ impl InputMethodManager {
+@@ -388,6 +390,8 @@ impl InputMethodManager {
              instance: None,
              editor: None,
              blocked: false,
@@ -4339,7 +4478,7 @@ index dd52cb4..0970fe1 100644
              popups: Vec::new(),
              keyboard_route: InputMethodKeyboardRoute::default(),
              virtual_keyboards: Vec::new(),
-@@ -397,6 +401,10 @@ impl InputMethodManager {
+@@ -399,6 +403,10 @@ impl InputMethodManager {
          if self.blocked == blocked {
              return false;
          }
@@ -4350,7 +4489,7 @@ index dd52cb4..0970fe1 100644
          self.blocked = blocked;
          self.publish_editor_state(EditorPublication::Update)
      }
-@@ -405,6 +413,10 @@ impl InputMethodManager {
+@@ -407,6 +415,10 @@ impl InputMethodManager {
          if self.editor == editor {
              return false;
          }
@@ -4361,7 +4500,7 @@ index dd52cb4..0970fe1 100644
          self.editor = editor;
          self.publish_editor_state(EditorPublication::Update)
      }
-@@ -412,6 +424,10 @@ impl InputMethodManager {
+@@ -414,6 +426,10 @@ impl InputMethodManager {
      /// Publish a committed text-input enable, including when the selected
      /// editor resource was already active.
      pub(super) fn synchronize_activation(&mut self, editor: Option<EditorSnapshot>) -> bool {
@@ -4372,7 +4511,7 @@ index dd52cb4..0970fe1 100644
          self.editor = editor;
          self.publish_editor_state(EditorPublication::Activation)
      }
-@@ -500,6 +516,10 @@ impl InputMethodManager {
+@@ -502,6 +518,10 @@ impl InputMethodManager {
                  .as_ref()
                  .is_none_or(|instance| !instance.resource.is_alive())
          );
@@ -4383,7 +4522,7 @@ index dd52cb4..0970fe1 100644
          self.popups.clear();
          self.flutter_transactions.clear();
          self.instance = Some(InputMethodInstance {
-@@ -522,6 +542,10 @@ impl InputMethodManager {
+@@ -524,6 +544,10 @@ impl InputMethodManager {
          {
              return false;
          }
@@ -4394,7 +4533,7 @@ index dd52cb4..0970fe1 100644
          self.instance = None;
          self.popups.clear();
          self.flutter_transactions.clear();
-@@ -696,6 +720,23 @@ impl InputMethodManager {
+@@ -698,6 +722,23 @@ impl InputMethodManager {
          self.active_editor_ref().cloned()
      }
  
@@ -4419,15 +4558,19 @@ index dd52cb4..0970fe1 100644
          self.active_editor_ref()
              .is_some_and(|editor| matches!(&editor.endpoint, EditorEndpoint::Flutter { .. }))
 diff --git a/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs b/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs
-index 92f7b0c..2e0159e 100644
+index e21583b..49703b1 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs
-@@ -8,7 +8,8 @@ pub(super) fn unknown(name: &str) -> PhysicalProperties {
- }
+@@ -9,7 +9,12 @@ pub(super) fn unknown(name: &str) -> PhysicalProperties {
  
- /// None means an I/O failure, not authoritative missing monitor metadata.
+ /// None means nothing authoritative to read: an I/O failure, or a held output
+ /// whose monitor dropped its connector while asleep. Keep what we knew.
 -pub(super) fn read(drm: &DrmDeviceFd, id: OutputId, name: &str) -> Option<PhysicalProperties> {
-+pub(super) fn read(drm: Option<&DrmDeviceFd>, id: OutputId, name: &str) -> Option<PhysicalProperties> {
++pub(super) fn read(
++    drm: Option<&DrmDeviceFd>,
++    id: OutputId,
++    name: &str,
++) -> Option<PhysicalProperties> {
 +    let drm = drm?;
      let Some(handle) = u32::try_from(id.0)
          .ok()
@@ -4514,10 +4657,10 @@ index a4b7e2c..d847fa1 100644
      pub fn sampled_frame_presented(
          &mut self,
 diff --git a/compositor/src/bin/deniald/wayland_frontend/screencopy.rs b/compositor/src/bin/deniald/wayland_frontend/screencopy.rs
-index 1749d09..61daaa1 100644
+index 4dd4829..0281e6d 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/screencopy.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/screencopy.rs
-@@ -2323,7 +2323,7 @@ impl WaylandFrontend {
+@@ -2399,7 +2399,7 @@ impl WaylandFrontend {
          }
      }
  
@@ -4527,10 +4670,10 @@ index 1749d09..61daaa1 100644
          for request in self.screencopy.pending.drain(..) {
              request.frame.release_buffer(&request.buffer);
 diff --git a/compositor/src/bin/deniald/wayland_frontend/startup.rs b/compositor/src/bin/deniald/wayland_frontend/startup.rs
-index 3a63826..8f0443d 100644
+index 749caba..df966f4 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/startup.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/startup.rs
-@@ -7,9 +7,9 @@ impl WaylandFrontend {
+@@ -15,9 +15,9 @@ impl WaylandFrontend {
      pub fn new(
          event_loop: &mut EventLoop<'static, RuntimeState>,
          snapshot: &TopologySnapshot,
@@ -4540,18 +4683,23 @@ index 3a63826..8f0443d 100644
 -        display_device: DrmDeviceFd,
 +        display_device: Option<DrmDeviceFd>,
          render_device: DrmDeviceFd,
-         xwayland_enabled: bool,
-         work_area: crate::options::WorkAreaOptions,
-@@ -60,7 +60,7 @@ impl WaylandFrontend {
+         config: FrontendConfig,
+     ) -> Result<Self, Box<dyn Error>> {
+@@ -73,8 +73,11 @@ impl WaylandFrontend {
+         let dmabuf_state = DmabufState::new();
          // Syncobjs belong on a capable render device, which can be separate
          // from the KMS device. Keep the display device as a fallback only.
-         let syncobj_device =
+-        let syncobj_device =
 -            select_syncobj_device(&render_device, &display_device, supports_syncobj_eventfd);
-+            select_syncobj_device(&render_device, display_device.as_ref(), supports_syncobj_eventfd);
++        let syncobj_device = select_syncobj_device(
++            &render_device,
++            display_device.as_ref(),
++            supports_syncobj_eventfd,
++        );
          let drm_syncobj_state = if let Some(syncobj_device) = syncobj_device {
              info!("advertising linux-drm-syncobj-v1 explicit synchronization");
              Some(DrmSyncobjState::new::<RuntimeState>(
-@@ -159,7 +159,7 @@ impl WaylandFrontend {
+@@ -173,7 +176,7 @@ impl WaylandFrontend {
              let output = Output::new(
                  spec.name.clone(),
                  output_metadata::resolve(
@@ -4560,18 +4708,25 @@ index 3a63826..8f0443d 100644
                      None,
                      &spec.name,
                  ),
-@@ -280,7 +280,9 @@ impl WaylandFrontend {
+@@ -294,9 +297,15 @@ impl WaylandFrontend {
                  "loaded saved window placements"
              );
          }
 -        let libinput = init_libinput(event_loop, session.clone(), seat_name)?;
-+        let libinput = session.clone()
++        let libinput = session
++            .clone()
 +            .map(|session| init_libinput(event_loop, session, seat_name))
 +            .transpose()?;
-         Ok(Self {
+         #[cfg(feature = "flutter")]
+-        let input_rescan = super::input_hotplug::init(event_loop, &session)?;
++        let input_rescan = session
++            .as_ref()
++            .map(|session| super::input_hotplug::init(event_loop, session))
++            .transpose()?;
+         let mut frontend = Self {
              output_metadata_device: display_device,
              start_time: Instant::now(),
-@@ -303,6 +305,7 @@ impl WaylandFrontend {
+@@ -319,6 +328,7 @@ impl WaylandFrontend {
              _tablet_manager_state: tablet_manager_state,
              shm_state,
              dmabuf_state,
@@ -4579,7 +4734,7 @@ index 3a63826..8f0443d 100644
              drm_syncobj_state,
              dmabuf_global: None,
              dmabuf_render_node: None,
-@@ -529,13 +532,13 @@ impl WaylandFrontend {
+@@ -553,13 +563,13 @@ impl WaylandFrontend {
  
  fn select_syncobj_device<'a, T>(
      render_device: &'a T,
@@ -4596,7 +4751,7 @@ index 3a63826..8f0443d 100644
      } else {
          None
      }
-@@ -556,7 +559,7 @@ mod tests {
+@@ -580,7 +590,7 @@ mod tests {
              let render = ("render", render_capable);
              let display = ("display", display_capable);
              let mut probes = Vec::new();
@@ -4605,7 +4760,7 @@ index 3a63826..8f0443d 100644
                  probes.push(device.0);
                  device.1
              });
-@@ -576,7 +579,7 @@ mod tests {
+@@ -600,7 +610,7 @@ mod tests {
      #[test]
      fn syncobj_device_preserves_same_device_selection_and_implicit_fallback() {
          for capable in [true, false] {
@@ -4615,7 +4770,7 @@ index 3a63826..8f0443d 100644
          }
      }
 diff --git a/compositor/src/bin/deniald/wayland_frontend/text_input.rs b/compositor/src/bin/deniald/wayland_frontend/text_input.rs
-index d011dc8..859e7c2 100644
+index a8e10cf..efd90fc 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/text_input.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/text_input.rs
 @@ -1111,12 +1111,130 @@ fn parse_available_actions(bytes: &[u8]) -> Option<Vec<u32>> {
@@ -4750,10 +4905,10 @@ index d011dc8..859e7c2 100644
          let snapshot = self.text_input.input_method_snapshot();
          self.input_method.synchronize(snapshot)
 diff --git a/compositor/src/bin/deniald/wayland_frontend/topology.rs b/compositor/src/bin/deniald/wayland_frontend/topology.rs
-index d897741..9c2a0c7 100644
+index 172384f..dac65c8 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/topology.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/topology.rs
-@@ -190,11 +190,56 @@ impl WaylandFrontend {
+@@ -192,14 +192,63 @@ impl WaylandFrontend {
          self.arrange_layout_windows();
      }
  
@@ -4807,24 +4962,38 @@ index d897741..9c2a0c7 100644
      pub fn output_metadata_changed(&self) -> bool {
          self.outputs.iter().any(|entry| {
 -            output_metadata::read(&self.output_metadata_device, entry.id, &entry.connector)
-+            output_metadata::read(self.output_metadata_device.as_ref(), entry.id, &entry.connector)
-                 .is_some_and(|native| {
-                     !output_metadata::same(&entry.output.physical_properties(), &native)
-                 })
-@@ -260,7 +305,7 @@ impl WaylandFrontend {
+-                .is_some_and(|native| {
+-                    !output_metadata::same(&entry.output.physical_properties(), &native)
+-                })
++            output_metadata::read(
++                self.output_metadata_device.as_ref(),
++                entry.id,
++                &entry.connector,
++            )
++            .is_some_and(|native| {
++                !output_metadata::same(&entry.output.physical_properties(), &native)
++            })
+         })
+     }
+ 
+@@ -270,7 +319,11 @@ impl WaylandFrontend {
                  (
                      spec.id,
                      output_metadata::resolve(
 -                        output_metadata::read(&self.output_metadata_device, spec.id, &spec.name),
-+                        output_metadata::read(self.output_metadata_device.as_ref(), spec.id, &spec.name),
++                        output_metadata::read(
++                            self.output_metadata_device.as_ref(),
++                            spec.id,
++                            &spec.name,
++                        ),
                          self.outputs
                              .iter()
                              .find(|entry| entry.id == spec.id && entry.connector == spec.name)
 diff --git a/compositor/src/bin/deniald/wire.rs b/compositor/src/bin/deniald/wire.rs
-index c7973f8..20d6269 100644
+index 7b84ea2..a770a6a 100644
 --- a/compositor/src/bin/deniald/wire.rs
 +++ b/compositor/src/bin/deniald/wire.rs
-@@ -879,6 +879,11 @@ impl WireBridge {
+@@ -929,6 +929,11 @@ impl WireBridge {
              .map(|window| window.window_id)
      }
  
@@ -4837,7 +5006,7 @@ index c7973f8..20d6269 100644
          &self.windows
      }
 diff --git a/packages/denial_flutter_sdk/lib/src/platform/bridge/events_client.dart b/packages/denial_flutter_sdk/lib/src/platform/bridge/events_client.dart
-index c6de87b..e5a98aa 100644
+index aaf866c..e58d5ea 100644
 --- a/packages/denial_flutter_sdk/lib/src/platform/bridge/events_client.dart
 +++ b/packages/denial_flutter_sdk/lib/src/platform/bridge/events_client.dart
 @@ -1,4 +1,5 @@
@@ -4846,9 +5015,9 @@ index c6de87b..e5a98aa 100644
  
  import 'package:flutter/services.dart';
  
-@@ -50,7 +51,23 @@ final class BridgeEventsClient {
-   final StreamController<DenialTextInputState> _textInputStates =
-       StreamController<DenialTextInputState>.broadcast(sync: true);
+@@ -52,7 +53,23 @@ final class BridgeEventsClient {
+   final StreamController<DenialTextPrediction> _textPredictions =
+       StreamController<DenialTextPrediction>.broadcast(sync: true);
  
 +  final _sceneRecoveryRequests = StreamController<String>.broadcast(sync: true);
 +  Stream<String> get sceneRecoveryRequests => _sceneRecoveryRequests.stream;
@@ -4870,19 +5039,19 @@ index c6de87b..e5a98aa 100644
      if (wire.isDenialPlacementPacket(data)) {
        final event = _context.codec.decodePlacement(data);
        if (event != null && !_windows.eventsClosed) {
-@@ -318,6 +335,7 @@ final class BridgeEventsClient {
+@@ -340,6 +357,7 @@ final class BridgeEventsClient {
  
-   Stream<DenialTextInputState> get textInputStates => _textInputStates.stream;
+   Stream<DenialTextPrediction> get textPredictions => _textPredictions.stream;
    void dispose() {
 +    unawaited(_sceneRecoveryRequests.close());
      unawaited(_shellActions.close());
      unawaited(_pluginActions.close());
      unawaited(_cursorShapes.close());
 diff --git a/packages/denial_flutter_sdk/lib/src/platform/denial_bridge.dart b/packages/denial_flutter_sdk/lib/src/platform/denial_bridge.dart
-index 0384d7d..d296ca4 100644
+index 75bb754..ca86911 100644
 --- a/packages/denial_flutter_sdk/lib/src/platform/denial_bridge.dart
 +++ b/packages/denial_flutter_sdk/lib/src/platform/denial_bridge.dart
-@@ -105,6 +105,9 @@ class DenialBridge {
+@@ -106,6 +106,9 @@ class DenialBridge {
  
    Stream<DenialShellActionEvent> get shellActions => _events.shellActions;
  
@@ -4988,10 +5157,10 @@ index 0000000..f11d608
 +  }
 +}
 diff --git a/plugins/denial_desktop/lib/src/core/shell_runtime_bindings.dart b/plugins/denial_desktop/lib/src/core/shell_runtime_bindings.dart
-index f9e91f2..0f3db89 100644
+index 29c882b..752e694 100644
 --- a/plugins/denial_desktop/lib/src/core/shell_runtime_bindings.dart
 +++ b/plugins/denial_desktop/lib/src/core/shell_runtime_bindings.dart
-@@ -2,6 +2,8 @@ import 'package:denial_desktop/src/state/reference_shell_controller.dart';
+@@ -4,6 +4,8 @@ import 'package:denial_desktop/src/widgets/notification_open.dart';
  
  import 'dart:async';
  
@@ -5000,7 +5169,7 @@ index f9e91f2..0f3db89 100644
  import 'package:denial_flutter_sdk/popups.dart';
  import 'package:denial_flutter_sdk/surfaces.dart';
  import 'package:denial_flutter_sdk/settings.dart';
-@@ -77,6 +79,7 @@ class _ShellRuntimeBindingsState extends ConsumerState<ShellRuntimeBindings> {
+@@ -86,6 +88,7 @@ class _ShellRuntimeBindingsState extends ConsumerState<ShellRuntimeBindings> {
      // These providers own process-lifetime integrations. Keeping the eager
      // subscriptions here makes that runtime contract explicit.
      ref.watch(referenceShellProvider.select((_) => null));
@@ -5009,7 +5178,7 @@ index f9e91f2..0f3db89 100644
      ref.listen<bool>(
        referenceShellProvider.select((state) => state.lockLayerVisible),
 diff --git a/plugins/denial_desktop/lib/src/desktop/desktop_input_layout_publisher.dart b/plugins/denial_desktop/lib/src/desktop/desktop_input_layout_publisher.dart
-index 74288e0..1582e13 100644
+index 48fab5c..dd7ea93 100644
 --- a/plugins/denial_desktop/lib/src/desktop/desktop_input_layout_publisher.dart
 +++ b/plugins/denial_desktop/lib/src/desktop/desktop_input_layout_publisher.dart
 @@ -1,3 +1,5 @@
@@ -5018,7 +5187,7 @@ index 74288e0..1582e13 100644
  import 'package:denial_desktop/src/state/reference_shell_controller.dart';
  
  import 'dart:math' as math;
-@@ -41,6 +43,7 @@ class _DesktopInputLayoutPublisherState
+@@ -43,6 +45,7 @@ class _DesktopInputLayoutPublisherState
        DesktopWindowConfigureTracker();
    bool _scheduled = false;
    int _epoch = 0;
@@ -5026,7 +5195,7 @@ index 74288e0..1582e13 100644
    InputLayoutSnapshot? _lastSnapshot;
    _DesktopInputLayoutSource? _lastSource;
    DesktopInputSurfaceIndex? _surfaceIndex;
-@@ -48,6 +51,12 @@ class _DesktopInputLayoutPublisherState
+@@ -50,6 +53,12 @@ class _DesktopInputLayoutPublisherState
  
    @override
    Widget build(BuildContext context) {
@@ -5040,11 +5209,11 @@ index 74288e0..1582e13 100644
        referenceShellProvider.select(
          (state) => (
 diff --git a/plugins/denial_desktop/lib/src/state/reference_shell_controller.dart b/plugins/denial_desktop/lib/src/state/reference_shell_controller.dart
-index 2187894..d616089 100644
+index a08731f..6d2779f 100644
 --- a/plugins/denial_desktop/lib/src/state/reference_shell_controller.dart
 +++ b/plugins/denial_desktop/lib/src/state/reference_shell_controller.dart
-@@ -316,6 +316,10 @@ class ReferenceShellController extends Notifier<ReferenceShellState>
-     _platform.requestUnlock();
+@@ -427,6 +427,10 @@ class ReferenceShellController extends Notifier<ReferenceShellState>
+     _bridge.moveWindowToOutput(window, monitorId: split.phone.monitorId);
    }
  
 +  void invalidateRecoveryInputLayout() {
@@ -5055,7 +5224,7 @@ index 2187894..d616089 100644
      if (state.locked || !state.lockLayerVisible) {
        return;
 diff --git a/tools/denial-flutter-engine b/tools/denial-flutter-engine
-index 82357bf..939f16c 100755
+index a34e93d..748027c 100755
 --- a/tools/denial-flutter-engine
 +++ b/tools/denial-flutter-engine
 @@ -248,8 +248,16 @@ canonicalize_engine_build_id() (
@@ -5242,7 +5411,7 @@ index 82357bf..939f16c 100755
    output="$BUILD_ROOT/out/$target"
    [[ -x "$llvm_objcopy" ]] \
      || fail "synchronized Flutter buildtools are missing llvm-objcopy: $llvm_objcopy"
-@@ -1286,9 +1315,9 @@ prepare_development_sdk() {
+@@ -1291,9 +1320,9 @@ prepare_development_sdk() {
    engine_source_root="$CHECKOUT/engine/src"
    checkout_depot="$engine_source_root/flutter/third_party/depot_tools"
    for mode in debug profile; do
@@ -5254,7 +5423,7 @@ index 82357bf..939f16c 100755
  
      printf 'Generating lock-matched %s development SDK build graph\n' "$mode"
      (
-@@ -1297,6 +1326,7 @@ prepare_development_sdk() {
+@@ -1302,6 +1331,7 @@ prepare_development_sdk() {
          DEPOT_TOOLS_UPDATE=0 \
          VPYTHON_VIRTUALENV_ROOT="$VPYTHON_CACHE_ROOT" \
          ./flutter/tools/gn \
@@ -5263,7 +5432,7 @@ index 82357bf..939f16c 100755
            "${GN_ENGINE_ARGS[@]}" \
            --out-dir="$BUILD_ROOT" \
 diff --git a/tools/denial-pc b/tools/denial-pc
-index d7ec1f9..ed04c94 100755
+index a3c55ee..4887edf 100755
 --- a/tools/denial-pc
 +++ b/tools/denial-pc
 @@ -121,7 +121,7 @@ ENGINE_TEST_STORE="${DENIAL_PC_ENGINE_TEST_STORE:-$CACHE_HOME/denial/engine-test
@@ -5275,7 +5444,7 @@ index d7ec1f9..ed04c94 100755
  SESSION_ENGINE_SHA256=""
  BINARY="${DENIAL_PC_BINARY:-$RUST_TARGET/release/deniald}"
  CONTROL_BINARY="${DENIAL_PC_CONTROL_BINARY:-$RUST_TARGET/release/denialctl}"
-@@ -173,7 +173,7 @@ if [[ "$DENIAL_ARCH" == aarch64 ]] && ((DEFAULT_BUILD_JOBS > 10)); then
+@@ -175,7 +175,7 @@ if [[ "$DENIAL_ARCH" == aarch64 ]] && ((DEFAULT_BUILD_JOBS > 10)); then
  fi
  BUILD_JOBS="${DENIAL_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}"
  PC_XWAYLAND="${DENIAL_PC_XWAYLAND:-1}"
@@ -5284,7 +5453,7 @@ index d7ec1f9..ed04c94 100755
  COMPOSITOR_DEFAULT_FEATURE_ARGS=()
  if [[ "$PC_XWAYLAND" == 0 ]]; then
      COMPOSITOR_DEFAULT_FEATURE_ARGS=(--no-default-features)
-@@ -771,7 +771,15 @@ bootstrap_dependencies() {
+@@ -773,7 +773,15 @@ bootstrap_dependencies() {
              "$FLUTTER_SDK_ROOT"
      fi
      prepare_flutter_toolchain
@@ -5401,7 +5570,7 @@ index abbc992..0a2db41 100755
      )"
    else
      development_base='0.0.0'
-@@ -88,7 +105,11 @@ else
+@@ -88,7 +105,14 @@ else
    fi
    revision="$(git -C "$ROOT" rev-parse --short=8 HEAD)"
    package_version="$development_base.r$revision_count.g$revision"
@@ -5413,8 +5582,11 @@ index abbc992..0a2db41 100755
 +    && [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
      package_version="$package_version.dirty"
    fi
++  # Producers can name a known release commit without pretending their
++  # integration-patched checkout is an upstream signed release.
++  package_version="${REQUESTED_PACKAGE_VERSION:-$package_version}"
  fi
-@@ -192,7 +213,7 @@ denial_root="$temporary_stage/denial"
+@@ -192,7 +216,7 @@ denial_root="$temporary_stage/denial"
  plugin_manager_root="$temporary_stage/denial-plugin-manager"
  install -d -m 0755 "$engine_root" "$denial_root" "$plugin_manager_root"
  
@@ -5441,256 +5613,3 @@ index 4d5f522..ace4801 100755
    package_dependencies="$(dpkg-deb --field "$package" Depends)"
    package_provides="$(dpkg-deb --field "$package" Provides 2>/dev/null || true)"
    payload_listing="$(dpkg-deb --fsys-tarfile "$package" | bsdtar -tf -)"
-
-diff --git a/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs b/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
-index 99b1395..3f1edf4 100644
---- a/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
-+++ b/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
-@@ -2,6 +2,9 @@
--
-+
- use super::*;
--
-+
-+#[cfg(feature = "anland")]
-+use crate::anland_backend::seat_input::AnlandDevice;
-+
- use smithay::backend::input::{
-     ProximityState, TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent,
-     TabletToolTipEvent, TabletToolTipState,
-@@ -93,18 +96,97 @@ fn tablet_output_mapping(
-     })
- }
--
-+
--fn tablet_position<E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
-+pub(super) trait TabletOutputDevice: Device + Sized {
-+    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
-+    where
-+        B: InputBackend<Device = Self>,
-+        E: AbsolutePositionEvent<B> + Event<B>;
-+
-+    fn device_added(_state: &mut RuntimeState, _device: &Self) -> bool {
-+        false
-+    }
-+
-+    fn device_removed(_state: &mut RuntimeState, _device: &Self) -> bool {
-+        false
-+    }
-+
-+    fn proximity_out(_frontend: &mut WaylandFrontend, _device: &Self) {}
-+}
-+
-+impl TabletOutputDevice for LibinputDevice {
-+    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
-+    where
-+        B: InputBackend<Device = Self>,
-+        E: AbsolutePositionEvent<B> + Event<B>,
-+    {
-+        let mapping = tablet_output_mapping(frontend, &event.device())?;
-+        let position = output_bound_absolute_position::<B, E>(
-+            event,
-+            mapping.bounds,
-+            mapping.transform,
-+        );
-+        Some(frontend.clamp_pointer(position))
-+    }
-+
-+    fn proximity_out(frontend: &mut WaylandFrontend, device: &Self) {
-+        frontend.tablet_output_mappings.remove(device.sysname());
-+    }
-+}
-+
-+#[cfg(feature = "anland")]
-+impl TabletOutputDevice for AnlandDevice {
-+    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
-+    where
-+        B: InputBackend<Device = Self>,
-+        E: AbsolutePositionEvent<B> + Event<B>,
-+    {
-+        let position = super::output_bound_absolute_position::<B, E>(event, frontend.touch_bounds, frontend.touch_transform);
-+        Some(frontend.clamp_pointer(position))
-+    }
-+
-+    fn device_added(state: &mut RuntimeState, device: &Self) -> bool {
-+        if !Device::has_capability(device, DeviceCapability::TabletTool) {
-+            return false;
-+        }
-+        let (tablet_seat, display_handle) = {
-+            let frontend = state.wayland.as_ref().expect("missing Wayland frontend");
-+            (frontend.seat.tablet_seat(), frontend.display_handle.clone())
-+        };
-+        tablet_seat.add_wp_tablet(&display_handle, &TabletDescriptor::from(device));
-+        true
-+    }
-+
-+    fn device_removed(state: &mut RuntimeState, device: &Self) -> bool {
-+        if !Device::has_capability(device, DeviceCapability::TabletTool) {
-+            return false;
-+        }
-+        let tablet_seat = state
-+            .wayland
-+            .as_ref()
-+            .expect("missing Wayland frontend")
-+            .seat
-+            .tablet_seat();
-+        tablet_seat.remove_tablet(&TabletDescriptor::from(device));
-+        if tablet_seat.count_tablets() == 0 {
-+            tablet_seat.clear_tools();
-+        }
-+        true
-+    }
-+}
-+
-+fn tablet_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
- where
--    E: AbsolutePositionEvent<LibinputInputBackend> + Event<LibinputInputBackend>,
-+    B: InputBackend,
-+    B::Device: TabletOutputDevice,
-+    E: AbsolutePositionEvent<B> + Event<B>,
- {
--    let mapping = tablet_output_mapping(frontend, &event.device())?;
--    let position = output_bound_absolute_position(event, mapping.bounds, mapping.transform);
--    Some(frontend.clamp_pointer(position))
-+    <B::Device as TabletOutputDevice>::map_position::<B, E>(frontend, event)
- }
--
-+
--fn tool_handle<E>(state: &mut RuntimeState, event: &E) -> TabletToolHandle<RuntimeState>
-+fn tool_handle<B, E>(state: &mut RuntimeState, event: &E) -> TabletToolHandle<RuntimeState>
- where
--    E: TabletToolEvent<LibinputInputBackend>,
-+    B: InputBackend,
-+    E: TabletToolEvent<B>,
- {
-     let (tablet_seat, display_handle) = {
-         let frontend = state.wayland.as_ref().expect("missing Wayland frontend");
-@@ -116,9 +198,10 @@ where
-         .unwrap_or_else(|| tablet_seat.add_wp_tool(state, &display_handle, &descriptor))
- }
--
-+
--fn axis_frame<E>(event: &E) -> AxisFrame
-+fn axis_frame<B, E>(event: &E) -> AxisFrame
- where
--    E: TabletToolEvent<LibinputInputBackend>,
-+    B: InputBackend,
-+    E: TabletToolEvent<B>,
- {
-     AxisFrame {
-         pressure: event
-@@ -193,15 +276,17 @@ struct RoutedToolMotion {
- /// Move the tool to the event's position, entering proximity first when the
- /// tool is not yet over a tablet. The caller adds its own events and ends the
- /// tool frame.
--fn route_tool_motion<E>(state: &mut RuntimeState, event: &E) -> Option<RoutedToolMotion>
-+fn route_tool_motion<B, E>(state: &mut RuntimeState, event: &E) -> Option<RoutedToolMotion>
- where
--    E: TabletToolEvent<LibinputInputBackend>,
-+    B: InputBackend,
-+    B::Device: TabletOutputDevice,
-+    E: TabletToolEvent<B>,
- {
-     let position = {
-         let frontend = state.wayland.as_mut().expect("missing Wayland frontend");
--        tablet_position(frontend, event)?
-+        tablet_position::<B, E>(frontend, event)?
-     };
--    let tool = tool_handle(state, event);
-+    let tool = tool_handle::<B, E>(state, event);
-     let (focus, _route) = tablet_focus(state, position);
-     let serial = SERIAL_COUNTER.next_serial();
-     let time = event.time();
-@@ -220,13 +305,13 @@ where
-             tablet,
-             &ProximityInEvent {
-                 location: position,
--                axis: Some(axis_frame(event)),
-+                axis: Some(axis_frame::<B, E>(event)),
-                 serial,
-                 time,
-             },
-         );
-     } else {
--        tool.axis(state, axis_frame(event));
-+        tool.axis(state, axis_frame::<B, E>(event));
-         tool.motion(
-             state,
-             focus,
-@@ -302,10 +387,13 @@ pub(super) fn unregister_device(state: &mut RuntimeState, device: &LibinputDevic
-     true
- }
--
-+
--pub(super) fn process_event(
-+pub(super) fn process_event<B: InputBackend>(
-     state: &mut RuntimeState,
--    event: &InputEvent<LibinputInputBackend>,
--) -> bool {
-+    event: &InputEvent<B>,
-+) -> bool
-+where
-+    B::Device: TabletOutputDevice,
-+{
-     #[cfg(feature = "flutter")]
-     if state.secure_session_locked() {
-         let tool = match event {
-@@ -335,8 +423,18 @@ pub(super) fn process_event(
-     }
--
-+
-     match event {
-+        InputEvent::DeviceAdded { device }
-+            if Device::has_capability(device, DeviceCapability::TabletTool) =>
-+        {
-+            return <B::Device as TabletOutputDevice>::device_added(state, device);
-+        }
-+        InputEvent::DeviceRemoved { device }
-+            if Device::has_capability(device, DeviceCapability::TabletTool) =>
-+        {
-+            return <B::Device as TabletOutputDevice>::device_removed(state, device);
-+        }
-         InputEvent::TabletToolAxis { event, .. } => {
--            if let Some(result) = route_tool_motion(state, event) {
-+            if let Some(result) = route_tool_motion::<B, _>(state, event) {
-                 result.tool.frame(state, event.time());
-                 return true;
-             }
-@@ -344,7 +442,7 @@ pub(super) fn process_event(
-         }
-         InputEvent::TabletToolProximity { event, .. } => match event.state() {
-             ProximityState::In => {
--                if let Some(result) = route_tool_motion(state, event) {
-+                if let Some(result) = route_tool_motion::<B, _>(state, event) {
-                     result.tool.frame(state, event.time());
-                     return true;
-                 }
-@@ -353,9 +451,7 @@ pub(super) fn process_event(
-             ProximityState::Out => {
-                 let frontend = state.wayland.as_mut().expect("missing Wayland frontend");
-                 let tool = frontend.seat.tablet_seat().get_tool(&event.tool());
--                frontend
--                    .tablet_output_mappings
--                    .remove(event.device().sysname());
-+                <B::Device as TabletOutputDevice>::proximity_out(frontend, &event.device());
-                 if let Some(tool) = tool.filter(|tool| tool.current_tablet().is_some()) {
-                     let serial = SERIAL_COUNTER.next_serial();
-                     tool.proximity_out(
-@@ -371,7 +467,7 @@ pub(super) fn process_event(
-             }
-         },
-         InputEvent::TabletToolTip { event, .. } => {
--            let Some(result) = route_tool_motion(state, event) else {
-+            let Some(result) = route_tool_motion::<B, _>(state, event) else {
-                 return true;
-             };
-             let tool = result.tool;
-@@ -419,7 +515,7 @@ pub(super) fn process_event(
-             true
-         }
-         InputEvent::TabletToolButton { event, .. } => {
--            let Some(result) = route_tool_motion(state, event) else {
-+            let Some(result) = route_tool_motion::<B, _>(state, event) else {
-                 return true;
-             };
-             result.tool.button(
