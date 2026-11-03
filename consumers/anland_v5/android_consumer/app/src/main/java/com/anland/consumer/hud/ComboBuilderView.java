@@ -191,13 +191,21 @@ public final class ComboBuilderView {
     public void showInline(Context ctx, ViewGroup host, OnComboBuiltListener listener) {
         mListener = listener;
         host.removeAllViews();
-        host.addView(buildContent(ctx), new ViewGroup.LayoutParams(
+        // On short screens, let the whole builder scroll rather than squeezing
+        // its weighted key grid down to an unusable sliver.
+        ScrollView scroll = new ScrollView(ctx);
+        scroll.setFillViewport(true);
+        LinearLayout content = buildContent(ctx);
+        content.setMinimumHeight(dp(ctx, 320));
+        scroll.addView(content, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        host.addView(scroll, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     // Build the dialog body. Uses flex weight=1f on the key grid so that
-    // CLEAR ALL and APPLY COMBO are ALWAYS pinned at the bottom and never
-    // pushed off-screen in landscape orientation.
+    // CLEAR ALL and APPLY COMBO stay at the bottom when space allows. On very
+    // short screens the outer scroll view keeps the entire builder reachable.
     private LinearLayout buildContent(final Context ctx) {
         boolean isLandscape = ctx.getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;

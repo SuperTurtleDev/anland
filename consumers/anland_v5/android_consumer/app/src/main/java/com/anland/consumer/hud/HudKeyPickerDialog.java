@@ -154,7 +154,7 @@ public final class HudKeyPickerDialog {
         int screenH = context.getResources().getDisplayMetrics().heightPixels;
         final int dialogW = isLandscape ? Math.min(dp(context, 540), screenW - dp(context, 32))
                                         : Math.min(dp(context, 360), screenW - dp(context, 20));
-        final int dialogH = isLandscape ? Math.min(dp(context, 330), screenH - dp(context, 24))
+        final int dialogH = isLandscape ? Math.min(dp(context, 560), screenH - dp(context, 24))
                                         : Math.min(dp(context, 520), screenH - dp(context, 64));
         root.setLayoutParams(new ViewGroup.LayoutParams(dialogW, dialogH));
 
