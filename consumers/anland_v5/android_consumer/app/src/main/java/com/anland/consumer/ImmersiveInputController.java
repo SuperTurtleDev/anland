@@ -115,32 +115,28 @@ final class ImmersiveInputController {
     static final String KEY_AUTO_ENTER = "immersive_auto_enter";
 
     /**
-     * Enters immersive mode without a key press and without saying so.
-     *
-     * <p>Offered only for Gold keyboards. Touch, Android gestures and hardware
-     * buttons stay available, and the normal pause/lock teardown ends the grab.
-     *
-     * <p>Called on resume. Leaving and coming back is what re-arms it; the
-     * ordinary lifecycle teardown already ends the session on the way out.
+     * Attempts one automatic entry after the host has focus and a surface.
+     * False asks the host to retry: Gold may still be publishing its output, or
+     * the previous foreground session may still be releasing its helper.
+     * A submitted start is attempted only once; helper failures keep their normal
+     * diagnostics instead of producing a loop of root requests and toasts.
      */
-    void enterAutomatically() {
+    boolean enterAutomatically() {
         SharedPreferences prefs = prefs();
-        if (!prefs.getBoolean(ImmersiveMode.KEY_ENABLED, false))
-            return;
-        if (!prefs.getBoolean(KEY_AUTO_ENTER, false))
-            return;
         ImmersiveInputSource current = ImmersiveInputSource.read(prefs);
-        if (current != ImmersiveInputSource.EXISTING_UINPUT_BUS)
-            return;
-        // Silently, and without a message: this runs on every resume, and a
-        // toast each time would be noise about something the user did not ask
-        // for in that moment. The picker is where they find out.
-        if (!current.isAvailable(ctx))
-            return;
+        if (!AutomaticImmersiveEntry.enabledFor(
+                prefs.getBoolean(ImmersiveMode.KEY_ENABLED, false),
+                prefs.getBoolean(KEY_AUTO_ENTER, false), current))
+            return true;
+        if (direct.isStopping())
+            return false;
         if (isActive())
-            return;
+            return true;
+        if (!current.isAvailable(ctx))
+            return false;
         runningSource = current;
         direct.startWith(null, null, current);
+        return true;
     }
 
     ImmersiveInputSource source() {

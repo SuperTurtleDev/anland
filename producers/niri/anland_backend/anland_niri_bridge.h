@@ -3,6 +3,7 @@
 #define ANLAND_NIRI_BRIDGE_H
 #include <stdint.h>
 #include <stddef.h>
+#include "anland_tablet.h"
 
 typedef struct anland_niri_bridge anland_niri_bridge;
 typedef struct anland_niri_output {
@@ -27,6 +28,7 @@ typedef struct anland_niri_input {
     float x, y, dx, dy, value;
     uint32_t payload_size, resource_type, fd_count;
     uint32_t refresh_mhz;
+    anland_tablet_sample tablet_previous, tablet_current;
 } anland_niri_input;
 
 /* Shared in-process presentation lifecycle over the daemon transport.
@@ -53,6 +55,8 @@ int anland_niri_dispatch(anland_niri_bridge *bridge, anland_niri_event *events,
  * For clipboard/text/resource events, read the announced payload/fds before
  * polling the next event. */
 int anland_niri_poll_input(anland_niri_bridge *bridge, anland_niri_input *out);
+/* Clear staged public tablet packets after a consumer session is retired. */
+void anland_niri_reset_input(anland_niri_bridge *bridge);
 int anland_niri_read_payload(anland_niri_bridge *bridge, void *buf, size_t size,
                               int timeout_ms);
 int anland_niri_read_fds(anland_niri_bridge *bridge, int *fds, int max_fds,

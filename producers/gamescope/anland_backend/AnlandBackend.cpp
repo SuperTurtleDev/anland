@@ -6,6 +6,7 @@
 #include "steamcompmgr.hpp"
 #include "session.h"
 #include "input.h"
+#include "tablet.h"
 #include "ime.hpp"
 #include "clipboard.hpp"
 #include "touch_state.hpp"
@@ -202,6 +203,8 @@ namespace gamescope
             // Quiesce callbacks under the same lock used by event dispatch.
             wlserver_lock();
             DetachPointerFocus();
+            anland_gamescope_tablet_destroy(m_Tablet);
+            m_Tablet = nullptr;
             if (m_Wakeup) wl_event_source_remove(m_Wakeup);
             m_Wakeup = nullptr;
             m_Connector.SetClipboard(nullptr);
@@ -570,6 +573,16 @@ namespace gamescope
             }
             wlserver_lock();
             switch (ev->kind) {
+            case AG_TABLET: {
+                if (!self->m_Tablet)
+                    self->m_Tablet = anland_gamescope_tablet_create(wlserver.display, wlserver.wlr.seat);
+                if (!self->m_Tablet || !anland_gamescope_tablet_frame(self->m_Tablet, &ev->tablet,
+                    wlserver.mouse_focus_surface,
+                    (ev->tablet.x + focusedWindowOffsetX) * focusedWindowScaleX,
+                    (ev->tablet.y + focusedWindowOffsetY) * focusedWindowScaleY))
+                    fprintf(stderr, "Anland: native tablet registration failed\n");
+                break;
+            }
             case AG_KEY:
                 if (ev->pressed) self->m_Keys.insert(ev->code); else self->m_Keys.erase(ev->code);
                 // virtual_keyboard_device is registered with keyboard_group:
@@ -701,6 +714,7 @@ namespace gamescope
             clock_gettime(CLOCK_MONOTONIC, &now);
             uint32_t time = uint32_t(uint64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000);
             wlserver_lock();
+            anland_gamescope_tablet_reset(m_Tablet);
             for (auto code : m_Keys) {
                 wlr_keyboard_key_event key{};
                 key.time_msec = time; key.keycode = code; key.update_state = true;
@@ -790,6 +804,7 @@ namespace gamescope
         std::set<int32_t> m_Keys, m_Buttons;
         AnlandTouchState m_Touches;
         anland_gamescope_input m_Input{};
+        anland_gamescope_tablet *m_Tablet = nullptr;
         CAnlandConnector m_Connector;
 	};
 

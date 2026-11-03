@@ -1,4 +1,7 @@
 # Keep one transport/presentation backend; only KWin's API boundary differs.
+if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.4")
+    target_compile_definitions(kwin PUBLIC ANLAND_KWIN_64=1)
+endif()
 if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.6")
     target_compile_definitions(kwin PUBLIC ANLAND_KWIN_66=1)
 endif()

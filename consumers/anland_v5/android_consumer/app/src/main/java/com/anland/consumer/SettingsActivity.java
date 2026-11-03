@@ -1,6 +1,9 @@
 package com.anland.consumer;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+
+import org.json.JSONObject;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -36,6 +39,8 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+
+
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -65,15 +70,17 @@ public class SettingsActivity extends Activity {
     private static final String KEY_IMMERSIVE_SCANCODE = ImmersiveMode.KEY_SCANCODE;
     private static final String KEY_OPLUS_REFRESH_RATE_LOCK =
             OplusRefreshRateLease.KEY_ENABLED;
-    private static final String KEY_EXTRA_KEYS_MODE = "extra_keys_mode";
-    // Mapped to R.array.extra_keys_mode_options positions
-    private static final String MODE_ALWAYS = "always";
-    private static final String MODE_NEVER = "never";
-    private static final String MODE_WITH_KEYBOARD = "with_keyboard";
-    private static final String[] EXTRA_KEYS_MODES = {MODE_ALWAYS, MODE_NEVER, MODE_WITH_KEYBOARD};
-    private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
-    private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
     private static final String KEY_KEYBOARD_FLOATING = "keyboard_floating";
+    private static final String KEY_LANDSCAPE_SPLIT_ARC =
+            VirtualKeyboardView.KEY_LANDSCAPE_SPLIT_ARC;
+    private static final String KEY_KEYBOARD_HANDEDNESS =
+            VirtualKeyboardView.KEY_KEYBOARD_HANDEDNESS;
+    private static final String KEY_KEYBOARD_THEME = VirtualKeyboardView.KEY_KEYBOARD_THEME;
+    private static final String KEY_HAPTIC_FEEDBACK = VirtualKeyboardView.KEY_HAPTIC_FEEDBACK;
+    private static final String KEY_SPLIT_ARC_TOP_WINGS =
+            VirtualKeyboardView.KEY_SPLIT_ARC_TOP_WINGS;
+    private static final String KEY_USE_HUD_OVERLAY = "use_hud_overlay";
+    private static final String KEY_HUD_LAYOUT_PROFILE = "hud_layout_profile_v2";
     private static final String KEY_NOTIFICATION_ENABLED = "settings_notification";
     private static final String KEY_ORIENTATION = "screen_orientation";
     private static final String[] ORIENTATION_VALUES = {"default", "landscape", "portrait"};
@@ -82,9 +89,6 @@ public class SettingsActivity extends Activity {
 
     // ===== 新增：触摸板 Key =====
     private static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
-    private static final String KEY_STYLUS_BUTTON_RIGHT_CLICK = "stylus_button_right_click";
-    private static final String KEY_STYLUS_HOVER_SCROLL = "stylus_hover_scroll";
-    private static final String KEY_STYLUS_HOVER_SCROLL_SPEED = "stylus_hover_scroll_speed";
     private static final String KEY_MOUSE_ACCEL = "mouse_speed";
     private static final String KEY_POINTER_CAPTURE = "pointer_capture";
     private static final String KEY_SCROLL_SPEED = "scroll_speed";
@@ -141,13 +145,21 @@ public class SettingsActivity extends Activity {
     private KeyBinding listeningBinding;
 
     // Custom extra-keys layout editor (JSON), and the SAF file-picker request code.
-    private EditText layoutInput;
-    private static final int REQ_PICK_LAYOUT = 2001;
+    private static final int REQ_EXPORT_HUD_LAYOUT = 2002;
+    private static final int REQ_IMPORT_HUD_LAYOUT = 2003;
+    private String pendingHudExport;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null) pendingHudExport = savedInstanceState.getString("pending_hud_export");
         showHome();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString("pending_hud_export", pendingHudExport);
     }
 
     // ============================================================
@@ -317,8 +329,6 @@ public class SettingsActivity extends Activity {
         LinearLayout root = newPage(R.string.cat_keyboard_title);
         buildVirtualKeyboardSection(root);
         buildAccessibilitySection(root);
-        buildExtraKeysSection(root);
-        buildCustomLayoutSection(root);
         setContent(root);
     }
 
@@ -431,6 +441,27 @@ public class SettingsActivity extends Activity {
         sourceHint.setTextColor(Color.GRAY);
         sourceHint.setPadding(0, 0, 0, dp(8));
         root.addView(sourceHint);
+
+        // While the panel is grabbed the HUD would otherwise be dead: every
+        // touch goes to the desktop. This lets the on-screen controls stay live.
+        SharedPreferences inputPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        Switch hudTouchSwitch = new Switch(this);
+        hudTouchSwitch.setText(R.string.immersive_hud_touch_switch);
+        hudTouchSwitch.setTextSize(14);
+        hudTouchSwitch.setPadding(0, 0, 0, 0);
+        hudTouchSwitch.setChecked(inputPrefs.getBoolean(ImmersiveMode.KEY_HUD_TOUCH,
+                ImmersiveMode.DEFAULT_HUD_TOUCH));
+        hudTouchSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(ImmersiveMode.KEY_HUD_TOUCH, checked).apply());
+        root.addView(hudTouchSwitch);
+
+        TextView hudTouchHint = new TextView(this);
+        hudTouchHint.setText(R.string.immersive_hud_touch_hint);
+        hudTouchHint.setTextSize(13);
+        hudTouchHint.setTextColor(Color.GRAY);
+        hudTouchHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(hudTouchHint);
 
         sourcePicker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
@@ -762,6 +793,83 @@ public class SettingsActivity extends Activity {
         new KeyBinding(root, KEY_BOUND_KEYCODE, null, R.string.bind_key_button);
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        Switch splitKeyboardSwitch = new Switch(this);
+        splitKeyboardSwitch.setText(R.string.landscape_split_keyboard);
+        splitKeyboardSwitch.setTextSize(14);
+        splitKeyboardSwitch.setPadding(0, dp(8), 0, 0);
+        splitKeyboardSwitch.setChecked(prefs.getBoolean(KEY_LANDSCAPE_SPLIT_ARC, true));
+        splitKeyboardSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_LANDSCAPE_SPLIT_ARC, checked).apply());
+        root.addView(splitKeyboardSwitch);
+
+        TextView splitKeyboardHint = new TextView(this);
+        splitKeyboardHint.setText(R.string.landscape_split_keyboard_hint);
+        splitKeyboardHint.setTextSize(12);
+        splitKeyboardHint.setTextColor(Color.GRAY);
+        splitKeyboardHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(splitKeyboardHint);
+
+        Button customizeWingsButton = new Button(this);
+        customizeWingsButton.setText(R.string.customize_keyboard_wings);
+        customizeWingsButton.setOnClickListener(v -> KeyboardWingsDialog.show(this, null));
+        root.addView(customizeWingsButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView handednessLabel = new TextView(this);
+        handednessLabel.setText(R.string.keyboard_handedness);
+        handednessLabel.setTextSize(14);
+        handednessLabel.setPadding(0, dp(8), 0, dp(4));
+        root.addView(handednessLabel);
+        Spinner handednessSpinner = new Spinner(this);
+        ArrayAdapter<CharSequence> handednessAdapter = ArrayAdapter.createFromResource(
+                this, R.array.keyboard_handedness_options, android.R.layout.simple_spinner_item);
+        handednessAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        handednessSpinner.setAdapter(handednessAdapter);
+        handednessSpinner.setSelection("right".equals(
+                prefs.getString(KEY_KEYBOARD_HANDEDNESS, "left")) ? 1 : 0);
+        handednessSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putString(KEY_KEYBOARD_HANDEDNESS, position == 1 ? "right" : "left")
+                    .apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        root.addView(handednessSpinner);
+
+        TextView themeLabel = new TextView(this);
+        themeLabel.setText(R.string.keyboard_theme);
+        themeLabel.setTextSize(14);
+        themeLabel.setPadding(0, dp(8), 0, dp(4));
+        root.addView(themeLabel);
+        Spinner themeSpinner = new Spinner(this);
+        ArrayAdapter<CharSequence> themeAdapter = ArrayAdapter.createFromResource(
+                this, R.array.keyboard_theme_options, android.R.layout.simple_spinner_item);
+        themeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        themeSpinner.setAdapter(themeAdapter);
+        themeSpinner.setSelection(Math.max(VirtualKeyboardView.THEME_FILLED,
+                Math.min(VirtualKeyboardView.THEME_TRANSPARENT_FULL,
+                        prefs.getInt(KEY_KEYBOARD_THEME, VirtualKeyboardView.THEME_FILLED))));
+        themeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putInt(KEY_KEYBOARD_THEME, position).apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        root.addView(themeSpinner);
+
+        Switch hapticSwitch = new Switch(this);
+        hapticSwitch.setText(R.string.keyboard_haptic_feedback);
+        hapticSwitch.setTextSize(14);
+        hapticSwitch.setPadding(0, dp(8), 0, 0);
+        hapticSwitch.setChecked(prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true));
+        hapticSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_HAPTIC_FEEDBACK, checked).apply());
+        root.addView(hapticSwitch);
+
         Switch raiseDesktopSwitch = new Switch(this);
         raiseDesktopSwitch.setText(R.string.raise_desktop_for_soft_keyboard);
         raiseDesktopSwitch.setTextSize(14);
@@ -778,6 +886,46 @@ public class SettingsActivity extends Activity {
         raiseDesktopHint.setTextColor(Color.GRAY);
         raiseDesktopHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(raiseDesktopHint);
+
+        Switch hudSwitch = new Switch(this);
+        hudSwitch.setText(R.string.hud_controls_switch);
+        hudSwitch.setTextSize(14);
+        hudSwitch.setPadding(0, dp(16), 0, 0);
+        hudSwitch.setChecked(prefs.getBoolean(KEY_USE_HUD_OVERLAY, true));
+        hudSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_USE_HUD_OVERLAY, checked).apply());
+        root.addView(hudSwitch);
+
+        TextView hudHint = new TextView(this);
+        hudHint.setText(R.string.hud_controls_hint);
+        hudHint.setTextSize(12);
+        hudHint.setTextColor(Color.GRAY);
+        hudHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(hudHint);
+
+        Button editHudButton = new Button(this);
+        editHudButton.setText(R.string.hud_edit_layout);
+        editHudButton.setOnClickListener(v -> {
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putBoolean(KEY_USE_HUD_OVERLAY, true)
+                    .apply();
+            startActivity(new Intent(this, HudEditorActivity.class));
+        });
+        root.addView(editHudButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button exportHudButton = new Button(this);
+        exportHudButton.setText(R.string.hud_export_layout);
+        exportHudButton.setOnClickListener(v -> exportHudLayout());
+        root.addView(exportHudButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button importHudButton = new Button(this);
+        importHudButton.setText(R.string.hud_import_layout);
+        importHudButton.setOnClickListener(v -> importHudLayout());
+        root.addView(importHudButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**
@@ -977,139 +1125,6 @@ public class SettingsActivity extends Activity {
         root.addView(accessibilityHint);
     }
 
-    private void buildExtraKeysSection(LinearLayout root) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-
-        TextView header = new TextView(this);
-        header.setText(R.string.section_extra_keys);
-        header.setTextSize(16);
-        header.setTypeface(null, Typeface.BOLD);
-        header.setPadding(0, dp(24), 0, dp(8));
-        root.addView(header);
-
-        // === Extra keys bar mode selector ===
-        TextView modeLabel = new TextView(this);
-        modeLabel.setText(R.string.extra_keys_mode_label);
-        modeLabel.setTextSize(14);
-        modeLabel.setPadding(0, dp(8), 0, dp(4));
-        root.addView(modeLabel);
-
-        Spinner modeSpinner = new Spinner(this);
-        modeSpinner.setAdapter(new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_dropdown_item,
-            getResources().getStringArray(R.array.extra_keys_mode_options)));
-
-        String curMode = getExtraKeysMode(prefs);
-        int modeIdx = 0; // default: always
-        for (int i = 0; i < EXTRA_KEYS_MODES.length; i++) {
-            if (EXTRA_KEYS_MODES[i].equals(curMode)) { modeIdx = i; break; }
-        }
-        modeSpinner.setSelection(modeIdx);
-        modeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View v, int pos, long id) {
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                    .putString(KEY_EXTRA_KEYS_MODE, EXTRA_KEYS_MODES[pos]).apply();
-            }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
-        });
-        root.addView(modeSpinner);
-
-        TextView modeHint = new TextView(this);
-        modeHint.setText(R.string.extra_keys_mode_hint);
-        modeHint.setTextSize(12);
-        modeHint.setTextColor(Color.GRAY);
-        modeHint.setPadding(0, dp(4), 0, dp(8));
-        root.addView(modeHint);
-
-        // === Back key opens extra keys bar ===
-        Switch backOpensExtraKeysSwitch = new Switch(this);
-        backOpensExtraKeysSwitch.setText(R.string.back_opens_switch);
-        backOpensExtraKeysSwitch.setTextSize(14);
-        backOpensExtraKeysSwitch.setPadding(0, dp(16), 0, 0);
-        backOpensExtraKeysSwitch.setChecked(prefs.getBoolean(KEY_BACK_OPENS_EXTRA_KEYS, true));
-        backOpensExtraKeysSwitch.setOnCheckedChangeListener((v, checked) ->
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                .putBoolean(KEY_BACK_OPENS_EXTRA_KEYS, checked).apply());
-        root.addView(backOpensExtraKeysSwitch);
-
-        TextView backOpensExtraKeysHint = new TextView(this);
-        backOpensExtraKeysHint.setText(R.string.back_opens_hint);
-        backOpensExtraKeysHint.setTextSize(12);
-        backOpensExtraKeysHint.setTextColor(Color.GRAY);
-        backOpensExtraKeysHint.setPadding(0, dp(4), 0, dp(8));
-        root.addView(backOpensExtraKeysHint);
-
-    }
-
-    private void buildCustomLayoutSection(LinearLayout root) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-
-        TextView layoutHeader = new TextView(this);
-        layoutHeader.setText(R.string.section_custom_layout);
-        layoutHeader.setTextSize(16);
-        layoutHeader.setTypeface(null, Typeface.BOLD);
-        layoutHeader.setPadding(0, dp(24), 0, dp(8));
-        root.addView(layoutHeader);
-
-        layoutInput = new EditText(this);
-        layoutInput.setTypeface(Typeface.MONOSPACE);
-        layoutInput.setTextSize(12);
-        layoutInput.setGravity(Gravity.TOP | Gravity.START);
-        layoutInput.setInputType(InputType.TYPE_CLASS_TEXT
-            | InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        layoutInput.setHorizontallyScrolling(false);
-        layoutInput.setMinLines(6);
-        String savedLayout = prefs.getString(KEY_EXTRA_KEYS_LAYOUT, "");
-        if (savedLayout.isEmpty()) savedLayout = ExtraKeysBar.defaultLayoutJson();
-        layoutInput.setText(savedLayout);
-        root.addView(layoutInput);
-
-        final TextView layoutStatus = new TextView(this);
-        layoutStatus.setTextSize(12);
-        layoutStatus.setPadding(0, dp(4), 0, dp(4));
-        root.addView(layoutStatus);
-        updateLayoutStatus(layoutStatus, layoutInput.getText().toString());
-
-        layoutInput.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void afterTextChanged(Editable s) {
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                    .putString(KEY_EXTRA_KEYS_LAYOUT, s.toString()).apply();
-                updateLayoutStatus(layoutStatus, s.toString());
-            }
-        });
-
-        LinearLayout layoutButtons = new LinearLayout(this);
-        layoutButtons.setOrientation(LinearLayout.HORIZONTAL);
-
-        Button loadDefaultBtn = new Button(this);
-        loadDefaultBtn.setText(R.string.btn_load_default);
-        loadDefaultBtn.setOnClickListener(v ->
-            layoutInput.setText(ExtraKeysBar.defaultLayoutJson()));
-        layoutButtons.addView(loadDefaultBtn);
-
-        Button loadFileBtn = new Button(this);
-        loadFileBtn.setText(R.string.btn_load_file);
-        loadFileBtn.setOnClickListener(v -> pickLayoutFile());
-        layoutButtons.addView(loadFileBtn);
-
-        root.addView(layoutButtons);
-
-        TextView layoutHint = new TextView(this);
-        layoutHint.setText(R.string.layout_hint);
-        layoutHint.setTextSize(12);
-        layoutHint.setTextColor(Color.GRAY);
-        layoutHint.setPadding(0, dp(4), 0, dp(8));
-        root.addView(layoutHint);
-    }
-
-    // ============================================================
-    // General page sections
-    // ============================================================
     private void buildOrientationSection(LinearLayout root) {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
 
@@ -1245,35 +1260,6 @@ public class SettingsActivity extends Activity {
         padDebug.setOnCheckedChangeListener((v, checked) ->
                 prefs.edit().putBoolean(KEY_PAD_DEBUG, checked).apply());
         root.addView(padDebug);
-
-        Switch stylusRightClickSwitch = new Switch(this);
-        stylusRightClickSwitch.setText(R.string.stylus_button_right_click_switch);
-        stylusRightClickSwitch.setTextSize(14);
-        stylusRightClickSwitch.setPadding(0, dp(8), 0, 0);
-        stylusRightClickSwitch.setChecked(prefs.getBoolean(KEY_STYLUS_BUTTON_RIGHT_CLICK, true));
-        stylusRightClickSwitch.setOnCheckedChangeListener((v, checked) ->
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                        .putBoolean(KEY_STYLUS_BUTTON_RIGHT_CLICK, checked).apply());
-        root.addView(stylusRightClickSwitch);
-
-        Switch stylusHoverScrollSwitch = new Switch(this);
-        stylusHoverScrollSwitch.setText(R.string.stylus_hover_scroll_switch);
-        stylusHoverScrollSwitch.setTextSize(14);
-        stylusHoverScrollSwitch.setPadding(0, dp(8), 0, 0);
-        stylusHoverScrollSwitch.setChecked(prefs.getBoolean(KEY_STYLUS_HOVER_SCROLL, true));
-        stylusHoverScrollSwitch.setOnCheckedChangeListener((v, checked) ->
-                prefs.edit().putBoolean(KEY_STYLUS_HOVER_SCROLL, checked).apply());
-        root.addView(stylusHoverScrollSwitch);
-
-        TextView stylusHoverScrollHint = new TextView(this);
-        stylusHoverScrollHint.setText(R.string.stylus_hover_scroll_hint);
-        stylusHoverScrollHint.setTextSize(12);
-        stylusHoverScrollHint.setTextColor(Color.GRAY);
-        stylusHoverScrollHint.setPadding(0, dp(4), 0, dp(4));
-        root.addView(stylusHoverScrollHint);
-        addFloatSlider(root, R.string.stylus_hover_scroll_speed_label,
-                R.string.scroll_speed_value, null, KEY_STYLUS_HOVER_SCROLL_SPEED,
-                0.05f, 3.0f, 0.05f, 0.5f);
 
         // External mouse pointer capture.  This is opt-in because it changes
         // Android's mouse event mode from absolute coordinates to relative motion.
@@ -1856,35 +1842,114 @@ public class SettingsActivity extends Activity {
         return true;
     }
 
-    // Launch the system document picker to load a layout JSON from any provider
-    // (Downloads, Drive, etc.). Uses SAF, so no storage permission is required.
-    private void pickLayoutFile() {
+    // ---- HUD layout export / import (SAF, no storage permission needed) ----
+
+    private void chooseHudSlot(int title, java.util.function.IntConsumer onSelected) {
+        String[] labels = {getString(R.string.hud_slot_1), getString(R.string.hud_slot_2),
+                getString(R.string.hud_slot_3)};
+        new AlertDialog.Builder(this).setTitle(title).setItems(labels,
+                (dialog, which) -> onSelected.accept(which)).setNegativeButton(android.R.string.cancel, null).show();
+    }
+
+    private void exportHudLayout() {
+        chooseHudSlot(R.string.hud_export_choose, slot -> {
+            try {
+                String json = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .getString(KEY_HUD_LAYOUT_PROFILE, null);
+                pendingHudExport = com.anland.consumer.hud.HudLayoutProfile.fromJSON(json)
+                        .exportSlot(slot).toString();
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/json");
+                intent.putExtra(Intent.EXTRA_TITLE, "anland-hud-layout-" + (slot + 1) + ".json");
+                startActivityForResult(intent, REQ_EXPORT_HUD_LAYOUT);
+            } catch (android.content.ActivityNotFoundException e) {
+                Toast.makeText(this, R.string.toast_no_picker, Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Log.w(TAG, "HUD export preparation failed", e);
+                Toast.makeText(this, R.string.hud_export_failed, Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    /** Ask the user for a JSON file and replace the HUD profile with it. */
+    private void importHudLayout() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_MIME_TYPES,
-            new String[]{"application/json", "text/plain"});
+                new String[]{"application/json", "text/plain"});
         try {
-            startActivityForResult(intent, REQ_PICK_LAYOUT);
+            startActivityForResult(intent, REQ_IMPORT_HUD_LAYOUT);
         } catch (android.content.ActivityNotFoundException e) {
             Toast.makeText(this, R.string.toast_no_picker, Toast.LENGTH_SHORT).show();
         }
     }
 
+    private void writeTextToUri(Uri uri, String text) {
+        try (java.io.OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+            if (out == null) throw new java.io.IOException("no output stream");
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            Toast.makeText(this, R.string.hud_export_done, Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Log.w(TAG, "writeTextToUri failed", e);
+            Toast.makeText(this, R.string.hud_export_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void applyImportedHudLayout(JSONObject document, int source, int destination) {
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            com.anland.consumer.hud.HudLayoutProfile profile =
+                    com.anland.consumer.hud.HudLayoutProfile.fromJSON(
+                            prefs.getString(KEY_HUD_LAYOUT_PROFILE, null));
+            profile.importSlot(document, source, destination);
+            prefs.edit().putString(KEY_HUD_LAYOUT_PROFILE, profile.toJSON().toString())
+                    .putBoolean(KEY_USE_HUD_OVERLAY, true).apply();
+            Toast.makeText(this, R.string.hud_import_done, Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Log.w(TAG, "Invalid HUD layout import", e);
+            Toast.makeText(this, R.string.hud_import_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void chooseHudImportDestination(JSONObject document, int source) {
+        chooseHudSlot(R.string.hud_import_choose, destination ->
+                applyImportedHudLayout(document, source, destination));
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_PICK_LAYOUT || resultCode != RESULT_OK || data == null)
-            return;
+        if (resultCode != RESULT_OK || data == null) return;
         Uri uri = data.getData();
         if (uri == null) return;
-        String text = readTextFromUri(uri);
-        if (text == null) {
-            Toast.makeText(this, R.string.toast_read_failed, Toast.LENGTH_SHORT).show();
-            return;
+        if (requestCode == REQ_EXPORT_HUD_LAYOUT) {
+            if (pendingHudExport == null) {
+                Toast.makeText(this, R.string.hud_export_failed, Toast.LENGTH_SHORT).show();
+            } else {
+                writeTextToUri(uri, pendingHudExport);
+                pendingHudExport = null;
+            }
+        } else if (requestCode == REQ_IMPORT_HUD_LAYOUT) {
+            String text = readTextFromUri(uri);
+            if (text == null) {
+                Toast.makeText(this, R.string.toast_read_failed, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            try {
+                JSONObject document = new JSONObject(text);
+                if (!document.has("format") && (document.has("layout_2") || document.has("layout_3"))) {
+                    chooseHudSlot(R.string.hud_import_source_choose, source ->
+                            chooseHudImportDestination(document, source));
+                } else {
+                    chooseHudImportDestination(document, 0);
+                }
+            } catch (Exception e) {
+                Toast.makeText(this, R.string.hud_import_failed, Toast.LENGTH_SHORT).show();
+            }
         }
-        // setText flows through the editor's TextWatcher, which persists + validates.
-        if (layoutInput != null) layoutInput.setText(text);
     }
 
     private String readTextFromUri(Uri uri) {
@@ -1901,37 +1966,7 @@ public class SettingsActivity extends Activity {
         }
     }
 
-    // Reflect the validity of the custom layout JSON inline under the editor.
-    private void updateLayoutStatus(TextView status, String json) {
-        if (json == null || json.trim().isEmpty()) {
-            status.setText(R.string.layout_status_default);
-            status.setTextColor(Color.GRAY);
-            return;
-        }
-        String err = ExtraKeysBar.validateLayout(json);
-        if (err == null) {
-            status.setText(R.string.layout_status_valid);
-            status.setTextColor(0xFF2E7D32);  // green
-        } else {
-            status.setText(getString(R.string.layout_status_invalid, err));
-            status.setTextColor(0xFFC62828);  // red
-        }
-    }
-
     private int dp(int dp) {
         return (int) (dp * getResources().getDisplayMetrics().density);
-    }
-
-    // Read the extra-keys mode, migrating from the old two-switch prefs if needed.
-    private String getExtraKeysMode(SharedPreferences prefs) {
-        String mode = prefs.getString(KEY_EXTRA_KEYS_MODE, null);
-        if (mode != null) return mode;
-        // Migrate from legacy boolean keys
-        boolean autoShow = prefs.getBoolean("auto_show_extra_keys", true);
-        boolean enabled = prefs.getBoolean("extra_keys_bar", false);
-        mode = autoShow ? MODE_WITH_KEYBOARD : (enabled ? MODE_ALWAYS : MODE_NEVER);
-        prefs.edit().putString(KEY_EXTRA_KEYS_MODE, mode)
-              .remove("auto_show_extra_keys").remove("extra_keys_bar").apply();
-        return mode;
     }
 }

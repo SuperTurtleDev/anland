@@ -46,6 +46,9 @@ static void on_fallback(void *userdata);
 static void on_exit_fallback(void *userdata);
 struct consumer_state {
     pthread_mutex_t lock;
+    /* Serialises the producer input stream; tablet frames hold it across their
+     * four records so the FRAME remains an atomic sample commit. */
+    pthread_mutex_t input_lock;
     ANativeWindow *window;
     display_ctx *ctx;
     pthread_t render_thread;
@@ -85,6 +88,9 @@ struct consumer_state {
     char cfg_bridge_path[512];
     int  cfg_custom_width;
     int  cfg_custom_height;
+    /* SurfaceHolder dimensions avoid stale ANativeWindow geometry after rotation. */
+    int  cfg_screen_width;
+    int  cfg_screen_height;
     bool cfg_topapp_enable;
     char cfg_topapp_path[512];
     int cfg_topapp_mode;
@@ -129,6 +135,23 @@ struct consumer_state {
 
 static void topapp_handle_scheduling_event(struct consumer_state *s,
                                            const struct OutputEvent *event);
+
+static int send_input_event(struct consumer_state *s, const struct InputEvent *event)
+{
+    pthread_mutex_lock(&s->input_lock);
+    int rc = s->ctx ? push_input_event(s->ctx, event) : 0;
+    pthread_mutex_unlock(&s->input_lock);
+    return rc;
+}
+
+static int send_input_payload(struct consumer_state *s, const struct InputEvent *event,
+                              void *payload, size_t size)
+{
+    pthread_mutex_lock(&s->input_lock);
+    int rc = s->ctx ? push_input_event_with_length(s->ctx, event, payload, size) : 0;
+    pthread_mutex_unlock(&s->input_lock);
+    return rc;
+}
 
 static int collect_dmabufs(struct consumer_state *s)
 {
@@ -227,7 +250,7 @@ static void send_refresh_rate(struct consumer_state *s)
         .type = INPUT_TYPE_DISPLAY_REFRESH,
         .display = { .refresh_mhz = s->refresh_mhz },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 /*
@@ -748,8 +771,10 @@ static int do_connect(struct consumer_state *s)
         audio_set_ctx(s->audio, NULL);   /* detach audio before the old ctx (and its fd) dies */
         stop_event_thread(s);
         join_event_thread(s);
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     }
     cleanup_dmabufs(s);
 
@@ -757,11 +782,16 @@ static int do_connect(struct consumer_state *s)
     pthread_mutex_lock(&s->cfg_lock);
     int cw = s->cfg_custom_width;
     int ch = s->cfg_custom_height;
+    int sw = s->cfg_screen_width;
+    int sh = s->cfg_screen_height;
     pthread_mutex_unlock(&s->cfg_lock);
 
     if (cw > 0 && ch > 0) {
         s->screen_w = cw;
         s->screen_h = ch;
+    } else if (sw > 0 && sh > 0) {
+        s->screen_w = sw;
+        s->screen_h = sh;
     } else {
        s->screen_w = ANativeWindow_getWidth(win);
        s->screen_h = ANativeWindow_getHeight(win);
@@ -793,18 +823,22 @@ static int do_connect(struct consumer_state *s)
     LOGI("connecting to %s (%dx%d, %d bufs, root=%d)", sock,
          s->screen_w, s->screen_h, s->buf_count, use_root);
 
+    pthread_mutex_lock(&s->input_lock);
     if (use_root) {
         int ctrl_fd = recv_fd_via_root_helper(sock, helper_path, bridge_path);
         if (ctrl_fd < 0) {
             LOGE("root helper connect failed");
+            pthread_mutex_unlock(&s->input_lock);
             return -1;
         }
         if (connect_to_deamon_with_fd(&s->ctx, ctrl_fd) < 0) {
             LOGE("connect_to_deamon_with_fd failed");
+            pthread_mutex_unlock(&s->input_lock);
             return -1;
         }
     } else if (connect_to_deamon(&s->ctx, sock) < 0) {
         LOGE("connect_to_deamon failed");
+        pthread_mutex_unlock(&s->input_lock);
         return -1;
     }
 
@@ -832,6 +866,7 @@ static int do_connect(struct consumer_state *s)
 
     s->need_reconnect = false;
     LOGI("connected");
+    pthread_mutex_unlock(&s->input_lock);
     return 0;
 }
 
@@ -1038,6 +1073,7 @@ Java_com_anland_consumer_Native_nativeCreate(JNIEnv *env, jclass clazz)
     if (!s)
         return 0;
     pthread_mutex_init(&s->lock, NULL);
+    pthread_mutex_init(&s->input_lock, NULL);
     pthread_mutex_init(&s->cfg_lock, NULL);
     pthread_mutex_init(&s->topapp_lock, NULL);
     s->cfg_topapp_mode = 1;
@@ -1068,8 +1104,10 @@ Java_com_anland_consumer_Native_nativeDestroy(JNIEnv *env, jclass clazz, jlong h
         stop_event_thread(s);
         join_event_thread(s);
         topapp_restore_tree(s);
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     } else {
         topapp_restore_tree(s);
     }
@@ -1100,6 +1138,7 @@ Java_com_anland_consumer_Native_nativeDestroy(JNIEnv *env, jclass clazz, jlong h
     s->activity_obj = NULL;
     pthread_mutex_destroy(&s->topapp_lock);
     pthread_mutex_destroy(&s->cfg_lock);
+    pthread_mutex_destroy(&s->input_lock);
     pthread_mutex_destroy(&s->lock);
     LOGI("instance %p destroyed", (void *)s);
     free(s);
@@ -1166,6 +1205,20 @@ Java_com_anland_consumer_Native_nativeSetCustomResolution(
 }
 
 JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSetScreenSize(
+    JNIEnv *env, jclass clazz, jlong handle, jint width, jint height)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->cfg_lock);
+    s->cfg_screen_width = width;
+    s->cfg_screen_height = height;
+    pthread_mutex_unlock(&s->cfg_lock);
+}
+
+JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeStart(
     JNIEnv *env, jclass clazz, jlong handle, jobject surface, jobject clipboardTarget,
     jobject activityTarget)
@@ -1192,8 +1245,10 @@ Java_com_anland_consumer_Native_nativeStart(
     }
 
     if (s->ctx) {
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     }
     s->motion_has_last = false;
     cleanup_dmabufs(s);
@@ -1264,8 +1319,10 @@ Java_com_anland_consumer_Native_nativeStop(
         stop_event_thread(s);
         join_event_thread(s);
         topapp_restore_tree(s); /* stopping the pipeline ends the boost */
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     } else {
         topapp_restore_tree(s);
     }
@@ -1315,13 +1372,13 @@ Java_com_anland_consumer_Native_nativeSendTouch(
     JNIEnv *env, jclass clazz, jlong handle, jint action, jfloat x, jfloat y, jint pointer_id)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_TOUCH,
         .touch = { .action = action, .x = x, .y = y, .pointer_id = pointer_id },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 JNIEXPORT void JNICALL
@@ -1329,12 +1386,12 @@ Java_com_anland_consumer_Native_nativeSendTouchFrame(
     JNIEnv *env, jclass clazz, jlong handle)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_TOUCH_FRAME,
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 JNIEXPORT void JNICALL
@@ -1342,13 +1399,13 @@ Java_com_anland_consumer_Native_nativeSendKey(
     JNIEnv *env, jclass clazz, jlong handle, jint action, jint keycode)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_KEY,
         .key = { .action = action, .keycode = keycode },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 JNIEXPORT void JNICALL
@@ -1356,8 +1413,14 @@ Java_com_anland_consumer_Native_nativeSendMouseMotion(
     JNIEnv *env, jclass clazz, jlong handle, jfloat x, jfloat y, jfloat dx, jfloat dy)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
+
+    pthread_mutex_lock(&s->input_lock);
+    if (!s->ctx) {
+        pthread_mutex_unlock(&s->input_lock);
+        return;
+    }
 
     if (dx == 0.0f && dy == 0.0f && s->motion_has_last) {
         dx = x - s->motion_last_x;
@@ -1373,6 +1436,7 @@ Java_com_anland_consumer_Native_nativeSendMouseMotion(
         .pointer_motion = { .x = x, .y = y, .dx = dx, .dy = dy },
     };
     push_input_event(s->ctx, &ev);
+    pthread_mutex_unlock(&s->input_lock);
 }
 
 JNIEXPORT void JNICALL
@@ -1380,27 +1444,101 @@ Java_com_anland_consumer_Native_nativeSendMouseButton(
     JNIEnv *env, jclass clazz, jlong handle, jint button, jboolean pressed)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_BUTTON,
         .pointer_button = { .button = button, .pressed = pressed ? 1 : 0 },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
+
+
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendMouseScroll(
     JNIEnv *env, jclass clazz, jlong handle, jint axis, jfloat value)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_AXIS,
         .pointer_axis = { .axis = axis, .value = value, .discrete = 0 },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSendTabletSample(
+    JNIEnv *env, jclass clazz, jlong handle, jint tool_id, jint tool_type,
+    jint capabilities, jint device_id, jfloat x, jfloat y, jfloat pressure,
+    jfloat tilt_x, jfloat tilt_y, jfloat distance, jint flags, jint buttons,
+    jlong time_msec)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+
+    uint32_t frame_flags = (uint32_t)flags;
+    uint32_t frame_buttons = (uint32_t)buttons;
+    if (frame_flags & TABLET_FLAG_CANCELED) {
+        frame_flags = TABLET_FLAG_CANCELED;
+        frame_buttons = 0;
+        pressure = 0.0f;
+    } else if (!(frame_flags & TABLET_FLAG_PROXIMITY)) {
+        frame_flags = 0;
+        frame_buttons = 0;
+        pressure = 0.0f;
+    }
+
+    struct InputEvent tool = {
+        .type = INPUT_TYPE_TABLET_TOOL,
+        .tablet_tool = {
+            .tool_id = (uint32_t)tool_id,
+            .tool_type = (uint32_t)tool_type,
+            .capabilities = (uint32_t)capabilities,
+            .device_id = (uint32_t)device_id,
+        },
+    };
+    struct InputEvent position = {
+        .type = INPUT_TYPE_TABLET_POSITION,
+        .tablet_position = {
+            .tool_id = (uint32_t)tool_id,
+            .x = x,
+            .y = y,
+            .pressure = pressure,
+        },
+    };
+    struct InputEvent tilt = {
+        .type = INPUT_TYPE_TABLET_TILT,
+        .tablet_tilt = {
+            .tool_id = (uint32_t)tool_id,
+            .tilt_x = tilt_x,
+            .tilt_y = tilt_y,
+            .distance = distance,
+        },
+    };
+    struct InputEvent frame = {
+        .type = INPUT_TYPE_TABLET_FRAME,
+        .tablet_frame = {
+            .tool_id = (uint32_t)tool_id,
+            .flags = frame_flags,
+            .buttons = frame_buttons,
+            .time_msec = (uint32_t)time_msec,
+        },
+    };
+
+    pthread_mutex_lock(&s->input_lock);
+    if (s->ctx) {
+        /* Repeat TOOL metadata so a new connection always sees it before axes. */
+        if (push_input_event(s->ctx, &tool) == 0
+                && push_input_event(s->ctx, &position) == 0
+                && push_input_event(s->ctx, &tilt) == 0)
+            push_input_event(s->ctx, &frame); /* FRAME commits this sample. */
+    }
+    pthread_mutex_unlock(&s->input_lock);
 }
 
 JNIEXPORT void JNICALL
@@ -1408,7 +1546,7 @@ Java_com_anland_consumer_Native_nativeSendClipboard(
     JNIEnv *env, jclass clazz, jlong handle, jbyteArray data)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
 
     jsize len = (*env)->GetArrayLength(env, data);
@@ -1424,7 +1562,7 @@ Java_com_anland_consumer_Native_nativeSendClipboard(
         .type = INPUT_TYPE_CLIPBOARD,
         .clipboard = { .size = (uint32_t)len },
     };
-    push_input_event_with_length(s->ctx, &ev, buf, len);
+    send_input_payload(s, &ev, buf, len);
     free(buf);
 }
 
@@ -1433,7 +1571,7 @@ Java_com_anland_consumer_Native_nativeSendTextInput(
     JNIEnv *env, jclass clazz, jlong handle, jbyteArray data)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
 
     jsize len = (*env)->GetArrayLength(env, data);
@@ -1449,7 +1587,7 @@ Java_com_anland_consumer_Native_nativeSendTextInput(
         .type = INPUT_TYPE_TEXT_INPUT,
         .text_input = { .size = (uint32_t)len },
     };
-    push_input_event_with_length(s->ctx, &ev, buf, len);
+    send_input_payload(s, &ev, buf, len);
     free(buf);
 }
 

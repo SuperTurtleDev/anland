@@ -12,11 +12,28 @@ use super::scale_control::ScaleControl;
 use super::seat_input::AnlandInputBackend;
 use super::services::ClipboardSync;
 use super::topology::{OUTPUT_NAME, OutputPlan};
+#[cfg(feature = "anland-runtime-v2")]
+use crate::flutter_launcher::{FlutterLaunchConfiguration, FlutterLauncher};
 use crate::wayland_frontend::WaylandFrontend;
 use crate::*;
 use smithay::reexports::calloop::channel::Event as ChannelEvent;
 use std::ffi::CString;
 use std::io;
+
+// Ubuntu follows the refactored upstream runtime; Arch still uses cad6's flat
+// queues. Expand to a field so existing borrows and queue ordering stay intact.
+#[cfg(feature = "anland-runtime-v2")]
+macro_rules! control_queue {
+    ($state:expr, $legacy:ident, $current:ident) => {
+        ($state).control.$current
+    };
+}
+#[cfg(not(feature = "anland-runtime-v2"))]
+macro_rules! control_queue {
+    ($state:expr, $legacy:ident, $current:ident) => {
+        ($state).$legacy
+    };
+}
 
 /// Only the service send boundary is abstracted for fault injection. Encoding,
 /// partial writes, backpressure and fallback remain in the public producer.
@@ -246,8 +263,8 @@ fn process_scale_controls(
     use output_control::*;
     let due = scale.rollback_due(now);
     let pending = due.is_some()
-        || !events.pending_output_applies.is_empty()
-        || !events.pending_output_confirmations.is_empty();
+        || !control_queue!(events, pending_output_applies, output_applies).is_empty()
+        || !control_queue!(events, pending_output_confirmations, output_confirmations).is_empty();
     active.driver.set_geometry_pending(pending);
     if !pending || !active.driver.geometry_ready(&active.runtime, now) {
         return Ok(());
@@ -258,7 +275,9 @@ fn process_scale_controls(
         scale.cancel_preview();
         publisher.publish(scale.state(Some(&active.plan)));
     }
-    while let Some(request) = events.pending_output_confirmations.pop_front() {
+    while let Some(request) =
+        control_queue!(events, pending_output_confirmations, output_confirmations).pop_front()
+    {
         let result = if events.secure_session_locked() {
             Err(OutputControlFailure::new("locked", "session locked"))
         } else {
@@ -280,7 +299,9 @@ fn process_scale_controls(
         publisher.publish(scale.state(Some(&active.plan)));
         request.reply(result);
     }
-    if let Some(request) = events.pending_output_applies.pop_front() {
+    if let Some(request) =
+        control_queue!(events, pending_output_applies, output_applies).pop_front()
+    {
         let current = publisher.snapshot();
         let prepared = if events.secure_session_locked() {
             Err(OutputControlFailure::new("locked", "session locked"))
@@ -301,20 +322,22 @@ fn process_scale_controls(
         };
         request.reply(result);
     }
-    active
-        .driver
-        .set_geometry_pending(!events.pending_output_applies.is_empty());
+    active.driver.set_geometry_pending(
+        !control_queue!(events, pending_output_applies, output_applies).is_empty(),
+    );
     Ok(())
 }
 
 fn reject_unavailable_scale_requests(events: &mut RuntimeState) {
-    for request in events.pending_output_applies.drain(..) {
+    for request in control_queue!(events, pending_output_applies, output_applies).drain(..) {
         request.reply(Err(OutputControlFailure::new(
             "output_unavailable",
             "Anland output is not active",
         )));
     }
-    for request in events.pending_output_confirmations.drain(..) {
+    for request in
+        control_queue!(events, pending_output_confirmations, output_confirmations).drain(..)
+    {
         request.reply(Err(OutputControlFailure::new(
             "output_unavailable",
             "Anland output is not active",
@@ -351,6 +374,7 @@ fn stop(
     client: &mut Client,
     capture: &mut CaptureSync,
 ) {
+    release_tablet_devices(events, seat);
     if let Err(error) = synchronize_pointer_capture(events, client, capture, false) {
         warn!(%error, "Anland capture release failed; session will be detached");
     }
@@ -368,6 +392,12 @@ fn stop(
     wayland_frontend::reset_all_input_devices(events);
     if let Some(frontend) = events.wayland.as_mut() {
         let _ = frontend.display_handle.flush_clients();
+    }
+}
+
+fn release_tablet_devices(events: &mut RuntimeState, seat: &mut AnlandInputBackend) {
+    for event in seat.take_tablet_releases() {
+        wayland_frontend::process_routed_input_event(events, event, "anland-consumer");
     }
 }
 
@@ -436,16 +466,19 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
             if let ChannelEvent::Msg(request) = event {
                 match request {
                     ControlEvent::OutputApply(request) => {
-                        state.pending_output_applies.push_back(request)
+                        control_queue!(state, pending_output_applies, output_applies)
+                            .push_back(request)
                     }
                     ControlEvent::OutputConfirmation(request) => {
-                        state.pending_output_confirmations.push_back(request)
+                        control_queue!(state, pending_output_confirmations, output_confirmations)
+                            .push_back(request)
                     }
                     ControlEvent::Settings(request) => {
-                        state.pending_settings_controls.push_back(request)
+                        control_queue!(state, pending_settings_controls, settings)
+                            .push_back(request)
                     }
                     ControlEvent::SystemControl(request) => {
-                        state.pending_system_controls.push_back(request)
+                        control_queue!(state, pending_system_controls, system).push_back(request)
                     }
                     ControlEvent::UiDevelopment(request) => {
                         request.reply(Err(OutputControlFailure::new(
@@ -471,6 +504,30 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             request.reply(Ok(()));
+                        }
+                    }
+                    #[cfg(feature = "anland-runtime-v2")]
+                    ControlEvent::RepaintOutputs => {
+                        // The consumer clock already renders every output tick.
+                    }
+                    #[cfg(feature = "anland-runtime-v2")]
+                    ControlEvent::RepaintApp(app_id) => state.control.repaint_apps.push(app_id),
+                    #[cfg(feature = "anland-runtime-v2")]
+                    ControlEvent::RebuildOutputs => {
+                        // Recreate renderer resources at the existing safe retirement
+                        // boundary; buffer formats remain owned by the consumer.
+                        state.flutter_reload_requested = true;
+                    }
+                    #[cfg(feature = "anland-runtime-v2")]
+                    event @ (ControlEvent::OpenColorTuning | ControlEvent::ReopenColorTuning) => {
+                        state.receive_control(event);
+                    }
+                    #[cfg(feature = "anland-runtime-v2")]
+                    event @ ControlEvent::SaveColor(_) => {
+                        if state.wayland.is_some() {
+                            state.receive_control(event);
+                        } else {
+                            warn!("cannot save color settings before the Anland output is active");
                         }
                     }
                 }
@@ -549,9 +606,12 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     .as_ref()
                     .or(parked.as_ref())
                     .map_or(Duration::from_millis(100), |a| {
-                        a.runtime
-                            .next_dispatch_timeout()
-                            .min(a.driver.wait_timeout(&a.runtime, Instant::now()))
+                        let now = Instant::now();
+                        #[cfg(feature = "anland-runtime-v2")]
+                        let timeout = a.runtime.next_dispatch_timeout(now);
+                        #[cfg(not(feature = "anland-runtime-v2"))]
+                        let timeout = a.runtime.next_dispatch_timeout();
+                        timeout.min(a.driver.wait_timeout(&a.runtime, now))
                     })
                     .min(Duration::from_millis(100))
             };
@@ -624,6 +684,10 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     );
                 }
                 if !a.driver.stopped() && client.as_ref().unwrap().connected() {
+                    #[cfg(feature = "anland-runtime-v2")]
+                    for app_id in std::mem::take(&mut events.control.repaint_apps) {
+                        a.driver.update_textures(a.runtime.app_texture_ids(&app_id));
+                    }
                     // Poll every bounded outer iteration, including maintenance:
                     // partial headers/payloads must expire even without a new edge.
                     let c = client.as_mut().unwrap();
@@ -677,6 +741,13 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                 if let Some(event) =
                                     input_seat.translate(raw, (output.width, output.height), time)
                                 {
+                                    flush_clients |= wayland_frontend::process_routed_input_event(
+                                        &mut events,
+                                        event,
+                                        "anland-consumer",
+                                    );
+                                }
+                                while let Some(event) = input_seat.pop_pending() {
                                     flush_clients |= wayland_frontend::process_routed_input_event(
                                         &mut events,
                                         event,
@@ -883,10 +954,14 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     )?;
                     // Unmapped windows legitimately remain unpublished until a
                     // first buffer arrives. They cannot veto the existing desktop.
+                    #[cfg(feature = "anland-runtime-v2")]
+                    let window_events_empty = events.window_events.pending.is_empty();
+                    #[cfg(not(feature = "anland-runtime-v2"))]
+                    let window_events_empty = events.pending_window_events.is_empty();
                     let scene_ready = !events.replacement_flutter_rehydration_pending
                         && events.scene_sync.pending_metadata_revision().is_none()
                         && events.pending_shell_actions.is_empty()
-                        && events.pending_window_events.is_empty();
+                        && window_events_empty;
                     a.runtime.synchronize_scene_recovery(
                         events.scene_sync.metadata_revision(),
                         scene_ready,
@@ -965,14 +1040,22 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     audit_ticks += u64::from(progress.frame_tick.is_some());
                     audit_renders += u64::from(progress.render_requested);
                     audit_vsync += u64::from(progress.vsync_dispatched);
-                    audit_presented += progress.outcomes.iter().filter(|outcome| {
-                        matches!(outcome, super::submission::Outcome::Presented { .. })
-                    }).count() as u64;
+                    audit_presented += progress
+                        .outcomes
+                        .iter()
+                        .filter(|outcome| {
+                            matches!(outcome, super::submission::Outcome::Presented { .. })
+                        })
+                        .count() as u64;
                     if now.saturating_duration_since(audit_since) >= Duration::from_secs(1) {
-                        info!(clock_ticks = audit_ticks, raster_requests = audit_renders,
-                            flutter_vsync = audit_vsync, consumer_ack = audit_presented,
+                        info!(
+                            clock_ticks = audit_ticks,
+                            raster_requests = audit_renders,
+                            flutter_vsync = audit_vsync,
+                            consumer_ack = audit_presented,
                             elapsed_ms = now.saturating_duration_since(audit_since).as_millis(),
-                            "Anland frame statistics");
+                            "Anland frame statistics"
+                        );
                         audit_since = now;
                         audit_ticks = 0;
                         audit_renders = 0;
@@ -1070,7 +1153,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 if !sampled.pending.is_empty() {
                     continue;
                 }
-                if let Some(a) = parked.take() {
+                if let Some(mut a) = parked.take() {
                     if let Err(error) = a.runtime.shutdown() {
                         std::mem::forget(a.captures);
                         std::mem::forget(a.driver);
@@ -1149,7 +1232,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                         parked = active.take();
                         info!("Anland output retired; retaining Flutter engine and scene");
                     } else {
-                        if let Some(a) = active.take() {
+                        if let Some(mut a) = active.take() {
                             if let Err(error) = a.runtime.shutdown() {
                                 std::mem::forget(a.captures);
                                 std::mem::forget(a.driver);
@@ -1176,6 +1259,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 Action::Reconnect | Action::Reopen => {
                     sources.invalidate();
                     input_stream.reset();
+                    release_tablet_devices(&mut events, &mut input_seat);
                     input_seat.reset();
                     clipboard_sync.reset_session();
                     pointer_capture.reset_session();
@@ -1215,8 +1299,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 // display rate on the input stream. Waiting for an Active output
                 // before reading that stream would make output creation depend
                 // on itself. Drain only while metadata/partial framing is pending.
-                let needs_initial_refresh = c.connected()
-                    && c.output().is_ok_and(|output| output.refresh_mhz == 0);
+                let needs_initial_refresh =
+                    c.connected() && c.output().is_ok_and(|output| output.refresh_mhz == 0);
                 if needs_initial_refresh && !waiting_initial_refresh {
                     info!(
                         "Anland consumer connected; waiting for initial refresh rate without dropping session"
@@ -1253,6 +1337,25 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                             Ok((plan, imports)) => {
                                 staged_imports = Some(imports);
                                 if launcher.is_none() {
+                                    #[cfg(feature = "anland-runtime-v2")]
+                                    let mut frontend = WaylandFrontend::new(
+                                        &mut event_loop,
+                                        &plan.snapshot,
+                                        None,
+                                        "anland",
+                                        Some(graphics.fd()),
+                                        graphics.fd(),
+                                        crate::wayland_frontend::FrontendConfig {
+                                            xwayland_enabled: options.xwayland,
+                                            work_area: options.work_area.clone(),
+                                            scrolling_layout_axes: options
+                                                .scrolling_layout_axes
+                                                .clone(),
+                                            settings: settings.take().unwrap(),
+                                            shortcuts: shortcuts.take().unwrap(),
+                                        },
+                                    )?;
+                                    #[cfg(not(feature = "anland-runtime-v2"))]
                                     let mut frontend = WaylandFrontend::new(
                                         &mut event_loop,
                                         &plan.snapshot,
@@ -1272,6 +1375,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     launcher = Some(FlutterLauncher::new(
                                         FlutterLaunchConfiguration {
                                             bundle,
+                                            #[cfg(not(feature = "anland-runtime-v2"))]
                                             renderer_backend: options.flutter_renderer,
                                             offscreen_blit: options.flutter_offscreen_blit,
                                             debug_bundle: options.flutter_debug_bundle.clone(),
@@ -1379,7 +1483,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                         fail_closed = true;
                                         return Err("cannot cold-recover while raster replacement is outstanding".into());
                                     }
-                                    if let Some(old) = parked.take() {
+                                    if let Some(mut old) = parked.take() {
                                         if let Err(error) = old.runtime.shutdown() {
                                             std::mem::forget(old.captures);
                                             std::mem::forget(old.driver);
@@ -1413,6 +1517,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                 let plan = &active.as_ref().unwrap().plan;
                                 if let Some(frontend) = staged_frontend.take() {
                                     let lifecycle = std::mem::take(&mut events.lifecycle);
+                                    #[cfg(feature = "anland-runtime-v2")]
+                                    let reopen_color_tuning = events.reopen_color_tuning;
                                     events = flutter_desktop::initialize(
                                         &mut event_loop,
                                         &active.as_ref().unwrap().runtime,
@@ -1425,6 +1531,10 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                         Some(portal.publisher()),
                                     )?;
                                     events.lifecycle = lifecycle;
+                                    #[cfg(feature = "anland-runtime-v2")]
+                                    {
+                                        events.reopen_color_tuning |= reopen_color_tuning;
+                                    }
                                     events.replacement_flutter_rehydration_pending = true;
                                 } else {
                                     events

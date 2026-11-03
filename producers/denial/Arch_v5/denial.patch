@@ -2,12 +2,13 @@ diff --git a/compositor/Cargo.toml b/compositor/Cargo.toml
 index ae16400..bf07036 100644
 --- a/compositor/Cargo.toml
 +++ b/compositor/Cargo.toml
-@@ -13,6 +13,8 @@ resolver = "3"
+@@ -13,6 +13,9 @@ resolver = "3"
  
  [features]
  default = ["xwayland"]
 +external-output = ["flutter"]
 +anland = ["external-output"]
++anland-runtime-v2 = []
  flutter = [
      "kms",
      "control",
@@ -4053,7 +4054,7 @@ index d498a58..1298558 100644
      if !state.secure_session_locked() {
          focus_exclusive_layer_for_keyboard_event(state);
      }
-@@ -1730,6 +1874,45 @@ fn process_input_event(
+@@ -1730,6 +1874,48 @@ fn process_input_event(
          return reset.any() || tablet_clients_changed;
      }
  
@@ -4094,8 +4095,11 @@ index d498a58..1298558 100644
 +    power_device: &str,
 +) -> bool
 +where
-+    B::Device: TouchDeviceInfo,
++    B::Device: TouchDeviceInfo + tablet::TabletOutputDevice,
 +{
++    if tablet::process_event(state, &event) {
++        return true;
++    }
      #[cfg(feature = "flutter")]
      if let InputEvent::Keyboard {
          event: key_event, ..
@@ -5437,3 +5441,256 @@ index 4d5f522..ace4801 100755
    package_dependencies="$(dpkg-deb --field "$package" Depends)"
    package_provides="$(dpkg-deb --field "$package" Provides 2>/dev/null || true)"
    payload_listing="$(dpkg-deb --fsys-tarfile "$package" | bsdtar -tf -)"
+
+diff --git a/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs b/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
+index 99b1395..3f1edf4 100644
+--- a/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
++++ b/compositor/src/bin/deniald/wayland_frontend/input/tablet.rs
+@@ -2,6 +2,9 @@
+-
++
+ use super::*;
+-
++
++#[cfg(feature = "anland")]
++use crate::anland_backend::seat_input::AnlandDevice;
++
+ use smithay::backend::input::{
+     ProximityState, TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent,
+     TabletToolTipEvent, TabletToolTipState,
+@@ -93,18 +96,97 @@ fn tablet_output_mapping(
+     })
+ }
+-
++
+-fn tablet_position<E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++pub(super) trait TabletOutputDevice: Device + Sized {
++    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++    where
++        B: InputBackend<Device = Self>,
++        E: AbsolutePositionEvent<B> + Event<B>;
++
++    fn device_added(_state: &mut RuntimeState, _device: &Self) -> bool {
++        false
++    }
++
++    fn device_removed(_state: &mut RuntimeState, _device: &Self) -> bool {
++        false
++    }
++
++    fn proximity_out(_frontend: &mut WaylandFrontend, _device: &Self) {}
++}
++
++impl TabletOutputDevice for LibinputDevice {
++    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++    where
++        B: InputBackend<Device = Self>,
++        E: AbsolutePositionEvent<B> + Event<B>,
++    {
++        let mapping = tablet_output_mapping(frontend, &event.device())?;
++        let position = output_bound_absolute_position::<B, E>(
++            event,
++            mapping.bounds,
++            mapping.transform,
++        );
++        Some(frontend.clamp_pointer(position))
++    }
++
++    fn proximity_out(frontend: &mut WaylandFrontend, device: &Self) {
++        frontend.tablet_output_mappings.remove(device.sysname());
++    }
++}
++
++#[cfg(feature = "anland")]
++impl TabletOutputDevice for AnlandDevice {
++    fn map_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
++    where
++        B: InputBackend<Device = Self>,
++        E: AbsolutePositionEvent<B> + Event<B>,
++    {
++        let position = super::output_bound_absolute_position::<B, E>(event, frontend.touch_bounds, frontend.touch_transform);
++        Some(frontend.clamp_pointer(position))
++    }
++
++    fn device_added(state: &mut RuntimeState, device: &Self) -> bool {
++        if !Device::has_capability(device, DeviceCapability::TabletTool) {
++            return false;
++        }
++        let (tablet_seat, display_handle) = {
++            let frontend = state.wayland.as_ref().expect("missing Wayland frontend");
++            (frontend.seat.tablet_seat(), frontend.display_handle.clone())
++        };
++        tablet_seat.add_wp_tablet(&display_handle, &TabletDescriptor::from(device));
++        true
++    }
++
++    fn device_removed(state: &mut RuntimeState, device: &Self) -> bool {
++        if !Device::has_capability(device, DeviceCapability::TabletTool) {
++            return false;
++        }
++        let tablet_seat = state
++            .wayland
++            .as_ref()
++            .expect("missing Wayland frontend")
++            .seat
++            .tablet_seat();
++        tablet_seat.remove_tablet(&TabletDescriptor::from(device));
++        if tablet_seat.count_tablets() == 0 {
++            tablet_seat.clear_tools();
++        }
++        true
++    }
++}
++
++fn tablet_position<B, E>(frontend: &mut WaylandFrontend, event: &E) -> Option<Point<f64, Logical>>
+ where
+-    E: AbsolutePositionEvent<LibinputInputBackend> + Event<LibinputInputBackend>,
++    B: InputBackend,
++    B::Device: TabletOutputDevice,
++    E: AbsolutePositionEvent<B> + Event<B>,
+ {
+-    let mapping = tablet_output_mapping(frontend, &event.device())?;
+-    let position = output_bound_absolute_position(event, mapping.bounds, mapping.transform);
+-    Some(frontend.clamp_pointer(position))
++    <B::Device as TabletOutputDevice>::map_position::<B, E>(frontend, event)
+ }
+-
++
+-fn tool_handle<E>(state: &mut RuntimeState, event: &E) -> TabletToolHandle<RuntimeState>
++fn tool_handle<B, E>(state: &mut RuntimeState, event: &E) -> TabletToolHandle<RuntimeState>
+ where
+-    E: TabletToolEvent<LibinputInputBackend>,
++    B: InputBackend,
++    E: TabletToolEvent<B>,
+ {
+     let (tablet_seat, display_handle) = {
+         let frontend = state.wayland.as_ref().expect("missing Wayland frontend");
+@@ -116,9 +198,10 @@ where
+         .unwrap_or_else(|| tablet_seat.add_wp_tool(state, &display_handle, &descriptor))
+ }
+-
++
+-fn axis_frame<E>(event: &E) -> AxisFrame
++fn axis_frame<B, E>(event: &E) -> AxisFrame
+ where
+-    E: TabletToolEvent<LibinputInputBackend>,
++    B: InputBackend,
++    E: TabletToolEvent<B>,
+ {
+     AxisFrame {
+         pressure: event
+@@ -193,15 +276,17 @@ struct RoutedToolMotion {
+ /// Move the tool to the event's position, entering proximity first when the
+ /// tool is not yet over a tablet. The caller adds its own events and ends the
+ /// tool frame.
+-fn route_tool_motion<E>(state: &mut RuntimeState, event: &E) -> Option<RoutedToolMotion>
++fn route_tool_motion<B, E>(state: &mut RuntimeState, event: &E) -> Option<RoutedToolMotion>
+ where
+-    E: TabletToolEvent<LibinputInputBackend>,
++    B: InputBackend,
++    B::Device: TabletOutputDevice,
++    E: TabletToolEvent<B>,
+ {
+     let position = {
+         let frontend = state.wayland.as_mut().expect("missing Wayland frontend");
+-        tablet_position(frontend, event)?
++        tablet_position::<B, E>(frontend, event)?
+     };
+-    let tool = tool_handle(state, event);
++    let tool = tool_handle::<B, E>(state, event);
+     let (focus, _route) = tablet_focus(state, position);
+     let serial = SERIAL_COUNTER.next_serial();
+     let time = event.time();
+@@ -220,13 +305,13 @@ where
+             tablet,
+             &ProximityInEvent {
+                 location: position,
+-                axis: Some(axis_frame(event)),
++                axis: Some(axis_frame::<B, E>(event)),
+                 serial,
+                 time,
+             },
+         );
+     } else {
+-        tool.axis(state, axis_frame(event));
++        tool.axis(state, axis_frame::<B, E>(event));
+         tool.motion(
+             state,
+             focus,
+@@ -302,10 +387,13 @@ pub(super) fn unregister_device(state: &mut RuntimeState, device: &LibinputDevic
+     true
+ }
+-
++
+-pub(super) fn process_event(
++pub(super) fn process_event<B: InputBackend>(
+     state: &mut RuntimeState,
+-    event: &InputEvent<LibinputInputBackend>,
+-) -> bool {
++    event: &InputEvent<B>,
++) -> bool
++where
++    B::Device: TabletOutputDevice,
++{
+     #[cfg(feature = "flutter")]
+     if state.secure_session_locked() {
+         let tool = match event {
+@@ -335,8 +423,18 @@ pub(super) fn process_event(
+     }
+-
++
+     match event {
++        InputEvent::DeviceAdded { device }
++            if Device::has_capability(device, DeviceCapability::TabletTool) =>
++        {
++            return <B::Device as TabletOutputDevice>::device_added(state, device);
++        }
++        InputEvent::DeviceRemoved { device }
++            if Device::has_capability(device, DeviceCapability::TabletTool) =>
++        {
++            return <B::Device as TabletOutputDevice>::device_removed(state, device);
++        }
+         InputEvent::TabletToolAxis { event, .. } => {
+-            if let Some(result) = route_tool_motion(state, event) {
++            if let Some(result) = route_tool_motion::<B, _>(state, event) {
+                 result.tool.frame(state, event.time());
+                 return true;
+             }
+@@ -344,7 +442,7 @@ pub(super) fn process_event(
+         }
+         InputEvent::TabletToolProximity { event, .. } => match event.state() {
+             ProximityState::In => {
+-                if let Some(result) = route_tool_motion(state, event) {
++                if let Some(result) = route_tool_motion::<B, _>(state, event) {
+                     result.tool.frame(state, event.time());
+                     return true;
+                 }
+@@ -353,9 +451,7 @@ pub(super) fn process_event(
+             ProximityState::Out => {
+                 let frontend = state.wayland.as_mut().expect("missing Wayland frontend");
+                 let tool = frontend.seat.tablet_seat().get_tool(&event.tool());
+-                frontend
+-                    .tablet_output_mappings
+-                    .remove(event.device().sysname());
++                <B::Device as TabletOutputDevice>::proximity_out(frontend, &event.device());
+                 if let Some(tool) = tool.filter(|tool| tool.current_tablet().is_some()) {
+                     let serial = SERIAL_COUNTER.next_serial();
+                     tool.proximity_out(
+@@ -371,7 +467,7 @@ pub(super) fn process_event(
+             }
+         },
+         InputEvent::TabletToolTip { event, .. } => {
+-            let Some(result) = route_tool_motion(state, event) else {
++            let Some(result) = route_tool_motion::<B, _>(state, event) else {
+                 return true;
+             };
+             let tool = result.tool;
+@@ -419,7 +515,7 @@ pub(super) fn process_event(
+             true
+         }
+         InputEvent::TabletToolButton { event, .. } => {
+-            let Some(result) = route_tool_motion(state, event) else {
++            let Some(result) = route_tool_motion::<B, _>(state, event) else {
+                 return true;
+             };
+             result.tool.button(

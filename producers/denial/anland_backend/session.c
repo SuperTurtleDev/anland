@@ -1,5 +1,6 @@
 #include "session.h"
 #include "anland_de_backend.h"
+#include "anland_tablet.h"
 #include "anland_audio.h"
 #include <stdio.h>
 #include <errno.h>
@@ -12,6 +13,7 @@
 struct ad_session {
     anland_de_backend *backend;
     uint64_t layer;
+    anland_tablet tablet;
     bool audio_started;
     int audio_fd; /* Borrowed identity only; the audio engine owns its duplicate. */
     uint64_t audio_generation;
@@ -81,6 +83,7 @@ int ad_daemon_alive(ad_session *s) { return s && anland_device_is_daemon_alive(d
 int ad_reconnect(ad_session *s)
 {
     if (!s) return -EINVAL;
+    memset(&s->tablet, 0, sizeof(s->tablet));
     /* Observe fallback before a handshake can recycle descriptor numbers. */
     sync_audio(s);
     int rc = anland_de_backend_reconnect(s->backend);
@@ -90,6 +93,7 @@ int ad_reconnect(ad_session *s)
 int ad_reopen(ad_session *s, const char *endpoint)
 {
     if (!s) return -EINVAL;
+    memset(&s->tablet, 0, sizeof(s->tablet));
     detach_audio(s);
     int rc = anland_de_backend_reopen(s->backend, endpoint);
     sync_audio(s);
@@ -98,6 +102,7 @@ int ad_reopen(ad_session *s, const char *endpoint)
 void ad_drop(ad_session *s)
 {
     if (!s) return;
+    memset(&s->tablet, 0, sizeof(s->tablet));
     /* Keep the PipeWire nodes alive; only the consumer socket is detached. */
     detach_audio(s);
     anland_de_backend_drop_session(s->backend);
@@ -246,39 +251,55 @@ int ad_poll_input(ad_session *s, ad_input *out)
     if (!out) return -EINVAL;
     *out = (ad_input){0};
     if (!s) return -EINVAL;
-    anland_device_input_t raw;
-    int rc = anland_device_poll_input(device(s), &raw, 0);
-    sync_audio(s);
-    if (rc <= 0) return status(rc);
-    out->type = raw.type;
-    switch (raw.type) {
-    case ANLAND_DEVICE_IN_KEY: out->action = raw.key.action; out->code = raw.key.keycode; break;
-    case ANLAND_DEVICE_IN_TOUCH:
-        out->action = raw.touch.action; out->pointer_id = raw.touch.pointer_id;
-        out->x = raw.touch.x; out->y = raw.touch.y; break;
-    case ANLAND_DEVICE_IN_PTR_MOTION:
-        out->x = raw.pointer_motion.x; out->y = raw.pointer_motion.y;
-        out->dx = raw.pointer_motion.dx; out->dy = raw.pointer_motion.dy; break;
-    case ANLAND_DEVICE_IN_PTR_BUTTON:
-        out->code = (int32_t)raw.pointer_button.button; out->action = raw.pointer_button.pressed; break;
-    case ANLAND_DEVICE_IN_PTR_AXIS:
-        out->code = (int32_t)raw.pointer_axis.axis; out->value = raw.pointer_axis.value;
-        out->discrete = raw.pointer_axis.discrete; break;
-    case ANLAND_DEVICE_IN_CLIPBOARD: out->size = raw.clipboard.size; break;
-    case ANLAND_DEVICE_IN_TEXT_INPUT: out->size = raw.text_input.size; break;
-    case ANLAND_DEVICE_IN_RESOURCE: case ANLAND_DEVICE_IN_RESOURCE_INVALID:
-        out->resource_type = raw.resource.type; out->fd_count = raw.resource.fdnum; break;
-    case ANLAND_DEVICE_IN_DISPLAY_REFRESH: out->size = raw.display.refresh_mhz; break;
-    case ANLAND_DEVICE_IN_ACTION:
-        out->code = (int32_t)raw.input_action.action; out->action = raw.input_action.value; break;
-    case ANLAND_DEVICE_IN_TOUCH_FRAME: break;
-    default: ad_drop(s); return -EPROTO;
+    for (unsigned i = 0; i < 64; ++i) {
+        anland_device_input_t raw;
+        int rc = anland_device_poll_input(device(s), &raw, 0);
+        sync_audio(s);
+        if (rc <= 0) return status(rc);
+        if (anland_tablet_is_event(raw.type)) {
+            anland_tablet_sample previous, sample;
+            rc = anland_tablet_feed(&s->tablet, &raw, &previous, &sample);
+            if (rc < 0) {
+                ad_drop(s);
+                return -EPROTO;
+            }
+            if (rc == 0) continue;
+            out->type = ANLAND_DEVICE_IN_TABLET_FRAME;
+            memcpy(&out->tablet_previous, &previous, sizeof(previous));
+            memcpy(&out->tablet_current, &sample, sizeof(sample));
+            return 1;
+        }
+        out->type = raw.type;
+        switch (raw.type) {
+        case ANLAND_DEVICE_IN_KEY: out->action = raw.key.action; out->code = raw.key.keycode; break;
+        case ANLAND_DEVICE_IN_TOUCH:
+            out->action = raw.touch.action; out->pointer_id = raw.touch.pointer_id;
+            out->x = raw.touch.x; out->y = raw.touch.y; break;
+        case ANLAND_DEVICE_IN_PTR_MOTION:
+            out->x = raw.pointer_motion.x; out->y = raw.pointer_motion.y;
+            out->dx = raw.pointer_motion.dx; out->dy = raw.pointer_motion.dy; break;
+        case ANLAND_DEVICE_IN_PTR_BUTTON:
+            out->code = (int32_t)raw.pointer_button.button; out->action = raw.pointer_button.pressed; break;
+        case ANLAND_DEVICE_IN_PTR_AXIS:
+            out->code = (int32_t)raw.pointer_axis.axis; out->value = raw.pointer_axis.value;
+            out->discrete = raw.pointer_axis.discrete; break;
+        case ANLAND_DEVICE_IN_CLIPBOARD: out->size = raw.clipboard.size; break;
+        case ANLAND_DEVICE_IN_TEXT_INPUT: out->size = raw.text_input.size; break;
+        case ANLAND_DEVICE_IN_RESOURCE: case ANLAND_DEVICE_IN_RESOURCE_INVALID:
+            out->resource_type = raw.resource.type; out->fd_count = raw.resource.fdnum; break;
+        case ANLAND_DEVICE_IN_DISPLAY_REFRESH: out->size = raw.display.refresh_mhz; break;
+        case ANLAND_DEVICE_IN_ACTION:
+            out->code = (int32_t)raw.input_action.action; out->action = raw.input_action.value; break;
+        case ANLAND_DEVICE_IN_TOUCH_FRAME: break;
+        default: ad_drop(s); return -EPROTO;
+        }
+        if ((raw.type == ANLAND_DEVICE_IN_CLIPBOARD || raw.type == ANLAND_DEVICE_IN_TEXT_INPUT) &&
+            out->size > ANLAND_DEVICE_MAX_PAYLOAD_SIZE) { ad_drop(s); return -EMSGSIZE; }
+        if ((raw.type == ANLAND_DEVICE_IN_RESOURCE || raw.type == ANLAND_DEVICE_IN_RESOURCE_INVALID) &&
+            out->fd_count > 64) { ad_drop(s); return -EMSGSIZE; }
+        return 1;
     }
-    if ((raw.type == ANLAND_DEVICE_IN_CLIPBOARD || raw.type == ANLAND_DEVICE_IN_TEXT_INPUT) &&
-        out->size > ANLAND_DEVICE_MAX_PAYLOAD_SIZE) { ad_drop(s); return -EMSGSIZE; }
-    if ((raw.type == ANLAND_DEVICE_IN_RESOURCE || raw.type == ANLAND_DEVICE_IN_RESOURCE_INVALID) &&
-        out->fd_count > 64) { ad_drop(s); return -EMSGSIZE; }
-    return 1;
+    return 0;
 }
 int ad_read_payload(ad_session *s, void *data, size_t size)
 {

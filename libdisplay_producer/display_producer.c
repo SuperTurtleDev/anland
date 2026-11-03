@@ -493,9 +493,9 @@ bool input_header_pending(const display_ctx *ctx)
 int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
 {
     uint8_t bytes[sizeof(struct data_msg) + sizeof(struct InputEvent)];
-    int rc=input_read(ctx, bytes, sizeof(bytes), 1, timeout_ms);
+    int rc = input_read(ctx, bytes, sizeof(bytes), 1, timeout_ms);
     if (rc <= 0) return rc;
-    struct data_msg hdr; memcpy(&hdr,bytes,sizeof(hdr));
+    struct data_msg hdr; memcpy(&hdr, bytes, sizeof(hdr));
     if (hdr.type != DATA_MSG_INPUT_EVENT || hdr.size != sizeof(*event)) {
         enter_fallback(ctx); return -1;
     }

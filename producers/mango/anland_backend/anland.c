@@ -84,6 +84,8 @@ static void announce_devices(struct anland_backend *b) {
     wl_signal_emit_mutable(&b->base.events.new_input,&b->keyboard.base);
     wl_signal_emit_mutable(&b->base.events.new_input,&b->pointer.base);
     wl_signal_emit_mutable(&b->base.events.new_input,&b->touch.base);
+    wl_signal_emit_mutable(&b->base.events.new_input,&b->tablet.base);
+    mango_private_replay_tablets(b);
 }
 static int reconnect(void *data) {
     struct anland_backend *b=data;
@@ -174,6 +176,7 @@ static void backend_destroy(struct wlr_backend *base) {
     wlr_keyboard_finish(&b->keyboard);
     wlr_pointer_finish(&b->pointer);
     wlr_touch_finish(&b->touch);
+    wlr_tablet_finish(&b->tablet);
     wlr_backend_finish(base);
     free(b->socket_path);
     free(b);
@@ -240,6 +243,7 @@ struct wlr_backend *mango_anland_backend_create(struct wl_event_loop *loop,const
 	wlr_keyboard_init(&b->keyboard,&mango_private_keyboard_impl,"Anland keyboard");
 	wlr_pointer_init(&b->pointer,&mango_private_pointer_impl,"Anland pointer");
 	wlr_touch_init(&b->touch,&mango_private_touch_impl,"Anland touch");
+    wlr_tablet_init(&b->tablet,&mango_private_tablet_impl,"Anland tablet");
     b->reconnect_source=wl_event_loop_add_timer(loop,reconnect,b);
     b->frame_timer=wl_event_loop_add_timer(loop,frame_tick,b);
     b->pump_timer=wl_event_loop_add_timer(loop,pump_tick,b);
@@ -262,6 +266,7 @@ fail_initialized:
 	wlr_keyboard_finish(&b->keyboard);
 	wlr_pointer_finish(&b->pointer);
 	wlr_touch_finish(&b->touch);
+    wlr_tablet_finish(&b->tablet);
 	wlr_backend_finish(&b->base);
 fail:
 	if(b->de) anland_de_backend_destroy(b->de);

@@ -13,6 +13,10 @@
 #include "core/inputbackend.h"
 #include "core/inputdevice.h"
 
+#include "libdisplay_producer/anland_tablet.h"
+
+#include <QHash>
+
 namespace KWin
 {
 
@@ -51,9 +55,16 @@ public:
     void touchUp(qint32 id);
     void touchFrame();
     void touchCancel();
+    void tabletFrame(const anland_tablet_sample &previous,
+                     const anland_tablet_sample &sample,
+                     const QPointF &position);
 
 private:
+    class TabletTool;
+    TabletTool *tabletTool(const anland_tablet_sample &sample);
+
     bool m_enabled = true;
+    QHash<quint32, TabletTool *> m_tabletTools;
 };
 
 class AnlandInputBackend : public InputBackend

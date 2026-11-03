@@ -30,6 +30,7 @@ extern "C" {
 
 #include "libdisplay_producer/anland_audio.h"
 #include "libdisplay_producer/anland_camera.h"
+#include "libdisplay_producer/anland_tablet.h"
 
 #include "wayland/pointerconstraints_v1.h"
 #include "wayland/surface.h"
@@ -167,6 +168,7 @@ private:
      *  drops). Called after servicing the transport in onBufferReady(). */
     void dispatchSceneEvents();
     void processInputEvent(const anland_device_input_t &ev);
+    void releaseTabletTools();
     QPointF mapInputToLogical(const QPointF &devicePoint) const;
     QPointF mapInputDeltaToLogical(const QPointF &deviceDelta) const;
     void onReconnectTimer();
@@ -232,6 +234,7 @@ private:
 #endif
     QVector<AnlandOutput *> m_outputs;
     std::unique_ptr<AnlandInputDevice> m_inputDevice;
+    anland_tablet m_tabletAssembler{};
 
     QSocketNotifier *m_inputNotifier = nullptr;
     QSocketNotifier *m_bufReadyNotifier = nullptr;

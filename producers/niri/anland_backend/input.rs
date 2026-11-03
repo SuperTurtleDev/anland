@@ -1,13 +1,16 @@
 //! Anland input backend: feeds smithay input events from the anland consumer.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
-use std::collections::BTreeSet;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisRelativeDirection, AxisSource, ButtonState, Device,
     DeviceCapability, Event, InputBackend, KeyState, KeyboardKeyEvent, Keycode, PointerAxisEvent,
-    PointerButtonEvent, PointerMotionAbsoluteEvent, PointerMotionEvent, TouchDownEvent, TouchEvent,
-    TouchFrameEvent, TouchMotionEvent, TouchSlot, TouchUpEvent,
+    PointerButtonEvent, PointerMotionAbsoluteEvent, PointerMotionEvent, ProximityState,
+    TabletToolAxisEvent, TabletToolButtonEvent, TabletToolCapabilities, TabletToolDescriptor,
+    TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
+    TabletToolType, TouchDownEvent, TouchEvent, TouchFrameEvent, TouchMotionEvent, TouchSlot,
+    TouchUpEvent,
 };
 use smithay::output::Output;
 
@@ -15,25 +18,45 @@ use super::ffi;
 use crate::input::backend_ext::NiriInputDevice;
 use crate::niri::State;
 
-/// A single virtual input device that aggregates keyboard, pointer and touch from
-/// the anland consumer.
+/// The consumer's general input device or one of its graphics-tablet devices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AnlandDevice;
+pub struct AnlandDevice {
+    tablet_id: Option<u32>,
+}
+
+impl AnlandDevice {
+    fn consumer() -> Self {
+        Self { tablet_id: None }
+    }
+
+    fn tablet(device_id: u32) -> Self {
+        Self {
+            tablet_id: Some(device_id),
+        }
+    }
+}
 
 impl Device for AnlandDevice {
     fn id(&self) -> String {
-        "anland".to_string()
+        self.tablet_id
+            .map_or_else(|| "anland".to_string(), |id| format!("anland-tablet-{id}"))
     }
 
     fn name(&self) -> String {
-        "anland consumer input".to_string()
+        self.tablet_id.map_or_else(
+            || "anland consumer input".to_string(),
+            |id| format!("Anland graphics tablet {id}"),
+        )
     }
 
     fn has_capability(&self, capability: DeviceCapability) -> bool {
-        matches!(
-            capability,
-            DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch
-        )
+        match self.tablet_id {
+            Some(_) => capability == DeviceCapability::TabletTool,
+            None => matches!(
+                capability,
+                DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch
+            ),
+        }
     }
 
     fn usb_id(&self) -> Option<(u32, u32)> {
@@ -87,7 +110,7 @@ impl Event<AnlandInputBackend> for AnlandEventBase {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -122,7 +145,7 @@ impl Event<AnlandInputBackend> for AnlandKeyboardKeyEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -154,7 +177,7 @@ impl Event<AnlandInputBackend> for AnlandPointerMotionEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -185,7 +208,7 @@ impl Event<AnlandInputBackend> for AnlandPointerMotionAbsoluteEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -222,7 +245,7 @@ impl Event<AnlandInputBackend> for AnlandPointerButtonEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -250,7 +273,7 @@ impl Event<AnlandInputBackend> for AnlandPointerAxisEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -290,7 +313,7 @@ impl Event<AnlandInputBackend> for AnlandTouchDownEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -332,7 +355,7 @@ impl Event<AnlandInputBackend> for AnlandTouchMotionEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -374,7 +397,7 @@ impl Event<AnlandInputBackend> for AnlandTouchUpEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
@@ -397,11 +420,202 @@ impl Event<AnlandInputBackend> for AnlandTouchFrameEvent {
     }
 
     fn device(&self) -> AnlandDevice {
-        AnlandDevice
+        AnlandDevice::consumer()
     }
 }
 
 impl TouchFrameEvent<AnlandInputBackend> for AnlandTouchFrameEvent {}
+
+#[derive(Debug, Clone, Copy)]
+enum AnlandTabletEventKind {
+    Axis,
+    Proximity(ProximityState),
+    Tip(TabletToolTipState),
+    Button { button: u32, state: ButtonState },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AnlandTabletAxes {
+    pressure: bool,
+    tilt_x: bool,
+    tilt_y: bool,
+    distance: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnlandTabletEvent {
+    previous: ffi::TabletSample,
+    current: ffi::TabletSample,
+    extent: (u32, u32),
+    kind: AnlandTabletEventKind,
+    axes: AnlandTabletAxes,
+    seat_button_count: u32,
+}
+
+impl Event<AnlandInputBackend> for AnlandTabletEvent {
+    fn time(&self) -> u64 {
+        u64::from(self.current.time_msec) * 1_000
+    }
+
+    fn device(&self) -> AnlandDevice {
+        AnlandDevice::tablet(self.current.device_id)
+    }
+}
+
+impl AbsolutePositionEvent<AnlandInputBackend> for AnlandTabletEvent {
+    fn x(&self) -> f64 {
+        f64::from(self.current.x)
+    }
+
+    fn y(&self) -> f64 {
+        f64::from(self.current.y)
+    }
+
+    fn x_transformed(&self, width: i32) -> f64 {
+        if self.extent.0 == 0 {
+            self.x()
+        } else {
+            self.x() * f64::from(width) / f64::from(self.extent.0)
+        }
+    }
+
+    fn y_transformed(&self, height: i32) -> f64 {
+        if self.extent.1 == 0 {
+            self.y()
+        } else {
+            self.y() * f64::from(height) / f64::from(self.extent.1)
+        }
+    }
+}
+
+impl TabletToolEvent<AnlandInputBackend> for AnlandTabletEvent {
+    fn tool(&self) -> TabletToolDescriptor {
+        let tool_type = match self.current.tool_type {
+            ffi::TABLET_TOOL_PEN => TabletToolType::Pen,
+            ffi::TABLET_TOOL_ERASER => TabletToolType::Eraser,
+            _ => TabletToolType::Unknown,
+        };
+        let mut capabilities = TabletToolCapabilities::empty();
+        if self.current.capabilities & ffi::TABLET_CAP_PRESSURE != 0 {
+            capabilities |= TabletToolCapabilities::PRESSURE;
+        }
+        if self.current.capabilities & ffi::TABLET_CAP_TILT != 0 {
+            capabilities |= TabletToolCapabilities::TILT;
+        }
+        if self.current.capabilities & ffi::TABLET_CAP_DISTANCE != 0 {
+            capabilities |= TabletToolCapabilities::DISTANCE;
+        }
+        TabletToolDescriptor {
+            tool_type,
+            hardware_serial: u64::from(self.current.tool_id),
+            hardware_id_wacom: 0,
+            capabilities,
+        }
+    }
+
+    fn delta_x(&self) -> f64 {
+        f64::from(self.current.x - self.previous.x)
+    }
+
+    fn delta_y(&self) -> f64 {
+        f64::from(self.current.y - self.previous.y)
+    }
+
+    fn distance(&self) -> f64 {
+        f64::from(self.current.distance)
+    }
+
+    fn distance_has_changed(&self) -> bool {
+        self.axes.distance
+    }
+
+    fn pressure(&self) -> f64 {
+        f64::from(self.current.pressure)
+    }
+
+    fn pressure_has_changed(&self) -> bool {
+        self.axes.pressure
+    }
+
+    fn slider_position(&self) -> f64 {
+        0.
+    }
+    fn slider_has_changed(&self) -> bool {
+        false
+    }
+
+    fn tilt_x(&self) -> f64 {
+        f64::from(self.current.tilt_x)
+    }
+
+    fn tilt_x_has_changed(&self) -> bool {
+        self.axes.tilt_x
+    }
+
+    fn tilt_y(&self) -> f64 {
+        f64::from(self.current.tilt_y)
+    }
+
+    fn tilt_y_has_changed(&self) -> bool {
+        self.axes.tilt_y
+    }
+
+    fn rotation(&self) -> f64 {
+        0.
+    }
+    fn rotation_has_changed(&self) -> bool {
+        false
+    }
+    fn wheel_delta(&self) -> f64 {
+        0.
+    }
+    fn wheel_delta_discrete(&self) -> i32 {
+        0
+    }
+    fn wheel_has_changed(&self) -> bool {
+        false
+    }
+}
+
+impl TabletToolAxisEvent<AnlandInputBackend> for AnlandTabletEvent {}
+
+impl TabletToolProximityEvent<AnlandInputBackend> for AnlandTabletEvent {
+    fn state(&self) -> ProximityState {
+        match self.kind {
+            AnlandTabletEventKind::Proximity(state) => state,
+            _ => unreachable!("non-proximity tablet event"),
+        }
+    }
+}
+
+impl TabletToolTipEvent<AnlandInputBackend> for AnlandTabletEvent {
+    fn tip_state(&self) -> TabletToolTipState {
+        match self.kind {
+            AnlandTabletEventKind::Tip(state) => state,
+            _ => unreachable!("non-tip tablet event"),
+        }
+    }
+}
+
+impl TabletToolButtonEvent<AnlandInputBackend> for AnlandTabletEvent {
+    fn button(&self) -> u32 {
+        match self.kind {
+            AnlandTabletEventKind::Button { button, .. } => button,
+            _ => unreachable!("non-button tablet event"),
+        }
+    }
+
+    fn seat_button_count(&self) -> u32 {
+        self.seat_button_count
+    }
+
+    fn button_state(&self) -> ButtonState {
+        match self.kind {
+            AnlandTabletEventKind::Button { state, .. } => state,
+            _ => unreachable!("non-button tablet event"),
+        }
+    }
+}
 
 /// The anland input backend. It never produces events on its own; events are pushed
 /// by `poll()` from the consumer.
@@ -418,6 +632,9 @@ pub struct AnlandInputBackend {
     pressed_keys: BTreeSet<i32>,
     pressed_buttons: BTreeSet<i32>,
     touch_slots: BTreeSet<i32>,
+    tablet_devices: BTreeSet<u32>,
+    tablet_tools: BTreeMap<u32, ffi::TabletSample>,
+    pending_events: VecDeque<smithay::backend::input::InputEvent<AnlandInputBackend>>,
 }
 
 impl Default for AnlandInputBackend {
@@ -430,13 +647,212 @@ impl Default for AnlandInputBackend {
             pressed_keys: BTreeSet::new(),
             pressed_buttons: BTreeSet::new(),
             touch_slots: BTreeSet::new(),
+            tablet_devices: BTreeSet::new(),
+            tablet_tools: BTreeMap::new(),
+            pending_events: VecDeque::new(),
         }
     }
 }
 
 impl AnlandInputBackend {
     pub fn new(native_w: u32, native_h: u32) -> Self {
-        Self { native_w, native_h, ..Self::default() }
+        Self {
+            native_w,
+            native_h,
+            ..Self::default()
+        }
+    }
+
+    pub fn pop_pending(&mut self) -> Option<smithay::backend::input::InputEvent<Self>> {
+        self.pending_events.pop_front()
+    }
+
+    /// Flush active tablet state before DeviceRemoved on consumer disconnect.
+    pub fn queue_tablet_releases(&mut self) {
+        let time_msec = crate::utils::get_monotonic_time().as_millis() as u32;
+        let tools = self.tablet_tools.values().copied().collect::<Vec<_>>();
+        for previous in tools {
+            if previous.flags & ffi::TABLET_FLAG_PROXIMITY == 0 {
+                continue;
+            }
+            let mut current = previous;
+            current.flags = ffi::TABLET_FLAG_CANCELED;
+            current.buttons = 0;
+            current.pressure = 0.;
+            current.time_msec = time_msec;
+            self.enqueue_tablet_frame(previous, current);
+        }
+        let devices = std::mem::take(&mut self.tablet_devices);
+        self.tablet_tools.clear();
+        for device_id in devices {
+            self.pending_events
+                .push_back(smithay::backend::input::InputEvent::DeviceRemoved {
+                    device: AnlandDevice::tablet(device_id),
+                });
+        }
+    }
+
+    fn enqueue_tablet_frame(
+        &mut self,
+        _assembler_previous: ffi::TabletSample,
+        current: ffi::TabletSample,
+    ) {
+        let previous = self
+            .tablet_tools
+            .get(&current.tool_id)
+            .copied()
+            .unwrap_or(ffi::TabletSample {
+                tool_id: current.tool_id,
+                tool_type: current.tool_type,
+                capabilities: current.capabilities,
+                device_id: current.device_id,
+                ..ffi::TabletSample::default()
+            });
+        let device_id = current.device_id;
+        if self.tablet_devices.insert(device_id) {
+            self.pending_events
+                .push_back(smithay::backend::input::InputEvent::DeviceAdded {
+                    device: AnlandDevice::tablet(device_id),
+                });
+        }
+
+        let was_in_proximity = previous.flags & ffi::TABLET_FLAG_PROXIMITY != 0;
+        let is_in_proximity = current.flags & ffi::TABLET_FLAG_PROXIMITY != 0;
+        let was_tip_down = previous.flags & ffi::TABLET_FLAG_TIP_DOWN != 0;
+        let is_tip_down = current.flags & ffi::TABLET_FLAG_TIP_DOWN != 0;
+        let axes_changed = Self::tablet_axes(previous, current, false);
+        let proximity_in = is_in_proximity && !was_in_proximity;
+
+        if proximity_in {
+            self.push_tablet_event(
+                previous,
+                current,
+                AnlandTabletEventKind::Proximity(ProximityState::In),
+                Self::tablet_axes(previous, current, true),
+                0,
+            );
+        } else if is_in_proximity
+            && axes_changed != AnlandTabletAxes::default()
+            && was_tip_down == is_tip_down
+        {
+            self.push_tablet_event(
+                previous,
+                current,
+                AnlandTabletEventKind::Axis,
+                axes_changed,
+                0,
+            );
+        }
+
+        if was_tip_down != is_tip_down {
+            let axes = if proximity_in {
+                AnlandTabletAxes::default()
+            } else {
+                axes_changed
+            };
+            self.push_tablet_event(
+                previous,
+                current,
+                AnlandTabletEventKind::Tip(if is_tip_down {
+                    TabletToolTipState::Down
+                } else {
+                    TabletToolTipState::Up
+                }),
+                axes,
+                0,
+            );
+        }
+
+        let previous_buttons = previous.buttons;
+        let current_buttons = if is_in_proximity { current.buttons } else { 0 };
+        let other_button_count = self
+            .tablet_tools
+            .iter()
+            .filter(|(tool_id, _)| **tool_id != current.tool_id)
+            .map(|(_, sample)| sample.buttons.count_ones())
+            .sum::<u32>();
+        let mut buttons_after = previous_buttons;
+        for (bit, button) in [
+            (ffi::TABLET_BUTTON_PRIMARY, 0x14b),
+            (ffi::TABLET_BUTTON_SECONDARY, 0x14c),
+        ] {
+            let was_pressed = previous_buttons & bit != 0;
+            let is_pressed = current_buttons & bit != 0;
+            if was_pressed != is_pressed {
+                if is_pressed {
+                    buttons_after |= bit;
+                } else {
+                    buttons_after &= !bit;
+                }
+                self.push_tablet_event(
+                    previous,
+                    current,
+                    AnlandTabletEventKind::Button {
+                        button,
+                        state: if is_pressed {
+                            ButtonState::Pressed
+                        } else {
+                            ButtonState::Released
+                        },
+                    },
+                    AnlandTabletAxes::default(),
+                    other_button_count + buttons_after.count_ones(),
+                );
+            }
+        }
+
+        if was_in_proximity && !is_in_proximity {
+            self.push_tablet_event(
+                previous,
+                current,
+                AnlandTabletEventKind::Proximity(ProximityState::Out),
+                AnlandTabletAxes::default(),
+                0,
+            );
+        }
+        self.tablet_tools.insert(current.tool_id, current);
+    }
+
+    fn tablet_axes(
+        previous: ffi::TabletSample,
+        current: ffi::TabletSample,
+        force: bool,
+    ) -> AnlandTabletAxes {
+        AnlandTabletAxes {
+            pressure: current.capabilities & ffi::TABLET_CAP_PRESSURE != 0
+                && (force || previous.pressure != current.pressure),
+            tilt_x: current.capabilities & ffi::TABLET_CAP_TILT != 0
+                && (force || previous.tilt_x != current.tilt_x),
+            tilt_y: current.capabilities & ffi::TABLET_CAP_TILT != 0
+                && (force || previous.tilt_y != current.tilt_y),
+            distance: current.capabilities & ffi::TABLET_CAP_DISTANCE != 0
+                && (force || previous.distance != current.distance),
+        }
+    }
+
+    fn push_tablet_event(
+        &mut self,
+        previous: ffi::TabletSample,
+        current: ffi::TabletSample,
+        kind: AnlandTabletEventKind,
+        axes: AnlandTabletAxes,
+        seat_button_count: u32,
+    ) {
+        let event = AnlandTabletEvent {
+            previous,
+            current,
+            extent: (self.native_w, self.native_h),
+            kind,
+            axes,
+            seat_button_count,
+        };
+        use smithay::backend::input::InputEvent as I;
+        self.pending_events.push_back(match kind {
+            AnlandTabletEventKind::Axis => I::TabletToolAxis { event },
+            AnlandTabletEventKind::Proximity(_) => I::TabletToolProximity { event },
+            AnlandTabletEventKind::Tip(_) => I::TabletToolTip { event },
+            AnlandTabletEventKind::Button { .. } => I::TabletToolButton { event },
+        });
     }
 
     /// Replay these through State::process_input_event before new-session input,
@@ -445,13 +861,17 @@ impl AnlandInputBackend {
         let mut events = Vec::new();
         for code in std::mem::take(&mut self.pressed_keys) {
             events.push(ffi::InputEvent {
-                type_: ffi::INPUT_TYPE_KEY, code, action: ffi::INPUT_ACTION_UP,
+                type_: ffi::INPUT_TYPE_KEY,
+                code,
+                action: ffi::INPUT_ACTION_UP,
                 ..Default::default()
             });
         }
         for code in std::mem::take(&mut self.pressed_buttons) {
             events.push(ffi::InputEvent {
-                type_: ffi::INPUT_TYPE_POINTER_BUTTON, code, action: 0,
+                type_: ffi::INPUT_TYPE_POINTER_BUTTON,
+                code,
+                action: 0,
                 ..Default::default()
             });
         }
@@ -459,13 +879,16 @@ impl AnlandInputBackend {
         let had_touches = !touches.is_empty();
         for pointer_id in touches {
             events.push(ffi::InputEvent {
-                type_: ffi::INPUT_TYPE_TOUCH, pointer_id, action: ffi::INPUT_ACTION_UP,
+                type_: ffi::INPUT_TYPE_TOUCH,
+                pointer_id,
+                action: ffi::INPUT_ACTION_UP,
                 ..Default::default()
             });
         }
         if had_touches {
             events.push(ffi::InputEvent {
-                type_: ffi::INPUT_TYPE_TOUCH_FRAME, ..Default::default()
+                type_: ffi::INPUT_TYPE_TOUCH_FRAME,
+                ..Default::default()
             });
         }
         events
@@ -503,10 +926,10 @@ impl InputBackend for AnlandInputBackend {
     type TouchMotionEvent = AnlandTouchMotionEvent;
     type TouchCancelEvent = smithay::backend::input::UnusedEvent;
     type TouchFrameEvent = AnlandTouchFrameEvent;
-    type TabletToolAxisEvent = smithay::backend::input::UnusedEvent;
-    type TabletToolProximityEvent = smithay::backend::input::UnusedEvent;
-    type TabletToolTipEvent = smithay::backend::input::UnusedEvent;
-    type TabletToolButtonEvent = smithay::backend::input::UnusedEvent;
+    type TabletToolAxisEvent = AnlandTabletEvent;
+    type TabletToolProximityEvent = AnlandTabletEvent;
+    type TabletToolTipEvent = AnlandTabletEvent;
+    type TabletToolButtonEvent = AnlandTabletEvent;
     type SwitchToggleEvent = smithay::backend::input::UnusedEvent;
     type SpecialEvent = ();
 }
@@ -517,6 +940,11 @@ pub fn translate(
     raw: &ffi::InputEvent,
 ) -> Option<smithay::backend::input::InputEvent<AnlandInputBackend>> {
     use smithay::backend::input::{ButtonState, InputEvent as I, KeyState};
+
+    if raw.type_ == ffi::INPUT_TYPE_TABLET_FRAME {
+        backend.enqueue_tablet_frame(raw.tablet_previous, raw.tablet_current);
+        return backend.pop_pending();
+    }
 
     match raw.type_ {
         ffi::INPUT_TYPE_KEY => {
@@ -621,5 +1049,165 @@ pub fn translate(
             event: AnlandTouchFrameEvent { base: base(0., 0.) },
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tablet_tests {
+    use super::*;
+    use smithay::backend::input::{
+        AbsolutePositionEvent, Device, DeviceCapability, Event, InputEvent, TabletToolButtonEvent,
+        TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
+    };
+
+    fn active_pen() -> ffi::TabletSample {
+        ffi::TabletSample {
+            tool_id: 17,
+            tool_type: ffi::TABLET_TOOL_PEN,
+            capabilities: ffi::TABLET_CAP_PRESSURE
+                | ffi::TABLET_CAP_TILT
+                | ffi::TABLET_CAP_DISTANCE,
+            device_id: 4,
+            flags: ffi::TABLET_FLAG_PROXIMITY | ffi::TABLET_FLAG_TIP_DOWN,
+            buttons: ffi::TABLET_BUTTON_PRIMARY | ffi::TABLET_BUTTON_SECONDARY,
+            time_msec: 1234,
+            x: 500.,
+            y: 250.,
+            pressure: 0.6,
+            tilt_x: -30.,
+            tilt_y: 45.,
+            distance: 0.25,
+        }
+    }
+
+    #[test]
+    fn tablet_frame_registers_native_tool_axes_and_button_transitions() {
+        let mut backend = AnlandInputBackend::new(1000, 500);
+        let sample = active_pen();
+        backend.enqueue_tablet_frame(ffi::TabletSample::default(), sample);
+        let events = std::iter::from_fn(|| backend.pop_pending()).collect::<Vec<_>>();
+
+        assert!(
+            matches!(events.first(), Some(InputEvent::DeviceAdded { device })
+            if device.id() == "anland-tablet-4" && device.has_capability(DeviceCapability::TabletTool))
+        );
+        assert!(
+            matches!(events.get(1), Some(InputEvent::TabletToolProximity { event })
+            if event.state() == ProximityState::In
+                && event.tool().tool_type == TabletToolType::Pen
+                && event.tool().hardware_serial == 17
+                && event.time() == 1_234_000
+                && event.pressure_has_changed()
+                && (event.pressure() - 0.6).abs() < 1e-6
+                && event.tilt_x() == -30.0
+                && event.tilt_y() == 45.0
+                && (event.distance() - 0.25).abs() < 1e-6
+                && event.x_transformed(2000) == 1000.0)
+        );
+        assert!(
+            matches!(events.get(2), Some(InputEvent::TabletToolTip { event })
+            if event.tip_state() == TabletToolTipState::Down)
+        );
+        let buttons = events
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::TabletToolButton { event } => {
+                    Some((event.button(), event.button_state()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            buttons,
+            vec![(0x14b, ButtonState::Pressed), (0x14c, ButtonState::Pressed),]
+        );
+        assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn first_queued_tool_ignores_assembler_previous_active_state() {
+        let mut backend = AnlandInputBackend::new(1000, 500);
+        let sample = active_pen();
+        // A bootstrap refresh can update the C assembler without forwarding
+        // its frame, so Rust has not registered this active tool yet.
+        backend.enqueue_tablet_frame(sample, sample);
+        let events = std::iter::from_fn(|| backend.pop_pending()).collect::<Vec<_>>();
+
+        assert!(matches!(events.first(), Some(InputEvent::DeviceAdded { .. })));
+        assert!(matches!(events.get(1), Some(InputEvent::TabletToolProximity { event })
+            if event.state() == ProximityState::In));
+        assert!(matches!(events.get(2), Some(InputEvent::TabletToolTip { event })
+            if event.tip_state() == TabletToolTipState::Down));
+        assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn eraser_identity_and_tool_serial_survive_native_event_conversion() {
+        let mut backend = AnlandInputBackend::new(1000, 500);
+        let mut sample = active_pen();
+        sample.tool_id = 18;
+        sample.tool_type = ffi::TABLET_TOOL_ERASER;
+        sample.flags = ffi::TABLET_FLAG_PROXIMITY;
+        sample.buttons = 0;
+        backend.enqueue_tablet_frame(ffi::TabletSample::default(), sample);
+        let events = std::iter::from_fn(|| backend.pop_pending()).collect::<Vec<_>>();
+        assert!(
+            matches!(events.get(1), Some(InputEvent::TabletToolProximity { event })
+            if event.tool().tool_type == TabletToolType::Eraser
+                && event.tool().hardware_serial == 18)
+        );
+    }
+
+    #[test]
+    fn disconnect_after_device_added_preserves_queued_frame_before_releases() {
+        let mut backend = AnlandInputBackend::new(1000, 500);
+        let sample = active_pen();
+        backend.enqueue_tablet_frame(ffi::TabletSample::default(), sample);
+        assert!(
+            matches!(backend.pop_pending(), Some(InputEvent::DeviceAdded { device })
+            if device.id() == "anland-tablet-4")
+        );
+
+        backend.queue_tablet_releases();
+        let events = std::iter::from_fn(|| backend.pop_pending()).collect::<Vec<_>>();
+        assert!(
+            matches!(events.first(), Some(InputEvent::TabletToolProximity { event })
+            if event.state() == ProximityState::In)
+        );
+        assert!(
+            matches!(events.get(1), Some(InputEvent::TabletToolTip { event })
+            if event.tip_state() == TabletToolTipState::Down)
+        );
+        assert!(
+            matches!(events.get(4), Some(InputEvent::TabletToolTip { event })
+            if event.tip_state() == TabletToolTipState::Up)
+        );
+        let buttons = events
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::TabletToolButton { event } => {
+                    Some((event.button(), event.button_state()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            buttons,
+            vec![
+                (0x14b, ButtonState::Pressed),
+                (0x14c, ButtonState::Pressed),
+                (0x14b, ButtonState::Released),
+                (0x14c, ButtonState::Released),
+            ]
+        );
+        assert!(
+            matches!(events.get(7), Some(InputEvent::TabletToolProximity { event })
+            if event.state() == ProximityState::Out)
+        );
+        assert!(
+            matches!(events.last(), Some(InputEvent::DeviceRemoved { device })
+            if device.id() == "anland-tablet-4")
+        );
+        assert_eq!(events.len(), 9);
     }
 }

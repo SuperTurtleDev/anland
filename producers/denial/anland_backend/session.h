@@ -22,10 +22,16 @@ typedef struct ad_event {
     uint32_t type, reason, index, count, width, height, refresh_mhz;
     int32_t release_fd; /* owned by receiver, -1 if absent */
 } ad_event;
+typedef struct ad_tablet_sample {
+    uint32_t tool_id, tool_type, capabilities, device_id;
+    uint32_t flags, buttons, time_msec;
+    float x, y, pressure, tilt_x, tilt_y, distance;
+} ad_tablet_sample;
 typedef struct ad_input {
     uint32_t type, size, resource_type, fd_count;
     int32_t action, code, pointer_id, discrete;
     float x, y, dx, dy, value;
+    ad_tablet_sample tablet_previous, tablet_current;
 } ad_input;
 
 ad_session *ad_open(const char *endpoint);

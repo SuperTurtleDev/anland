@@ -171,6 +171,27 @@ struct OutputEvent{
 | `INPUT_TYPE_DISPLAY_REFRESH` | 7 | — | ✅ | ✅ | `display { refresh_mhz }` | 否 |
 | `INPUT_TYPE_CLIPBOARD` | 8 | — | — | **✅ V3 新增** | `clipboard { size }` + variable‑length data | **是** |
 
+#### 原生触控笔输入
+
+Android 消费端通过四类固定大小的事件传递笔与橡皮擦输入，定义见 `common/protocol.h`：
+
+| 类型 | 数值 | 字段 |
+|------|:----:|------|
+| `INPUT_TYPE_TABLET_TOOL` | 13 | `tool_id, tool_type, capabilities, device_id` |
+| `INPUT_TYPE_TABLET_POSITION` | 14 | `tool_id, x, y, pressure` |
+| `INPUT_TYPE_TABLET_TILT` | 15 | `tool_id, tilt_x, tilt_y, distance` |
+| `INPUT_TYPE_TABLET_FRAME` | 16 | `tool_id, flags, buttons, time_msec` |
+
+`TOOL` 声明稳定的工具身份和轴能力；`POSITION` 与 `TILT` 暂存采样数据，
+`FRAME` 连同接近、落笔和侧键状态一起提交。坐标单位为缓冲区像素，压感和距离归一化到
+0～1，双轴倾角单位为度。侧键保留 `BTN_STYLUS` / `BTN_STYLUS2` 语义。
+取消或断连时先释放笔尖和侧键，再退出接近状态。组帧器每个会话支持 16 个工具身份，
+并拒绝格式或数值不合法的采样。
+
+需要同时更新 APK 和桌面后端。`InputEvent` 仍为 20 字节，触控笔没有尾随负载或新增
+连接通道，因此已有 daemon 和 Magisk 模块无需更新。旧后端不能通过已移除的鼠标、
+侧键右键和悬停滚动映射接收笔输入。
+
 #### 输出事件类型
 
 | 类型 | Value | V2 | V3 | 负载 | 变长? |

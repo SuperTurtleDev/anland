@@ -55,6 +55,7 @@ bool CAnlandBackend::start() {
     m_allocator = makeShared<CAnlandAllocator>(self);
     m_backend->primaryAllocator = m_allocator;
     m_pointer = makeShared<CAnlandPointer>(); m_keyboard = makeShared<CAnlandKeyboard>(); m_touch = makeShared<CAnlandTouch>();
+    m_tablet = makeShared<CAnlandTablet>();
     // Start engines once; borrowed resource fd detachment happens before transport release.
     const int audioResult = anland_audio_start();
     const int cameraResult = anland_camera_start();
@@ -80,6 +81,7 @@ void CAnlandBackend::onReady() {
         backend->events.newPointer.emit(owner->m_pointer);
         backend->events.newKeyboard.emit(owner->m_keyboard);
         backend->events.newTouch.emit(owner->m_touch);
+        backend->events.newTablet.emit(owner->m_tablet);
         if (owner->m_output) backend->events.newOutput.emit(owner->m_output);
         owner->service();
     });

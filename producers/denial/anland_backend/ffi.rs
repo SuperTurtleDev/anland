@@ -1,5 +1,16 @@
 //! Narrow C bridge ABI. No private public-library or Smithay layouts cross it.
 use std::ffi::{c_char, c_void};
+pub const INPUT_TYPE_TABLET_FRAME: u32 = 16;
+pub const TABLET_TOOL_PEN: u32 = 1;
+pub const TABLET_TOOL_ERASER: u32 = 2;
+pub const TABLET_CAP_PRESSURE: u32 = 1;
+pub const TABLET_CAP_TILT: u32 = 2;
+pub const TABLET_CAP_DISTANCE: u32 = 4;
+pub const TABLET_FLAG_PROXIMITY: u32 = 1;
+pub const TABLET_FLAG_TIP_DOWN: u32 = 2;
+pub const TABLET_FLAG_CANCELED: u32 = 4;
+pub const TABLET_BUTTON_PRIMARY: u32 = 1;
+pub const TABLET_BUTTON_SECONDARY: u32 = 2;
 #[repr(C)]
 pub struct Session {
     _opaque: [u8; 0],
@@ -81,6 +92,25 @@ pub struct Input {
     pub dx: f32,
     pub dy: f32,
     pub value: f32,
+    pub tablet_previous: TabletSample,
+    pub tablet_current: TabletSample,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TabletSample {
+    pub tool_id: u32,
+    pub tool_type: u32,
+    pub capabilities: u32,
+    pub device_id: u32,
+    pub flags: u32,
+    pub buttons: u32,
+    pub time_msec: u32,
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
+    pub tilt_x: f32,
+    pub tilt_y: f32,
+    pub distance: f32,
 }
 #[link(name = "anland_denial_bridge")]
 unsafe extern "C" {

@@ -115,12 +115,21 @@ diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
 diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
 --- a/src/scene/surfaceitem.cpp
 +++ b/src/scene/surfaceitem.cpp
-@@ -135,2 +135,8 @@ void SurfaceItem::addDamage(const Region &region)
+@@ -140,5 +140,17 @@ void SurfaceItem::addDamage(const Region &region)
+     }
      m_lastDamage = now;
 +    // The newest mailbox buffer is installed independently through
 +    // bufferChanged, so already pending damage needs no second repaint signal.
-+    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
++    bool damageAlreadyPending = !region.isEmpty() && !m_damage.empty();
++    for (const auto &[device, damage] : m_damage) {
++        if (!damage.contains(region.boundingRect())) {
++            damageAlreadyPending = false;
++            break;
++        }
++    }
+     for (auto &[device, damage] : m_damage) {
+         damage += region;
+     }
 +    if (damageAlreadyPending) {
 +        return;
 +    }
-     m_damage += region;

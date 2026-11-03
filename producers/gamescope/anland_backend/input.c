@@ -4,11 +4,17 @@
 #include <string.h>
 #include <unistd.h>
 
-void anland_gamescope_input_reset(anland_gamescope_input *input)
+static void clear_pending(anland_gamescope_input *input)
 {
     free(input->payload);
     input->payload = NULL;
     input->pending_type = input->pending_size = input->pending_service = 0;
+}
+
+void anland_gamescope_input_reset(anland_gamescope_input *input)
+{
+    memset(&input->tablet_state, 0, sizeof(input->tablet_state));
+    clear_pending(input);
 }
 
 static int consume_pending(anland_gamescope_input *input, anland_device *device)
@@ -34,7 +40,7 @@ static int consume_pending(anland_gamescope_input *input, anland_device *device)
         }
     }
     if (rc != 0)
-        anland_gamescope_input_reset(input);
+        clear_pending(input);
     return rc;
 }
 
@@ -76,6 +82,16 @@ int anland_gamescope_input_pump(anland_gamescope_input *input, anland_device *de
             continue;
         }
         anland_gamescope_input_event event = {0};
+        if (anland_tablet_is_event(raw.type)) {
+            anland_tablet_sample previous;
+            int status = anland_tablet_feed(&input->tablet_state, &raw, &previous, &event.tablet);
+            if (status < 0) return -1;
+            if (!status) continue;
+            event.kind = AG_TABLET;
+            sink(userdata, &event);
+            ++emitted;
+            continue;
+        }
         switch (raw.type) {
         case ANLAND_DEVICE_IN_KEY:
             if (raw.key.keycode < 0 || raw.key.keycode > 767 ||

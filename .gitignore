@@ -1,6 +1,7 @@
 # ---- Build outputs ----
 build/
 build-*/
+build_*/
 cmake-build-*/
 *.o
 *.a
