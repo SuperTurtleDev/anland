@@ -63,5 +63,7 @@ int anland_niri_read_fds(anland_niri_bridge *bridge, int *fds, int max_fds,
                          int *count, int timeout_ms);
 int anland_niri_send_clipboard(anland_niri_bridge *bridge, const void *buf, size_t size);
 int anland_niri_request_resources(anland_niri_bridge *bridge, uint32_t service);
+int anland_niri_set_consumer_var(anland_niri_bridge *bridge, uint32_t var, uint32_t value);
+int anland_niri_scheduling(anland_niri_bridge *bridge, int32_t pid, uint8_t flags);
 int anland_niri_audio_fd(anland_niri_bridge *bridge);
 #endif

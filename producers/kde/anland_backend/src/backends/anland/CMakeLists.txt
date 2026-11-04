@@ -35,6 +35,7 @@ target_sources(kwin PRIVATE
     # matches what a future window-level backend will expose.
     libdisplay_producer/anland_scene.c
     libdisplay_producer/anland_scene_legacy.c
+    libdisplay_producer/anland_pacing.c
     libdisplay_producer/anland_present.c
     libdisplay_producer/anland_buffer_registry.c
     libdisplay_producer/anland_window_map.c

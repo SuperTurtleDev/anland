@@ -256,6 +256,14 @@ int anland_niri_request_resources(anland_niri_bridge *b, uint32_t service)
 {
     return device(b) ? anland_device_request_resources(device(b), service, NULL) : -1;
 }
+int anland_niri_set_consumer_var(anland_niri_bridge *b, uint32_t var, uint32_t value)
+{
+    return device(b) ? anland_device_set_consumer_var(device(b), var, value) : -1;
+}
+int anland_niri_scheduling(anland_niri_bridge *b, int32_t pid, uint8_t flags)
+{
+    return device(b) ? anland_device_scheduling(device(b), (pid_t)pid, flags) : -1;
+}
 int anland_niri_audio_fd(anland_niri_bridge *b)
 {
     return device(b) ? anland_device_audio_fd(device(b)) : -1;

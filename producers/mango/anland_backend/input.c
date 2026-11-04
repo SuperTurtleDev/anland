@@ -89,6 +89,8 @@ void mango_private_clear_input_payload(struct anland_backend *backend) {
 	backend->input_fds_pending = false;
 	backend->input_fd_count = 0;
 	backend->input_payload_type = 0;
+	backend->input_resource_type = 0;
+	backend->input_resource_invalid = false;
 }
 
 static bool track_input_id(uint32_t *ids, uint32_t *count, uint32_t id, bool down) {
@@ -101,6 +103,71 @@ static bool track_input_id(uint32_t *ids, uint32_t *count, uint32_t id, bool dow
     if (*count == INPUT_PRESSED_MAX) return false;
     ids[(*count)++] = id;
     return true;
+}
+
+static pid_t focused_client_pid(void) {
+	struct wlr_surface *surface = server.seat ?
+		server.seat->keyboard_state.focused_surface : NULL;
+	pid_t pid = 0;
+	uid_t uid = 0;
+	gid_t gid = 0;
+	if (surface && surface->resource) {
+		struct wl_client *client = wl_resource_get_client(surface->resource);
+		if (client)
+			wl_client_get_credentials(client, &pid, &uid, &gid);
+	}
+	return pid > 0 ? pid : getpid();
+}
+
+void mango_private_sync_scheduling(struct anland_backend *backend, bool force) {
+	if (!backend || !backend->device) return;
+	pid_t wanted = focused_client_pid();
+	if (!force && wanted == backend->active_scheduling_pid) return;
+	if (!force && !backend->session_lost &&
+			anland_device_is_connected(backend->device) &&
+			backend->active_scheduling_pid > 0) {
+		if (anland_device_scheduling(backend->device,
+				backend->active_scheduling_pid,
+				ANLAND_DEVICE_SCHED_FLAG_SETTREE) != 0) {
+			wlr_log(WLR_ERROR, "anland: failed to restore previous scheduling target");
+			return;
+		}
+	}
+	if (!backend->session_lost && anland_device_is_connected(backend->device) &&
+			anland_device_scheduling(backend->device, wanted,
+			ANLAND_DEVICE_SCHED_FLAG_SETTREE | ANLAND_DEVICE_SCHED_FLAG_ON) != 0) {
+		backend->active_scheduling_pid = 0;
+		wlr_log(WLR_ERROR, "anland: failed to promote focused process");
+		return;
+	}
+	if (!backend->session_lost && anland_device_is_connected(backend->device))
+		backend->active_scheduling_pid = wanted;
+}
+
+void mango_private_sync_consumer_var(struct anland_backend *backend, bool force) {
+	if (!backend || !backend->device || backend->session_lost ||
+			!anland_device_is_connected(backend->device)) {
+		if (backend) backend->capture_mouse_known = false;
+		return;
+	}
+	bool capture = server.active_constraint != NULL;
+	if (!force && backend->capture_mouse_known &&
+			backend->capture_mouse_sent == capture) return;
+	if (anland_device_set_consumer_var(backend->device,
+			ANLAND_DEVICE_VAR_CAPTURE_MOUSE, capture ? 1 : 0) == 0) {
+		backend->capture_mouse_sent = capture;
+		backend->capture_mouse_known = true;
+	} else {
+		backend->capture_mouse_known = false;
+		wlr_log(WLR_ERROR, "anland: failed to update pointer capture state");
+	}
+}
+
+void mango_private_handle_focus_change(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct anland_backend *backend = wl_container_of(listener, backend, focus_change);
+	mango_private_sync_scheduling(backend, false);
+	mango_private_sync_consumer_var(backend, false);
 }
 
 void mango_private_replay_tablets(struct anland_backend *b) {
@@ -175,16 +242,27 @@ static bool drain_input_payload(struct anland_backend *backend) {
 	return true;
 }
 
-/* Mango does not expose camera resources yet. Consume and close the ancillary
- * message instead of accidentally decoding it as the next input header. */
+/* Consume every ancillary message, including invalidated/unsupported resources,
+ * before polling the next input header. The camera engine adopts valid fds. */
 static bool drain_input_fds(struct anland_backend *backend) {
 	int fds[64], count = 0;
 	int rc = anland_device_read_fds(backend->device, fds, 64, &count, 0);
 	if (rc <= 0) return false;
-	for (int i = 0; i < count; ++i) close(fds[i]);
 	bool valid = (uint32_t)count == backend->input_fd_count;
+	uint32_t resource_type = backend->input_resource_type;
+	bool invalid = backend->input_resource_invalid;
 	backend->input_fds_pending = false;
 	backend->input_fd_count = 0;
+	backend->input_resource_type = 0;
+	backend->input_resource_invalid = false;
+	if (valid && !invalid && resource_type == ANLAND_DEVICE_SERVICE_CAMERA &&
+			backend->camera_started && count >= 2) {
+		anland_camera_set_resources(fds[0], &fds[1], count - 1);
+	} else {
+		for (int i = 0; i < count; ++i) close(fds[i]);
+		if (valid && resource_type == ANLAND_DEVICE_SERVICE_CAMERA)
+			anland_camera_clear();
+	}
 	if (!valid) mango_private_drop_session(backend);
 	return valid;
 }
@@ -283,9 +361,17 @@ int mango_private_handle_input(int fd, uint32_t mask, void *data) {
 			break;
 		}
 		case ANLAND_DEVICE_IN_RESOURCE:
+		case ANLAND_DEVICE_IN_RESOURCE_INVALID:
 			if (ev.resource.fdnum > 64) { mango_private_drop_session(b); return 0; }
+			if (ev.resource.fdnum == 0) {
+				if (ev.resource.type == ANLAND_DEVICE_SERVICE_CAMERA)
+					anland_camera_clear();
+				break;
+			}
 			b->input_fds_pending = true;
 			b->input_fd_count = ev.resource.fdnum;
+			b->input_resource_type = ev.resource.type;
+			b->input_resource_invalid = ev.type == ANLAND_DEVICE_IN_RESOURCE_INVALID;
 			if (!drain_input_fds(b)) return 0;
 			break;
 		default: break;

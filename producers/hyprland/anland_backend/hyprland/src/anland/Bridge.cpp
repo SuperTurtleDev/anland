@@ -4,6 +4,8 @@
 #include <drm_fourcc.h>
 #include <aquamarine/output/Output.hpp>
 
+static WP<Aquamarine::CAnlandBackend> schedulingBackend;
+
 void Anland::bind(SP<Aquamarine::CBackend> aq) {
     for (const auto& impl : aq->getImplementations()) {
         if (impl->type() != Aquamarine::AQ_BACKEND_ANLAND) continue;
@@ -14,9 +16,15 @@ void Anland::bind(SP<Aquamarine::CBackend> aq) {
         owner->onInputReset = cancelTextInput;
         setPointerCaptureBackend(owner);
         owner->queryMouseCapture = pointerCaptureRequested;
+        schedulingBackend = owner;
         owner->onClipboardFromConsumer = clipboardFromConsumer;
         owner->onTextFromConsumer = textFromConsumer;
     }
+}
+
+void Anland::reportActiveClient(pid_t pid) {
+    if (auto owner = schedulingBackend.lock())
+        owner->updateActiveScheduling(pid);
 }
 
 void Anland::renderImportFailed(SP<Aquamarine::IOutput> output, SP<Aquamarine::IBuffer> buffer) {

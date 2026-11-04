@@ -6,6 +6,7 @@
 #include <functional>
 #include <set>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 struct anland_de_backend;
@@ -48,6 +49,8 @@ namespace Aquamarine {
         bool sendClipboardToConsumer(const std::string& text);
         void updateMouseCapture(bool active);
         bool (*queryMouseCapture)() = nullptr;
+        void updateActiveScheduling(pid_t pid);
+        void resendScheduling();
         // Called on AQ's dispatch thread. Ignore failures belonging to old images.
         // Transport teardown is deferred to service(), never reentered from rendering.
         bool notifyRenderImportFailure(Hyprutils::Memory::CSharedPointer<IBuffer> buffer);
@@ -83,6 +86,7 @@ namespace Aquamarine {
         int m_renderFD = -1, m_timerFD = -1;
         bool m_ready = false, m_lost = false, m_capture = false, m_servicing = false;
         bool m_captureKnown = false, m_captureSent = false;
+        pid_t m_activeSchedPid = 0;
         uint32_t m_width = 0, m_height = 0, m_refresh = 60000;
         uint64_t m_generation = 0;
         std::set<uint32_t> m_keys, m_buttons;

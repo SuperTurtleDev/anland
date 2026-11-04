@@ -4,23 +4,28 @@
     "hyprland": {
       "method": "git",
       "url": "https://github.com/hyprwm/Hyprland.git",
-      "revision": "ff672deb68f6b5364f402914f006cb17389a0444"
+      "revision": "0aa6745f705f2c4b0a5004eb019ef76e5bbdb426"
     },
     "aquamarine": {
       "method": "git",
       "url": "https://github.com/hyprwm/aquamarine.git",
       "revision": "f31c47a1b9d300847d8fc3108ad959448103dfc1"
+    },
+    "udis86": {
+      "method": "git",
+      "url": "https://github.com/canihavesomecoffee/udis86.git",
+      "revision": "5336633af70f3917760a6d441ff02d93477b0c86"
     }
   },
   "patches": {
-    "hyprland.patch": "03db70a0eaefee4f2a18a5dc3d8b0f5ac0e17710669f50fee0985f0966903c5a",
+    "hyprland.patch": "4775f241bc7ae1955bda3a31485e3c02dcbc727cce56c9f8adfed1e10150f6cf",
     "aquamarine.patch": "7a80db73559a345340facf190048437172c41724abe5cbb7064fc52a32e8f66a",
-    "hyprgrass.patch": "78e8aac8a504caa1b4c79688722e08fa2b47ddfeb53d437d961866b6718bd92b"
+    "hyprgrass.patch": "c64d61c056553d54704a6d9fcbe8b1adba062f5a26e3257822155c50201cd89a"
   },
   "plugins": {
     "hyprgrass": {
       "url": "https://github.com/horriblename/hyprgrass.git",
-      "revision": "a8979156cd87e7c58d126ac0437cae498a5b2d18"
+      "revision": "8ca1af717d5b4ea1215a781df52bcef02d7b15e6"
     },
     "wf-touch": {
       "url": "https://github.com/WayfireWM/wf-touch.git",
@@ -33,10 +38,11 @@
   },
   "public_linkage": "built-in-once-in-renamed-aquamarine-anland",
   "lua": "5.5 (Arch lua)",
-  "hyprutils": "system >=0.14 / SONAME 13",
+  "hyprutils": "system >=0.14.3 / SONAME 13",
   "arch_package_baseline": {
     "repository": "extra",
     "architecture": "aarch64",
+    "package_version": "0.57.0-1",
     "source_recipe_reference": "https://raw.githubusercontent.com/archlinuxarm/PKGBUILDs/master/extra/hyprland/PKGBUILD",
     "package_prefix": "/usr",
     "sdk_pkgconfig": "/usr/share/pkgconfig/hyprland.pc",

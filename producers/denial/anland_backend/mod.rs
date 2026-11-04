@@ -14,6 +14,7 @@ pub(crate) mod native;
 pub(crate) mod pointer_capture;
 pub(crate) mod runtime;
 pub(crate) mod scale_control;
+pub(crate) mod scheduling;
 pub(crate) mod seat_input;
 pub(crate) mod services;
 pub(crate) mod submission;

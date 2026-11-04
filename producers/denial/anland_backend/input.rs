@@ -127,6 +127,13 @@ impl InputStream {
                     }
                     Some(Pending::Payload(event, vec![0; event.size as usize]))
                 }
+                11 | 12 if event.fd_count == 0 => {
+                    return Ok(Some(Message::Resources {
+                        kind: event.resource_type,
+                        invalid: true,
+                        fds: Vec::new(),
+                    }));
+                }
                 11 | 12 => {
                     if event.fd_count > 64 {
                         return Err(io::Error::other("too many input descriptors"));
@@ -170,7 +177,7 @@ impl InputStream {
                 }
                 Message::Resources {
                     kind: event.resource_type,
-                    invalid: event.kind == 12,
+                    invalid: event.kind == 12 || event.fd_count == 0,
                     fds,
                 }
             }

@@ -261,6 +261,33 @@ impl Client {
         check(unsafe { ffi::ad_capture_pointer(self.session.as_ptr(), u32::from(capture)) })?;
         Ok(())
     }
+    pub fn request_resources(&mut self, service_type: u32) -> io::Result<()> {
+        check(unsafe { ffi::ad_request_resources(self.session.as_ptr(), service_type) })?;
+        Ok(())
+    }
+    pub fn scheduling(&mut self, pid: i32, flags: u8) -> io::Result<()> {
+        check(unsafe { ffi::ad_scheduling(self.session.as_ptr(), pid, flags) })?;
+        Ok(())
+    }
+    pub fn resources(
+        &mut self,
+        service_type: u32,
+        invalid: bool,
+        fds: Vec<OwnedFd>,
+    ) -> io::Result<()> {
+        use std::os::fd::IntoRawFd;
+        let raw_fds = fds.into_iter().map(IntoRawFd::into_raw_fd).collect::<Vec<_>>();
+        check(unsafe {
+            ffi::ad_resources(
+                self.session.as_ptr(),
+                service_type,
+                u32::from(invalid),
+                raw_fds.as_ptr(),
+                raw_fds.len() as u32,
+            )
+        })?;
+        Ok(())
+    }
 }
 impl Drop for Client {
     fn drop(&mut self) {

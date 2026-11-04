@@ -11,6 +11,7 @@ add_library(anland_presentation OBJECT
     ${CMAKE_CURRENT_LIST_DIR}/anland_present.c
     ${CMAKE_CURRENT_LIST_DIR}/anland_scene.c
     ${CMAKE_CURRENT_LIST_DIR}/anland_scene_legacy.c
+    ${CMAKE_CURRENT_LIST_DIR}/anland_pacing.c
     ${CMAKE_CURRENT_LIST_DIR}/anland_de_backend.c
     ${CMAKE_CURRENT_LIST_DIR}/anland_window_map.c)
 set_target_properties(anland_presentation PROPERTIES

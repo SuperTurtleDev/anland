@@ -18,6 +18,7 @@ pub const INPUT_TYPE_DISPLAY_REFRESH: u32 = 7;
 pub const INPUT_TYPE_CLIPBOARD: u32 = 8;
 pub const INPUT_TYPE_TEXT_INPUT: u32 = 9;
 pub const INPUT_TYPE_RESOURCE: u32 = 11;
+pub const INPUT_TYPE_RESOURCE_INVALID: u32 = 12;
 pub const INPUT_TYPE_TABLET_FRAME: u32 = 16;
 pub const INPUT_ACTION_DOWN: i32 = 0;
 pub const INPUT_ACTION_UP: i32 = 1;
@@ -33,6 +34,9 @@ pub const TABLET_FLAG_CANCELED: u32 = 4;
 pub const TABLET_BUTTON_PRIMARY: u32 = 1;
 pub const TABLET_BUTTON_SECONDARY: u32 = 2;
 pub const SERVICE_TYPE_CAMERA: u32 = 1;
+pub const DEVICE_VAR_CAPTURE_MOUSE: u32 = 1;
+pub const SCHED_FLAG_SETTREE: u8 = 1;
+pub const SCHED_FLAG_ON: u8 = 2;
 
 #[repr(C)]
 pub struct Bridge {
@@ -158,6 +162,8 @@ extern "C" {
         size: usize,
     ) -> c_int;
     pub fn anland_niri_request_resources(bridge: *mut Bridge, service: u32) -> c_int;
+    pub fn anland_niri_set_consumer_var(bridge: *mut Bridge, var: u32, value: u32) -> c_int;
+    pub fn anland_niri_scheduling(bridge: *mut Bridge, pid: i32, flags: u8) -> c_int;
     pub fn anland_niri_audio_fd(bridge: *mut Bridge) -> c_int;
     #[cfg(have_anland_audio)]
     pub fn anland_audio_start() -> c_int;

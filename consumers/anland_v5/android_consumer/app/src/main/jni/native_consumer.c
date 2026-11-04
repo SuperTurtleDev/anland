@@ -9,12 +9,14 @@
 #include <jni.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "anw_hidden.h"
@@ -31,6 +33,24 @@
 
 #define PIXEL_FORMAT_RGBA_8888 1
 #define MAX_COLLECT_BUFS 8
+#define PACING_REPORT_INTERVAL_NS (5ULL * 1000ULL * 1000ULL * 1000ULL)
+
+struct pacing_sample {
+    uint64_t total_ns;
+    uint64_t worst_ns;
+    uint64_t count;
+};
+
+struct consumer_pacing {
+    uint64_t interval_start_ns;
+    uint64_t producer_waits;
+    uint64_t surface_queued;
+    uint64_t queue_failures;
+    struct pacing_sample producer_wait;
+    struct pacing_sample completion_to_queue;
+    struct pacing_sample acquire_fence_wait;
+    struct pacing_sample buffer_reuse;
+};
 
 /* Saved JVM reference for event-thread JNI callbacks. Process-global (the JVM is);
  * the per-thread env is attached as needed. The activity callback target is
@@ -62,6 +82,8 @@ struct consumer_state {
     int dmabuf_fds[MAX_COLLECT_BUFS];
     struct buf_info dmabuf_infos[MAX_COLLECT_BUFS];
     ANativeWindowBuffer *buf_anb[MAX_COLLECT_BUFS];
+    uint64_t buffer_queued_at_ns[MAX_COLLECT_BUFS];
+    struct consumer_pacing pacing;
 
     int screen_w;
     int screen_h;
@@ -150,6 +172,85 @@ static int send_input_payload(struct consumer_state *s, const struct InputEvent 
     pthread_mutex_lock(&s->input_lock);
     int rc = s->ctx ? push_input_event_with_length(s->ctx, event, payload, size) : 0;
     pthread_mutex_unlock(&s->input_lock);
+    return rc;
+}
+
+static uint64_t monotonic_now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void pacing_add(struct pacing_sample *sample, uint64_t duration_ns)
+{
+    sample->total_ns += duration_ns;
+    if (duration_ns > sample->worst_ns)
+        sample->worst_ns = duration_ns;
+    sample->count++;
+}
+
+static uint64_t pacing_mean_us(const struct pacing_sample *sample)
+{
+    return sample->count ? sample->total_ns / sample->count / 1000ULL : 0;
+}
+
+static void pacing_reset(struct consumer_state *s)
+{
+    memset(&s->pacing, 0, sizeof(s->pacing));
+    memset(s->buffer_queued_at_ns, 0, sizeof(s->buffer_queued_at_ns));
+}
+
+static void pacing_report_if_due(struct consumer_state *s, uint64_t now_ns)
+{
+    if (!s->pacing.interval_start_ns || now_ns < s->pacing.interval_start_ns ||
+        now_ns - s->pacing.interval_start_ns < PACING_REPORT_INTERVAL_NS)
+        return;
+
+    const uint64_t elapsed_ns = now_ns - s->pacing.interval_start_ns;
+    const uint64_t queue_fps = elapsed_ns
+        ? s->pacing.surface_queued * 1000000000ULL / elapsed_ns : 0;
+    LOGI("pacing queue_fps=%llu queued=%llu queue_fail=%llu producer_wait=%llu "
+         "producer_wait_us(avg/max)=%llu/%llu(n=%llu) "
+         "completion_to_queue_us(avg/max)=%llu/%llu(n=%llu) "
+         "acquire_fence_us(avg/max)=%llu/%llu(n=%llu) "
+         "buffer_reuse_us(avg/max)=%llu/%llu(n=%llu)",
+         (unsigned long long)queue_fps,
+         (unsigned long long)s->pacing.surface_queued,
+         (unsigned long long)s->pacing.queue_failures,
+         (unsigned long long)s->pacing.producer_waits,
+         (unsigned long long)pacing_mean_us(&s->pacing.producer_wait),
+         (unsigned long long)(s->pacing.producer_wait.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.producer_wait.count,
+         (unsigned long long)pacing_mean_us(&s->pacing.completion_to_queue),
+         (unsigned long long)(s->pacing.completion_to_queue.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.completion_to_queue.count,
+         (unsigned long long)pacing_mean_us(&s->pacing.acquire_fence_wait),
+         (unsigned long long)(s->pacing.acquire_fence_wait.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.acquire_fence_wait.count,
+         (unsigned long long)pacing_mean_us(&s->pacing.buffer_reuse),
+         (unsigned long long)(s->pacing.buffer_reuse.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.buffer_reuse.count);
+    memset(&s->pacing, 0, sizeof(s->pacing));
+    s->pacing.interval_start_ns = now_ns;
+}
+
+static int queue_surface_buffer(struct consumer_state *s,
+                                ANativeWindowBuffer *buffer, int fence_fd,
+                                int buffer_index, uint64_t completion_ns)
+{
+    const int rc = api.queueBuffer(s->window, buffer, fence_fd);
+    const uint64_t queued_ns = monotonic_now_ns();
+    if (buffer_index >= 0 && buffer_index < s->buf_count)
+        s->buffer_queued_at_ns[buffer_index] = rc == 0 ? queued_ns : 0;
+    if (rc == 0)
+        s->pacing.surface_queued++;
+    else
+        s->pacing.queue_failures++;
+    if (completion_ns && queued_ns >= completion_ns)
+        pacing_add(&s->pacing.completion_to_queue, queued_ns - completion_ns);
+    pacing_report_if_due(s, queued_ns);
     return rc;
 }
 
@@ -744,6 +845,7 @@ static void topapp_handle_scheduling_event(struct consumer_state *s,
 
 static int do_connect(struct consumer_state *s)
 {
+    pacing_reset(s);
     /* Snapshot the connection config for this attempt. */
     pthread_mutex_lock(&s->cfg_lock);
     bool use_root = s->cfg_use_root;
@@ -865,6 +967,7 @@ static int do_connect(struct consumer_state *s)
     audio_set_ctx(s->audio, s->ctx);   /* audio fd is now live; threads pick it up via get_audio_fd */
 
     s->need_reconnect = false;
+    s->pacing.interval_start_ns = monotonic_now_ns();
     LOGI("connected");
     pthread_mutex_unlock(&s->input_lock);
     return 0;
@@ -990,6 +1093,7 @@ static void *render_thread_func(void *arg)
         TracyCZoneN(zDequeue, "dequeueBuffer", 1);
         int dq = api.dequeueBuffer(s->window, &anb, &acqfence);
         TracyCZoneEnd(zDequeue);
+        const uint64_t dequeued_ns = monotonic_now_ns();
         if (dq != 0 || !anb) {
             usleep(16000);
             continue;
@@ -1000,7 +1104,11 @@ static void *render_thread_func(void *arg)
         if (acqfence >= 0) {
             TracyCZoneN(zAcqFence, "acquire fence wait", 1);
             struct pollfd fpfd = { .fd = acqfence, .events = POLLIN };
+            const uint64_t wait_start_ns = monotonic_now_ns();
             poll(&fpfd, 1, 1000);
+            const uint64_t wait_end_ns = monotonic_now_ns();
+            if (wait_end_ns >= wait_start_ns)
+                pacing_add(&s->pacing.acquire_fence_wait, wait_end_ns - wait_start_ns);
             close(acqfence);
             TracyCZoneEnd(zAcqFence);
         }
@@ -1014,16 +1122,21 @@ static void *render_thread_func(void *arg)
         }
 
         if (idx < 0) {
-            api.queueBuffer(s->window, anb, -1);
+            queue_surface_buffer(s, anb, -1, -1, 0);
             usleep(16000);
             continue;
         }
+
+        if (s->buffer_queued_at_ns[idx] && dequeued_ns >= s->buffer_queued_at_ns[idx])
+            pacing_add(&s->pacing.buffer_reuse,
+                       dequeued_ns - s->buffer_queued_at_ns[idx]);
+        s->buffer_queued_at_ns[idx] = 0;
 
         TracyCZoneN(zSelect, "select_dmabuf", 1);
         int sel = select_dmabuf(s->ctx, idx);
         TracyCZoneEnd(zSelect);
         if (sel < 0) {
-            api.queueBuffer(s->window, anb, -1);
+            queue_surface_buffer(s, anb, -1, idx, 0);
             usleep(16000);
             continue;
         }
@@ -1033,9 +1146,15 @@ static void *render_thread_func(void *arg)
          * before scanout -- this lets the producer submit before its GPU render
          * completes (no glFinish stall). rfence == -1 falls back to "ready now". */
         TracyCZoneN(zRefresh, "refresh_done (producer render)", 1);
+        const uint64_t wait_start_ns = monotonic_now_ns();
         int rfence = refresh_done(s->ctx);
+        const uint64_t completion_ns = monotonic_now_ns();
         TracyCZoneEnd(zRefresh);
-        api.queueBuffer(s->window, anb, rfence);
+        if (completion_ns >= wait_start_ns) {
+            s->pacing.producer_waits++;
+            pacing_add(&s->pacing.producer_wait, completion_ns - wait_start_ns);
+        }
+        queue_surface_buffer(s, anb, rfence, idx, completion_ns);
         TracyCFrameMark;
     }
 

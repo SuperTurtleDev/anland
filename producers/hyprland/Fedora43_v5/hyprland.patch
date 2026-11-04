@@ -200,19 +200,21 @@ Subject: Anland v5 hyprland native integration (Debian 13)
  #include "FocusState.hpp"
  #include "../view/Window.hpp"
  #include "../../Compositor.hpp"
-@@ -243,6 +244,7 @@ void CFocusState::rawSurfaceFocus(SP<CWL
+@@ -243,6 +244,8 @@ void CFocusState::rawSurfaceFocus(SP<CWL
          g_pEventManager->postEvent(SHyprIPCEvent{.event = "activewindowv2", .data = ""});
          Event::bus()->m_events.input.keyboard.focus.emit(nullptr);
          m_focusSurface.reset();
 +        Anland::syncPointerCapture();
++        Anland::reportActiveClient(0);
          return;
      }
  
-@@ -267,6 +269,7 @@ void CFocusState::rawSurfaceFocus(SP<CWL
+@@ -267,6 +270,8 @@ void CFocusState::rawSurfaceFocus(SP<CWL
  
      if (SURF && SURF->constraint())
          SURF->constraint()->activate();
 +    Anland::syncPointerCapture();
++    Anland::reportActiveClient(pWindowOwner ? pWindowOwner->getPID() : 0);
  }
  
  void CFocusState::rawMonitorFocus(PHLMONITOR pMonitor) {

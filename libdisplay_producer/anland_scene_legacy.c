@@ -28,6 +28,7 @@
 #define _GNU_SOURCE /* for dup()/eventfd(); KWin's build already defines it */
 #endif
 #include "anland_scene_legacy.h"
+#include "anland_pacing.h"
 
 #include <poll.h>
 #include <stdlib.h>
@@ -87,6 +88,9 @@ struct anland_scene_legacy {
     uint64_t frames_flipped;
     uint64_t frames_acked;
     uint64_t reconnects;
+    uint64_t submitted_at;
+    uint64_t flipped_at;
+    anland_pacing pacing;
 };
 
 /* ---- scene backend ops (called with the scene lock held) ---- */
@@ -146,6 +150,8 @@ static int legacy_submit(void *ud, const anland_scene_snapshot_t *snap)
     b->pending_commit = snap->commit_id;
     b->pending_buffer_count = buffer_count;
     b->pending_fence = fence;
+    b->submitted_at = anland_pacing_now_ns();
+    anland_pacing_note_submitted(&b->pacing);
     return 0;
 }
 
@@ -175,6 +181,7 @@ static bool refresh_output(struct anland_scene_legacy *b)
 
     b->output = out;
     b->have_output = true;
+    anland_pacing_note_interval(&b->pacing, out.refresh_mhz);
 
     if (changed)
         anland_scene_backend_output_changed(b->scene, out.width, out.height,
@@ -233,12 +240,16 @@ static void drain_buffer_ready(struct anland_scene_legacy *b)
  * leak, and let the scene report the drop + release the buffers. */
 static void drop_pending(struct anland_scene_legacy *b)
 {
+    const bool had_pending = b->pending_commit != 0;
     if (b->pending_fence >= 0) {
         close(b->pending_fence);
         b->pending_fence = -1;
     }
     b->pending_commit = 0;
     b->pending_buffer_count = 0;
+    if (had_pending)
+        anland_pacing_note_dropped(&b->pacing);
+    b->submitted_at = 0;
 }
 
 /* Remove all aliases only after a release was queued successfully (or the
@@ -290,8 +301,11 @@ static void drop_session(struct anland_scene_legacy *b)
          * handed-off commits. It must run only once, not once per retry. */
         anland_scene_invalidate(b->scene);
         drop_pending(b);
+        if (b->inflight_commit)
+            anland_pacing_note_dropped(&b->pacing);
         b->inflight_commit = 0;
         b->inflight_buffer_count = 0;
+        b->flipped_at = 0;
         b->session_valid = false;
         b->target_selected = false;
         b->retirement_pending = true;
@@ -508,6 +522,8 @@ int anland_scene_legacy_present(anland_scene_legacy *b)
     b->pending_commit = 0;
     b->pending_buffer_count = 0;
     b->frames_flipped++;
+    b->flipped_at = anland_pacing_now_ns();
+    anland_pacing_note_flip(&b->pacing, b->submitted_at, b->flipped_at);
     return 0;
 }
 
@@ -553,8 +569,15 @@ int anland_scene_legacy_pump(anland_scene_legacy *b, int timeout_ms)
             const uint64_t done = b->inflight_commit;
             b->inflight_commit = 0;
             b->inflight_buffer_count = 0;
-            if (anland_scene_backend_presented(b->scene, done, 0) == 0)
+            if (anland_scene_backend_presented(b->scene, done, 0) == 0) {
                 b->frames_acked++;
+                anland_pacing_note_ack(&b->pacing, b->submitted_at, b->flipped_at,
+                                       anland_pacing_now_ns());
+            } else {
+                anland_pacing_note_dropped(&b->pacing);
+            }
+            b->submitted_at = 0;
+            b->flipped_at = 0;
         }
     }
     const int slot = b->ready_slot;
@@ -604,6 +627,23 @@ uint64_t anland_scene_legacy_frames_flipped(const anland_scene_legacy *b)
 uint64_t anland_scene_legacy_frames_acked(const anland_scene_legacy *b)
 {
     return b ? b->frames_acked : 0;
+}
+
+void anland_scene_legacy_pacing(const anland_scene_legacy *b, anland_pacing *out)
+{
+    if (!out)
+        return;
+    if (!b) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = b->pacing;
+}
+
+void anland_scene_legacy_note_refresh(anland_scene_legacy *b, uint64_t refresh_mhz)
+{
+    if (b)
+        anland_pacing_note_interval(&b->pacing, refresh_mhz);
 }
 
 uint64_t anland_scene_legacy_reconnects(const anland_scene_legacy *b)

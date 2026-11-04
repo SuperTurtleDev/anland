@@ -93,13 +93,17 @@ void CAnlandBackend::onInputReadable() {
         if (m_payloadType) {
             if (std::chrono::steady_clock::now() > m_payloadDeadline) { m_lost = true; break; }
             int result = 0;
-            if (m_payloadType == ANLAND_DEVICE_IN_RESOURCE) {
+            if (m_payloadType == ANLAND_DEVICE_IN_RESOURCE || m_payloadType == ANLAND_DEVICE_IN_RESOURCE_INVALID) {
                 int fds[16], count = 0;
                 result = anland_device_read_fds(device, fds, 16, &count, 0);
                 if (result == 1) {
-                    if (uint32_t(count) == m_resourceCount && m_resourceType == ANLAND_DEVICE_SERVICE_CAMERA && count >= 2)
+                    if (m_payloadType == ANLAND_DEVICE_IN_RESOURCE && uint32_t(count) == m_resourceCount && m_resourceType == ANLAND_DEVICE_SERVICE_CAMERA && count >= 2)
                         anland_camera_set_resources(fds[0], fds+1, count-1);
-                    else { for (int i=0;i<count;++i) close(fds[i]); if (uint32_t(count) != m_resourceCount) m_lost = true; }
+                    else {
+                        for (int i=0;i<count;++i) close(fds[i]);
+                        if (m_resourceType == ANLAND_DEVICE_SERVICE_CAMERA) anland_camera_clear();
+                        if (uint32_t(count) != m_resourceCount) m_lost = true;
+                    }
                 }
             } else {
                 result = anland_device_read_input(device, m_payload.data(), m_payload.size(), 0);
@@ -189,10 +193,14 @@ void CAnlandBackend::onInputReadable() {
                 m_payloadType=event.type; m_payload.assign(size,'\0'); m_payloadDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(2); break;
             }
             case ANLAND_DEVICE_IN_RESOURCE:
-                if (!event.resource.fdnum || event.resource.fdnum > 16) { m_lost=true; break; }
+            case ANLAND_DEVICE_IN_RESOURCE_INVALID:
+                if (!event.resource.fdnum) {
+                    if (event.resource.type == ANLAND_DEVICE_SERVICE_CAMERA) anland_camera_clear();
+                    break;
+                }
+                if (event.resource.fdnum > 16) { m_lost=true; break; }
                 m_payloadType=event.type; m_resourceType=event.resource.type; m_resourceCount=event.resource.fdnum;
                 m_payloadDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(2); break;
-            case ANLAND_DEVICE_IN_RESOURCE_INVALID: anland_camera_clear(); break;
             default: break;
         }
     }
