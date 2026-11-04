@@ -73,7 +73,7 @@ for process in deniald niri niri-anland Hyprland kwin_wayland gnome-shell mango 
         fail "Existing $process session; refusing to take over."
     fi
 done
-args=(--backend anland --render-device "$render" --wayland --flutter-bundle "$bundle" --flutter-renderer impeller)
+args=(--backend anland --render-device "$render" --wayland --flutter-bundle "$bundle")
 export DENIAL_ANLAND_DESKTOP=$full
 [[ $full == 1 ]] || args+=(--no-polkit-agent)
 xwayland=${DENIAL_ANLAND_XWAYLAND:-$full}

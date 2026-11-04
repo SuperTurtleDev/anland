@@ -1,2 +1,3 @@
 # A nested unified diff necessarily encodes blank context lines as one space.
 Ubuntu2604_v5/denial.patch whitespace=-blank-at-eol
+Arch_v5/denial.patch whitespace=-blank-at-eol
