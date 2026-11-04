@@ -12,6 +12,7 @@
 #include "touch_state.hpp"
 #include <linux/input-event-codes.h>
 #include <mutex>
+#include <atomic>
 #include "anland_audio.h"
 #include "anland_camera.h"
 #include <chrono>
@@ -28,7 +29,6 @@
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
 #include "wlr_end.hpp"
-
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
 
@@ -115,16 +115,19 @@ namespace gamescope
 
 		virtual int Present( const FrameInfo_t *pFrameInfo, bool bAsync ) override
 		{
+            // paint_all clears ordinary damage after attempting a frame.
+            // Keep a native retry request when submission cannot complete.
+            const auto retry = [](int error) { force_repaint(); return error; };
             if (!s_session || s_pending)
-                return -EAGAIN;
+                return retry(-EAGAIN);
             anland_gamescope_target target{};
             target.buffer.fd = -1;
             if (anland_gamescope_session_target(s_session, &target) != 0)
-                return -EAGAIN;
+                return retry(-EAGAIN);
             // Device format is the legacy ABGR8888 convention, not a DRM fourcc.
             if (target.buffer.format != 1) {
                 close(target.buffer.fd);
-                return -EINVAL;
+                return retry(-EINVAL);
             }
             wlr_dmabuf_attributes dma{};
             dma.width = target.buffer.width;
@@ -144,14 +147,14 @@ namespace gamescope
             target.buffer.fd = -1;
             if (!imported) {
                 fprintf(stderr, "Anland: consumer STORAGE dmabuf import failed\n");
-                return -EINVAL;
+                return retry(-EINVAL);
             }
             if (anland_gamescope_session_target_current(s_session, &target) != 0)
-                return -EAGAIN;
+                return retry(-EAGAIN);
             auto sequence = vulkan_composite(const_cast<FrameInfo_t *>(pFrameInfo), nullptr,
                                              false, image, false);
             if (!sequence)
-                return -EINVAL;
+                return retry(-EINVAL);
             // Synchronous baseline: -1 is not an exported fence, GPU is finished.
             vulkan_wait(*sequence, true);
             uint64_t commit = 0;
@@ -163,7 +166,7 @@ namespace gamescope
                     fprintf(stderr, "Anland: first GPU-complete frame submitted, commit=%llu, result=%d\n",
                             (unsigned long long)commit, result);
             }
-            return result == 0 ? 0 : -EIO;
+            return result == 0 ? 0 : retry(-EIO);
 		}
 
         INestedHints *GetNestedHints() override { return this; }
@@ -282,6 +285,8 @@ namespace gamescope
             wlserver_unlock();
             m_Input.text = &Text;
             m_Input.text_userdata = this;
+            m_Input.text_identity = &TextIdentity;
+            m_Input.text_identity_userdata = this;
             m_Input.resources = &Resources;
             m_Input.resources_userdata = this;
             AttachSession();
@@ -323,6 +328,9 @@ namespace gamescope
         virtual bool PollState() override
         {
             std::lock_guard<std::mutex> deviceGuard(m_DeviceMutex);
+            const auto previousWidth = g_nOutputWidth;
+            const auto previousHeight = g_nOutputHeight;
+            const auto previousRefresh = g_nOutputRefresh;
             if (!s_session) {
                 auto now = std::chrono::steady_clock::now();
                 if (now < m_NextReconnect)
@@ -381,7 +389,11 @@ namespace gamescope
                     anland_device_set_clipboard(device, text->data(), text->size());
                 }
             }
-            return dirty || rc > 0;
+            // PollState reports connector changes, not input or frame activity.
+            // Returning true republishes X11 mode atoms and notifies Steam.
+            return dirty || previousWidth != g_nOutputWidth ||
+                previousHeight != g_nOutputHeight ||
+                previousRefresh != g_nOutputRefresh;
         }
 
         bool DrainEvents()
@@ -402,23 +414,32 @@ namespace gamescope
                             fprintf(stderr, "Anland: first commit completed, commit=%llu, event=%d\n",
                                     (unsigned long long)event.commit_id, (int)event.type);
                         s_pending = 0;
-                        dirty = true;
+                        if (event.type == ANLAND_SCENE_EVENT_COMMIT_DROPPED)
+                            force_repaint();
                     }
                 }
                 if (event.type == ANLAND_SCENE_EVENT_BUFFER_RELEASED &&
                     event.u.released.release_fence_fd >= 0)
                     close(event.u.released.release_fence_fd);
+                if (event.type == ANLAND_SCENE_EVENT_RENDER_TARGET_READY) {
+                    // The existing consumer has dequeued this slot and waits
+                    // for its render-done message even when content is static.
+                    // Request a native frame without republishing X11 modes.
+                    force_repaint();
+                }
                 if (event.type == ANLAND_SCENE_EVENT_OUTPUT_CHANGED) {
                     anland_device_output_t output{};
                     if (anland_gamescope_session_output(s_session, &output) == 0 &&
                         output.width && output.height) {
+                        const auto refresh = output.refresh_mhz ? output.refresh_mhz : 60000;
+                        dirty |= g_nOutputWidth != output.width ||
+                                 g_nOutputHeight != output.height ||
+                                 g_nOutputRefresh != refresh;
                         g_nOutputWidth = output.width;
                         g_nOutputHeight = output.height;
-                        g_nOutputRefresh = output.refresh_mhz ? output.refresh_mhz : 60000;
+                        g_nOutputRefresh = refresh;
                     }
                 }
-                dirty |= event.type == ANLAND_SCENE_EVENT_RENDER_TARGET_READY ||
-                         event.type == ANLAND_SCENE_EVENT_OUTPUT_CHANGED;
             }
             return dirty;
         }
@@ -525,18 +546,30 @@ namespace gamescope
         // A separate standard-layout object lets Wayland callbacks recover their
         // owner without applying wl_container_of to the polymorphic backend.
         struct PointerFocusWatch {
-            wl_listener focus{};
+            wl_listener pointer_focus{};
+            wl_listener keyboard_focus{};
             wl_listener destroy{};
             CAnlandBackend *backend = nullptr;
         } m_PointerFocus;
 
         static void PointerFocusChanged(wl_listener *listener, void *)
         {
-            PointerFocusWatch *watch = wl_container_of(listener, watch, focus);
+            PointerFocusWatch *watch = wl_container_of(listener, watch, pointer_focus);
             // wlroots resets pointer buttons on focus changes. Do not send UPs
             // into the new surface or let old contacts suppress its next DOWN.
             watch->backend->m_Touches.reset_pointer_focus();
             watch->backend->m_Buttons.clear();
+        }
+        static void KeyboardFocusChanged(wl_listener *listener, void *data)
+        {
+            PointerFocusWatch *watch = wl_container_of(listener, watch, keyboard_focus);
+            auto *backend = watch->backend;
+            auto *event = static_cast<wlr_seat_keyboard_focus_change_event *>(data);
+            backend->m_TextFocused.store(event && event->new_surface != nullptr,
+                                         std::memory_order_relaxed);
+            backend->m_TextIdentity.fetch_add(1, std::memory_order_relaxed);
+            if (backend->m_Ime)
+                cancel_local_text(backend->m_Ime);
         }
         static void PointerSeatDestroyed(wl_listener *listener, void *)
         {
@@ -546,17 +579,23 @@ namespace gamescope
         void AttachPointerFocus()
         {
             m_PointerFocus.backend = this;
-            m_PointerFocus.focus.notify = &PointerFocusChanged;
+            m_TextFocused.store(wlserver.wlr.seat->keyboard_state.focused_surface != nullptr,
+                                 std::memory_order_relaxed);
+            m_PointerFocus.pointer_focus.notify = &PointerFocusChanged;
+            m_PointerFocus.keyboard_focus.notify = &KeyboardFocusChanged;
             m_PointerFocus.destroy.notify = &PointerSeatDestroyed;
             wl_signal_add(&wlserver.wlr.seat->pointer_state.events.focus_change,
-                          &m_PointerFocus.focus);
+                          &m_PointerFocus.pointer_focus);
+            wl_signal_add(&wlserver.wlr.seat->keyboard_state.events.focus_change,
+                          &m_PointerFocus.keyboard_focus);
             wl_signal_add(&wlserver.wlr.seat->events.destroy, &m_PointerFocus.destroy);
         }
         void DetachPointerFocus()
         {
             if (!m_PointerFocus.backend)
                 return;
-            wl_list_remove(&m_PointerFocus.focus.link);
+            wl_list_remove(&m_PointerFocus.pointer_focus.link);
+            wl_list_remove(&m_PointerFocus.keyboard_focus.link);
             wl_list_remove(&m_PointerFocus.destroy.link);
             m_PointerFocus.backend = nullptr;
         }
@@ -605,8 +644,8 @@ namespace gamescope
                 }
                 break;
             case AG_BUTTON:
-                // Each physical button source owes exactly one release. Duplicate
-                // DOWN/UP reports must not inflate wlroots' n_pressed counter.
+                // Each source owes exactly one release; duplicate events must
+                // not inflate wlroots' pressed-button count.
                 if (ev->pressed ? self->m_Buttons.insert(ev->code).second
                                 : self->m_Buttons.erase(ev->code) != 0)
                     wlserver_mousebutton(ev->code, ev->pressed, time);
@@ -639,10 +678,14 @@ namespace gamescope
         // not one per finger. Modes are latched so a mode switch cannot strand UP.
         void TouchMotion(const anland_gamescope_input_event &ev, uint32_t time)
         {
-            if (!m_Touches.active(ev.code) || !wlserver.mouse_focus_surface)
+            if (!m_Touches.active(ev.code))
                 return;
-            const double x = (ev.x * g_nOutputWidth + focusedWindowOffsetX) * focusedWindowScaleX;
-            const double y = (ev.y * g_nOutputHeight + focusedWindowOffsetY) * focusedWindowScaleY;
+            double scaleX = focusedWindowScaleX, scaleY = focusedWindowScaleY;
+            double offsetX = focusedWindowOffsetX, offsetY = focusedWindowOffsetY;
+            if (!m_Touches.transform(ev.code, scaleX, scaleY, offsetX, offsetY))
+                return;
+            const double x = (ev.x * g_nOutputWidth + offsetX) * scaleX;
+            const double y = (ev.y * g_nOutputHeight + offsetY) * scaleY;
             if (m_Touches.passthrough(ev.code)) {
                 wlr_seat_touch_notify_motion(wlserver.wlr.seat, time, ev.code, x, y);
             } else if (m_Touches.trackpad(ev.code)) {
@@ -669,7 +712,9 @@ namespace gamescope
             case TouchClickModes::Middle: button = BTN_MIDDLE; break;
             default: break;
             }
-            const auto change = m_Touches.down(ev.code, button, mode == TouchClickModes::Trackpad);
+            const auto change = m_Touches.down(ev.code, button, mode == TouchClickModes::Trackpad,
+                focusedWindowScaleX, focusedWindowScaleY,
+                focusedWindowOffsetX, focusedWindowOffsetY);
             if (!change.accepted)
                 return;
             if (button == AnlandTouchState::Passthrough) {
@@ -701,6 +746,18 @@ namespace gamescope
                 return;
             auto *device = anland_gamescope_session_device(s_session);
             m_WasConnected = anland_device_is_connected(device);
+            if (m_WasConnected) {
+                // Commit ids belong to the session generation that submitted them.
+                // Teardown may invalidate a commit without its outcome reaching us
+                // before the event queue is replaced by the reconnect handshake.
+                if (s_pending) {
+                    ++m_Connector.PresentationFeedback().m_uCompletedPresents;
+                    fprintf(stderr, "Anland: retiring stale pending commit %llu at session attach\n",
+                            (unsigned long long)s_pending);
+                }
+                s_pending = 0;
+                force_repaint();
+            }
             if (m_AudioStarted) anland_audio_set_fd(anland_device_audio_fd(device));
             anland_device_scheduling(device, getpid(),
                 ANLAND_DEVICE_SCHED_FLAG_SETTREE | ANLAND_DEVICE_SCHED_FLAG_ON);
@@ -757,12 +814,24 @@ namespace gamescope
         static bool Resources(void *userdata, uint32_t service, int *fds, int count)
         {
             auto *self = static_cast<CAnlandBackend *>(userdata);
-            if (!self->m_CameraStarted || service != ANLAND_DEVICE_SERVICE_CAMERA || count < 2)
+            if (service != ANLAND_DEVICE_SERVICE_CAMERA)
                 return false;
+            if (!self->m_CameraStarted || count < 2) {
+                anland_camera_clear();
+                return false;
+            }
             anland_camera_set_resources(fds[0], &fds[1], count - 1);
             return true; // engine adopted every fd
         }
-        static void Text(void *userdata, uint32_t type, const char *text, size_t size)
+        static uint64_t TextIdentity(void *userdata)
+        {
+            auto *self = static_cast<CAnlandBackend *>(userdata);
+            if (!self->m_TextFocused.load(std::memory_order_relaxed))
+                return 0;
+            return self->m_TextIdentity.load(std::memory_order_relaxed);
+        }
+        static void Text(void *userdata, uint32_t type, const char *text, size_t size,
+                         uint64_t identity)
         {
             auto *self = static_cast<CAnlandBackend *>(userdata);
             if (type == ANLAND_DEVICE_IN_CLIPBOARD) {
@@ -774,11 +843,10 @@ namespace gamescope
                 return;
             }
             if (type != ANLAND_DEVICE_IN_TEXT_INPUT || !size || !self->m_Ime) return;
-            // Existing Gamescope IME expects valid UTF-8 and a terminated string.
+            // Validate before taking the Wayland lock; all failure paths remain unlocked.
             for (size_t i = 0; i < size;) {
-                unsigned char c = text[i];
-                if (!c) return;
-                unsigned n = c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 :
+                const unsigned char c = text[i];
+                const unsigned n = c == 0 ? 0 : c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 :
                     c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
                 if (!n || i + n > size) return;
                 for (unsigned j = 1; j < n; ++j)
@@ -790,6 +858,12 @@ namespace gamescope
                 i += n;
             }
             wlserver_lock();
+            const uint64_t currentIdentity = TextIdentity(self);
+            if (!identity || identity != currentIdentity) {
+                cancel_local_text(self->m_Ime);
+                wlserver_unlock();
+                return;
+            }
             if (!type_local_text(self->m_Ime, text))
                 fprintf(stderr, "Anland: text input rejected (local IME queue limit)\n");
             wlserver_unlock();
@@ -801,6 +875,8 @@ namespace gamescope
         bool m_AudioStarted = false;
         bool m_Capture = false;
         std::chrono::steady_clock::time_point m_NextReconnect{};
+        std::atomic<uint64_t> m_TextIdentity{1};
+        std::atomic<bool> m_TextFocused{false};
         std::set<int32_t> m_Keys, m_Buttons;
         AnlandTouchState m_Touches;
         anland_gamescope_input m_Input{};

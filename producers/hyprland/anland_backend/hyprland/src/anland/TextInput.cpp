@@ -15,12 +15,17 @@
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
+#include <format>
 
 namespace {
 // Client-only keyboard: never registered with InputManager or WM bindings.
 class CUnicodeKeyboard : public IKeyboard {
   public:
+#if __has_include("../desktop/view/window/Window.hpp")
+    bool isVirtual() const override { return true; }
+#else
     bool isVirtual() override { return true; }
+#endif
     SP<Aquamarine::IKeyboard> aq() override { return nullptr; }
     bool install(const std::vector<xkb_keysym_t>& symbols) {
         if (symbols.size() <= mapped.size() && std::equal(symbols.begin(), symbols.end(), mapped.begin())) return true;
@@ -169,11 +174,11 @@ SP<IKeyboard> Anland::keyboardForClient(SP<IKeyboard> keyboard, wl_client* clien
 }
 void Anland::textFromConsumer(const char* bytes, size_t count, void*) {
     std::vector<xkb_keysym_t> symbols;
-    if (!decodeText(bytes, count, symbols)) { Log::logger->log(Log::WARN, "anland: invalid/oversized committed UTF-8 ({} bytes)", count); return; }
+    if (!decodeText(bytes, count, symbols)) { Log::logger->log(Log::WARN, std::string_view{std::format("anland: invalid/oversized committed UTF-8 ({} bytes)", count)}); return; }
     if (!usableFocus()) { resetTextInput(); Log::logger->log(Log::DEBUG, "anland: text rejected: focus/grab/IME ownership"); return; }
     auto input = g_pInputManager->m_relay.getFocusedTextInput();
     const bool native = input && input->isEnabled();
-    if (native && count > TEXT_WIRE_MAX) { Log::logger->log(Log::WARN, "anland: text-input exceeds wire limit ({} bytes)", count); return; }
+    if (native && count > TEXT_WIRE_MAX) { Log::logger->log(Log::WARN, std::string_view{std::format("anland: text-input exceeds wire limit ({} bytes)", count)}); return; }
     if (native && state.queue.empty() && !state.holding) {
         restoreMap(); input->commitStringFromConsumer(std::string(bytes, count));
         if (PROTO::idle) PROTO::idle->onActivity();

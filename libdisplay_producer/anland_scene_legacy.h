@@ -52,6 +52,7 @@
 #define ANLAND_SCENE_LEGACY_H
 
 #include "anland_device.h"
+#include "anland_pacing.h"
 #include "anland_scene.h"
 
 #ifdef __cplusplus
@@ -138,6 +139,8 @@ void anland_scene_legacy_output(anland_scene_legacy *b,
 uint64_t anland_scene_legacy_frames_flipped(const anland_scene_legacy *b);
 uint64_t anland_scene_legacy_frames_acked(const anland_scene_legacy *b);
 uint64_t anland_scene_legacy_reconnects(const anland_scene_legacy *b);
+void anland_scene_legacy_pacing(const anland_scene_legacy *b, anland_pacing *out);
+void anland_scene_legacy_note_refresh(anland_scene_legacy *b, uint64_t refresh_mhz);
 
 #ifdef __cplusplus
 }

@@ -64,4 +64,9 @@ int ad_clipboard(ad_session *session, const void *data, size_t size);
 int ad_flush(ad_session *session);
 size_t ad_pending_output(ad_session *session);
 int ad_capture_pointer(ad_session *session, uint32_t capture);
+int ad_request_resources(ad_session *session, uint32_t service_type);
+int ad_scheduling(ad_session *session, int32_t pid, uint8_t flags);
+/* Takes ownership of every fd in the array, including unsupported services. */
+int ad_resources(ad_session *session, uint32_t service_type, uint32_t invalid,
+                 const int32_t *fds, uint32_t count);
 #endif

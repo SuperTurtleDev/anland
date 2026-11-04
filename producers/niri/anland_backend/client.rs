@@ -241,6 +241,20 @@ impl Client {
         Ok(())
     }
 
+    pub fn set_consumer_var(&mut self, var: u32, value: u32) -> io::Result<()> {
+        if unsafe { ffi::anland_niri_set_consumer_var(self.0.as_ptr(), var, value) } < 0 {
+            return Err(failed("consumer variable update"));
+        }
+        Ok(())
+    }
+
+    pub fn scheduling(&mut self, pid: i32, flags: u8) -> io::Result<()> {
+        if unsafe { ffi::anland_niri_scheduling(self.0.as_ptr(), pid, flags) } < 0 {
+            return Err(failed("scheduling update"));
+        }
+        Ok(())
+    }
+
     pub fn audio_fd(&mut self) -> i32 {
         unsafe { ffi::anland_niri_audio_fd(self.0.as_ptr()) }
     }

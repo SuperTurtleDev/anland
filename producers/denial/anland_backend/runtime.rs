@@ -9,6 +9,7 @@ use super::lifetime::{Action, Lifetime};
 use super::native::{ImportedPool, deliver_feedback, prepare_output};
 use super::pointer_capture::CaptureSync;
 use super::scale_control::ScaleControl;
+use super::scheduling::SchedulingSync;
 use super::seat_input::AnlandInputBackend;
 use super::services::ClipboardSync;
 use super::topology::{OUTPUT_NAME, OutputPlan};
@@ -366,6 +367,28 @@ fn synchronize_pointer_capture(
     )
 }
 
+fn synchronize_scheduling(
+    events: &RuntimeState,
+    client: &mut Client,
+    scheduling: &mut SchedulingSync,
+    output_running: bool,
+) -> io::Result<()> {
+    let wanted_pid = if output_running && !events.secure_session_locked() {
+        Some(
+            events
+                .wayland
+                .as_ref()
+                .and_then(WaylandFrontend::focused_client_pid)
+                .unwrap_or_else(|| std::process::id() as i32),
+        )
+    } else {
+        None
+    };
+    scheduling.synchronize(client.connected(), wanted_pid, |pid, flags| {
+        client.scheduling(pid, flags)
+    })
+}
+
 fn stop(
     active: &mut Active,
     events: &mut RuntimeState,
@@ -546,6 +569,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let mut input_seat = AnlandInputBackend::default();
     let mut clipboard_sync = ClipboardSync::default();
     let mut pointer_capture = CaptureSync::default();
+    let mut scheduling = SchedulingSync::default();
+    let mut camera_requested = false;
     let mut pending_service_context = None;
     let mut waiting_initial_refresh = false;
     let mut launcher: Option<FlutterLauncher> = None;
@@ -817,7 +842,22 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     );
                                 }
                             }
-                            Ok(Some(Message::Resources { fds, .. })) => drop(fds),
+                            Ok(Some(Message::Resources { kind, invalid, fds })) => {
+                                if let Err(error) = c.resources(kind, invalid, fds) {
+                                    warn!(%error, "Anland resource handoff failed; retiring output");
+                                    sources.invalidate();
+                                    stop(
+                                        a,
+                                        &mut events,
+                                        &mut input_stream,
+                                        &mut input_seat,
+                                        c,
+                                        &mut pointer_capture,
+                                    );
+                                    lifetime.stop(now);
+                                    break;
+                                }
+                            }
                             Ok(None) => break,
                             Err(error) => {
                                 warn!(%error, "Anland input session invalid; retiring output");
@@ -1175,7 +1215,35 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
             // Wayland requests, shell/lock changes and constraint removal can
             // happen without input or rendering. Synchronize every bounded loop.
             if let Some(c) = client.as_mut() {
-                let running = active.as_ref().is_some_and(|a| !a.driver.stopped()) && !finishing;
+                let mut running = active.as_ref().is_some_and(|a| !a.driver.stopped()) && !finishing;
+                if !c.connected() {
+                    camera_requested = false;
+                } else if running && !camera_requested {
+                    match c.request_resources(ffi::SERVICE_TYPE_CAMERA) {
+                        Ok(()) => camera_requested = true,
+                        Err(error) => {
+                            warn!(%error, "Anland camera resource request failed; retiring output");
+                            sources.invalidate();
+                            camera_requested = false;
+                            if let Some(a) = active.as_mut() {
+                                stop(
+                                    a,
+                                    &mut events,
+                                    &mut input_stream,
+                                    &mut input_seat,
+                                    c,
+                                    &mut pointer_capture,
+                                );
+                                lifetime.stop(now);
+                            } else {
+                                c.drop_session();
+                                pointer_capture.reset_session();
+                                scheduling.reset_session();
+                            }
+                            running = false;
+                        }
+                    }
+                }
                 if let Err(error) =
                     synchronize_pointer_capture(&events, c, &mut pointer_capture, running)
                 {
@@ -1194,6 +1262,26 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     } else {
                         c.drop_session();
                         pointer_capture.reset_session();
+                    }
+                    running = false;
+                }
+                if let Err(error) = synchronize_scheduling(&events, c, &mut scheduling, running) {
+                    warn!(%error, "Anland scheduling update failed; retiring output");
+                    sources.invalidate();
+                    if let Some(a) = active.as_mut() {
+                        stop(
+                            a,
+                            &mut events,
+                            &mut input_stream,
+                            &mut input_seat,
+                            c,
+                            &mut pointer_capture,
+                        );
+                        lifetime.stop(now);
+                    } else {
+                        c.drop_session();
+                        pointer_capture.reset_session();
+                        scheduling.reset_session();
                     }
                 }
             }
@@ -1219,6 +1307,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     sources.invalidate();
                     client.as_mut().unwrap().drop_session();
                     pointer_capture.reset_session();
+                    scheduling.reset_session();
+                    camera_requested = false;
                     scale.cancel_preview();
                     publisher.publish(scale.state(None));
                 }
@@ -1263,6 +1353,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     input_seat.reset();
                     clipboard_sync.reset_session();
                     pointer_capture.reset_session();
+                    scheduling.reset_session();
+                    camera_requested = false;
                     pending_service_context = None;
                     if let Some(c) = client.as_mut() {
                         let result = if daemon {

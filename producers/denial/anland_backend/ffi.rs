@@ -1,5 +1,6 @@
 //! Narrow C bridge ABI. No private public-library or Smithay layouts cross it.
 use std::ffi::{c_char, c_void};
+pub const SERVICE_TYPE_CAMERA: u32 = 1;
 pub const INPUT_TYPE_TABLET_FRAME: u32 = 16;
 pub const TABLET_TOOL_PEN: u32 = 1;
 pub const TABLET_TOOL_ERASER: u32 = 2;
@@ -141,4 +142,13 @@ unsafe extern "C" {
     pub fn ad_flush(session: *mut Session) -> i32;
     pub fn ad_pending_output(session: *mut Session) -> usize;
     pub fn ad_capture_pointer(session: *mut Session, capture: u32) -> i32;
+    pub fn ad_request_resources(session: *mut Session, service_type: u32) -> i32;
+    pub fn ad_scheduling(session: *mut Session, pid: i32, flags: u8) -> i32;
+    pub fn ad_resources(
+        session: *mut Session,
+        service_type: u32,
+        invalid: u32,
+        fds: *const i32,
+        count: u32,
+    ) -> i32;
 }

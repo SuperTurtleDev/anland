@@ -678,28 +678,49 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
         }
         break;
     }
-    case ANLAND_DEVICE_IN_RESOURCE: {
+    case ANLAND_DEVICE_IN_RESOURCE:
+    case ANLAND_DEVICE_IN_RESOURCE_INVALID: {
         // The consumer is handing back the fds for a service we requested. The fdnum
         // fds follow as a separate DATA_MSG_INPUT_EXTEND_FDS message; receive them now
         // before the next poll_input_event() and route them to the owning engine.
         const uint32_t service = ev.resource.type;
         const uint32_t fdnum = ev.resource.fdnum;
         constexpr int kMaxFds = 1 + 8; // ctrl + up to MAX_CAMERAS streams
-        if (fdnum == 0 || fdnum > kMaxFds) {
+        if (fdnum == 0) {
+            if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+                anland_camera_clear();
+            }
+            break;
+        }
+        if (fdnum > kMaxFds) {
+            qCWarning(KWIN_ANLAND) << "oversized resource response, dropping session:" << fdnum;
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
             break;
         }
         int fds[kMaxFds];
         int got = 0;
         if (anland_device_read_fds(m_device, fds, static_cast<int>(fdnum), &got, 5000) != 1
-            || got < static_cast<int>(fdnum)) {
+            || got != static_cast<int>(fdnum)) {
             for (int i = 0; i < got; i++) {
                 ::close(fds[i]);
             }
+            if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+                anland_camera_clear();
+            }
+            qCWarning(KWIN_ANLAND) << "resource fd count mismatch, dropping session";
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
             break;
         }
-        if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+        if (ev.type == ANLAND_DEVICE_IN_RESOURCE && service == ANLAND_DEVICE_SERVICE_CAMERA && got >= 2) {
             // fds[0] = shared control socket, fds[1..] = per-camera stream sockets.
             anland_camera_set_resources(fds[0], &fds[1], got - 1);
+        } else if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+            for (int i = 0; i < got; i++) {
+                ::close(fds[i]);
+            }
+            anland_camera_clear();
         } else {
             for (int i = 0; i < got; i++) {
                 ::close(fds[i]);

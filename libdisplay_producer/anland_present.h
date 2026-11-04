@@ -13,6 +13,7 @@
 
 #include <stdbool.h>
 #include "anland_device.h"
+#include "anland_pacing.h"
 #include "anland_scene.h"
 
 #ifdef __cplusplus
@@ -52,6 +53,10 @@ void anland_present_drop_session(anland_present *present);
  * Acceptance, presentation and buffer release remain separate scene facts. */
 int anland_present_present(anland_present *present);
 int anland_present_pump(anland_present *present, int timeout_ms);
+
+/* Read-only frame lifecycle counters. Durations are measured in nanoseconds. */
+void anland_present_pacing(const anland_present *present, anland_pacing *out);
+void anland_present_note_refresh(anland_present *present, uint64_t refresh_mhz);
 
 #ifdef __cplusplus
 }

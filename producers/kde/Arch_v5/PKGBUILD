@@ -1,8 +1,8 @@
 # Maintainer: anland contributors
-# Arch Linux ARM KWin Plasma 6.8 maintenance branch plus the shared Anland backend.
+# Arch Linux ARM KWin 6.8.0 release plus the shared Anland backend.
 
 pkgname=kwin
-pkgver=6.8.0.r0.g0
+pkgver=6.8.0
 pkgrel=1.1
 pkgdesc='An easy to use, but flexible, Wayland compositor (anland backend)'
 arch=('aarch64')
@@ -23,25 +23,18 @@ depends=(
   'wayland>=1.26.0' xcb-util-keysyms xcb-util-wm
 )
 makedepends=(
-  cmake 'extra-cmake-modules>=6.30.0' git kdoctools krunner ninja 'plasma-wayland-protocols>=1.23.0'
+  cmake 'extra-cmake-modules>=6.30.0' kdoctools krunner ninja 'plasma-wayland-protocols>=1.23.0'
   python vulkan-headers 'wayland-protocols>=1.49' xorg-xwayland
 )
 optdepends=('plasma-keyboard: virtual keyboard')
-source=('kwin::git+https://invent.kde.org/plasma/kwin.git#branch=Plasma/6.8'
+# Upstream release hash is also published by Arch's kwin 6.8.0-1 PKGBUILD.
+source=("https://download.kde.org/stable/plasma/$pkgver/kwin-$pkgver.tar.xz"
         'kwin.patch' 'anland-overlay.tar')
 noextract=('anland-overlay.tar')
 # build.sh replaces the generated overlay checksum in its staged recipe.
-sha256sums=('SKIP'
+sha256sums=('4bfaf31e29a8f9fdf231dc3bbb9b09b0ce07cae9fee7a01cfc86425ece796258'
             '2e654793357d00c5ec154de97b1b74584b5951742c5fe44a9a77ae4d38ab8f59'
             'SKIP')
-
-pkgver() {
-  cd "$srcdir/kwin"
-  local version
-  version="$(sed -n 's/^set(PROJECT_VERSION "\([0-9][0-9.]*\)".*/\1/p' CMakeLists.txt)"
-  [[ -n "$version" ]] || { error 'cannot determine upstream KWin version'; return 1; }
-  printf '%s.r%s.g%s\n' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
 
 require_aarch64() {
   [[ "$(uname -m)" == 'aarch64' && "${CARCH:-}" == 'aarch64' ]] || {
@@ -52,9 +45,9 @@ require_aarch64() {
 
 prepare() {
   require_aarch64 || return 1
-  local tree="$srcdir/kwin"
-  [[ -d "$tree" ]] || { error 'KWin source tree is missing'; return 1; }
-  # The generated archive uses kwin/src/...; unpack into the Git checkout.
+  local tree="$srcdir/kwin-$pkgver"
+  [[ -d "$tree" ]] || { error 'KWin release source tree is missing'; return 1; }
+  # The generated archive uses kwin/src/...; unpack into the versioned release.
   tar -xf "$srcdir/anland-overlay.tar" --strip-components=1 -C "$tree"
   [[ -d "$tree/src/backends/anland" ]] || {
     error 'anland backend overlay is missing'; return 1;
@@ -63,7 +56,7 @@ prepare() {
 }
 
 build() {
-  local tree="$srcdir/kwin"
+  local tree="$srcdir/kwin-$pkgver"
   local cmake_args=(
     -DCMAKE_BUILD_TYPE=Release
     -DCMAKE_INSTALL_PREFIX=/usr
@@ -88,5 +81,5 @@ build() {
 }
 
 package() {
-  DESTDIR="$pkgdir" cmake --install "$srcdir/kwin/build"
+  DESTDIR="$pkgdir" cmake --install "$srcdir/kwin-$pkgver/build"
 }

@@ -5,7 +5,11 @@
 #include "../managers/SeatManager.hpp"
 #include "../desktop/state/FocusState.hpp"
 #include "../desktop/view/WLSurface.hpp"
+#if __has_include("../desktop/view/window/Window.hpp")
+#include "../desktop/view/window/Window.hpp"
+#else
 #include "../desktop/view/Window.hpp"
+#endif
 #include "../protocols/PointerConstraints.hpp"
 
 static WP<Aquamarine::CAnlandBackend> captureBackend;
@@ -24,7 +28,11 @@ bool Anland::pointerCaptureRequested() {
     const auto constraint = surface->constraint();
     if (!constraint || !constraint->isActive() || !constraint->isLocked()) return false;
     const auto window = Desktop::View::CWindow::fromView(surface->view());
+#if __has_include("../desktop/view/window/Window.hpp")
+    return window && !window->cantLockCursor();
+#else
     return window && !window->m_layoutFlags.cantLockCursor;
+#endif
 }
 
 void Anland::syncPointerCapture() {

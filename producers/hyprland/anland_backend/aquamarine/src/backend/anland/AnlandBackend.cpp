@@ -148,3 +148,40 @@ void CAnlandBackend::syncMouseCapture() {
     m_captureSent = active;
     m_captureKnown = true;
 }
+
+void CAnlandBackend::updateActiveScheduling(pid_t pid) {
+    const pid_t wanted = pid > 0 ? pid : getpid();
+    if (wanted == m_activeSchedPid)
+        return;
+
+    const pid_t previous = m_activeSchedPid;
+    m_activeSchedPid = wanted;
+    auto* device = m_public ? anland_de_backend_device(m_public) : nullptr;
+    const bool connected = device && !inFallback() && !m_lost;
+    if (connected && previous > 0 &&
+        anland_device_scheduling(device, previous,
+                                 ANLAND_DEVICE_SCHED_FLAG_SETTREE) != 0) {
+        m_lost = true;
+        return;
+    }
+
+    if (!connected)
+        return;
+    if (anland_device_scheduling(device, wanted,
+                                 ANLAND_DEVICE_SCHED_FLAG_SETTREE |
+                                 ANLAND_DEVICE_SCHED_FLAG_ON) != 0)
+        m_lost = true;
+}
+
+void CAnlandBackend::resendScheduling() {
+    if (inFallback() || m_lost)
+        return;
+    const pid_t wanted = m_activeSchedPid > 0 ? m_activeSchedPid : getpid();
+    if (anland_device_scheduling(anland_de_backend_device(m_public), wanted,
+                                 ANLAND_DEVICE_SCHED_FLAG_SETTREE |
+                                 ANLAND_DEVICE_SCHED_FLAG_ON) != 0) {
+        m_lost = true;
+        return;
+    }
+    m_activeSchedPid = wanted;
+}

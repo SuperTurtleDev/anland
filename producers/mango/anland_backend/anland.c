@@ -18,6 +18,8 @@ static void producer_pre_release(void *data) {
     mango_private_clear_input_payload(backend);
     mango_anland_text_reset(backend->text);
     anland_audio_set_fd(-1);
+    anland_camera_clear();
+    backend->capture_mouse_known = false;
     if (backend->frame_timer) wl_event_source_timer_update(backend->frame_timer, 0);
     if (backend->pump_timer) wl_event_source_timer_update(backend->pump_timer, 0);
     if (backend->reconnect_source && !backend->destroying)
@@ -68,6 +70,19 @@ static int pump_tick(void *data) {
     return 0;
 }
 
+static int controls_tick(void *data) {
+    struct anland_backend *backend = data;
+    if (backend->destroying) return 0;
+    if (!backend->session_lost && (backend->input_payload ||
+            backend->input_fds_pending || anland_device_input_header_pending(backend->device)))
+        mango_private_handle_input(-1, 0, backend);
+    mango_private_sync_scheduling(backend, false);
+    mango_private_sync_consumer_var(backend, false);
+    if (backend->controls_timer)
+        wl_event_source_timer_update(backend->controls_timer, 16);
+    return 0;
+}
+
 static bool attach_sources(struct anland_backend *b) {
     int data_fd = anland_device_data_fd(b->device);
     int flags = fcntl(data_fd, F_GETFL);
@@ -112,6 +127,12 @@ static int reconnect(void *data) {
     if (!mango_private_import_buffers(b)) goto unusable;
     b->session_lost=false;
     anland_audio_set_fd(anland_device_audio_fd(b->device));
+    mango_private_sync_scheduling(b, true);
+    mango_private_sync_consumer_var(b, true);
+    if (b->camera_started && anland_device_request_resources(b->device,
+            ANLAND_DEVICE_SERVICE_CAMERA, NULL) != 0)
+        goto unusable;
+    if (b->session_lost || !anland_device_is_connected(b->device)) goto unusable;
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_custom_mode(&state,b->width,b->height,b->refresh);
@@ -142,16 +163,28 @@ static bool backend_start(struct wlr_backend *base) {
 	struct anland_backend *b=wl_container_of(base,b,base);
 	if (anland_audio_start() == 0)
 		b->audio_started = true;
+	if (anland_camera_start() == 0)
+		b->camera_started = true;
+	else
+		wlr_log(WLR_ERROR, "anland: failed to start camera engine");
 	if (server.seat && !b->selection_listener_set) {
 		b->selection_listener.notify = mango_private_handle_seat_set_selection;
 		wl_signal_add(&server.seat->events.set_selection, &b->selection_listener);
 		b->selection_listener_set = true;
+	}
+	if (server.seat && !b->focus_listener_set) {
+		b->focus_change.notify = mango_private_handle_focus_change;
+		wl_signal_add(&server.seat->keyboard_state.events.focus_change,
+			&b->focus_change);
+		b->focus_listener_set = true;
 	}
 	if (!b->text) {
 		b->text = mango_anland_text_create(b->loop, server.seat);
 		if (!b->text) return false;
 		mango_anland_text_set_ime_grab(b->text, b->ime_grabbed);
 	}
+	if (b->controls_timer)
+		wl_event_source_timer_update(b->controls_timer, 16);
 	reconnect(b);
 	return true;
 }
@@ -159,6 +192,7 @@ static void backend_destroy(struct wlr_backend *base) {
     struct anland_backend *b = wl_container_of(base, b, base);
     b->destroying = true;
     if (b->selection_listener_set) wl_list_remove(&b->selection_listener.link);
+    if (b->focus_listener_set) wl_list_remove(&b->focus_change.link);
     if (b->reconnect_source) wl_event_source_remove(b->reconnect_source);
     b->reconnect_source = NULL;
     mango_private_drop_session(b);
@@ -167,8 +201,10 @@ static void backend_destroy(struct wlr_backend *base) {
     if (b->scene_source) wl_event_source_remove(b->scene_source);
     if (b->frame_timer) wl_event_source_remove(b->frame_timer);
     if (b->pump_timer) wl_event_source_remove(b->pump_timer);
-    b->scene_source = b->frame_timer = b->pump_timer = NULL;
+    if (b->controls_timer) wl_event_source_remove(b->controls_timer);
+    b->scene_source = b->frame_timer = b->pump_timer = b->controls_timer = NULL;
     if (b->audio_started) anland_audio_stop();
+    if (b->camera_started) anland_camera_stop();
     if (b->output_initialized) wlr_output_destroy(&b->output.base);
     anland_de_backend_destroy(b->de);
     b->de = NULL; b->device = NULL;
@@ -247,10 +283,12 @@ struct wlr_backend *mango_anland_backend_create(struct wl_event_loop *loop,const
     b->reconnect_source=wl_event_loop_add_timer(loop,reconnect,b);
     b->frame_timer=wl_event_loop_add_timer(loop,frame_tick,b);
     b->pump_timer=wl_event_loop_add_timer(loop,pump_tick,b);
+    b->controls_timer=wl_event_loop_add_timer(loop,controls_tick,b);
     b->scene_source=wl_event_loop_add_fd(loop,
         anland_scene_event_fd(anland_de_backend_scene(b->de)), WL_EVENT_READABLE,
         mango_private_handle_scene,b);
-    if (!b->reconnect_source || !b->frame_timer || !b->pump_timer || !b->scene_source)
+    if (!b->reconnect_source || !b->frame_timer || !b->pump_timer ||
+            !b->controls_timer || !b->scene_source)
         goto fail_initialized;
     anland_device_set_pre_release_cb(b->device, producer_pre_release, b);
     anland_device_set_fallback_cb(b->device, producer_fallback, b);
@@ -259,8 +297,9 @@ fail_initialized:
     if (b->reconnect_source) wl_event_source_remove(b->reconnect_source);
     if (b->frame_timer) wl_event_source_remove(b->frame_timer);
     if (b->pump_timer) wl_event_source_remove(b->pump_timer);
+    if (b->controls_timer) wl_event_source_remove(b->controls_timer);
     if (b->scene_source) wl_event_source_remove(b->scene_source);
-	b->scene_source=b->frame_timer=b->pump_timer=b->reconnect_source=NULL;
+	b->scene_source=b->frame_timer=b->pump_timer=b->controls_timer=b->reconnect_source=NULL;
     b->destroying=true;
     wlr_output_destroy(&b->output.base);
 	wlr_keyboard_finish(&b->keyboard);

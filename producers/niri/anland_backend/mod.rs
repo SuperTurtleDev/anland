@@ -37,6 +37,9 @@ use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_pre
 use smithay::utils::Size;
 use smithay::wayland::dmabuf::{DmabufFeedbackBuilder, DmabufGlobal};
 use smithay::wayland::presentation::Refresh;
+use smithay::wayland::pointer_constraints::with_pointer_constraint;
+use smithay::wayland::seat::WaylandFocus;
+use smithay::reexports::wayland_server::Resource;
 
 use super::{IpcOutputMap, OutputId, RenderResult};
 use crate::niri::{Niri, RedrawState};
@@ -117,6 +120,36 @@ fn duration_to_micros(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
+fn focused_client_pid(niri: &Niri) -> i32 {
+    let pid = niri.seat.get_keyboard().and_then(|keyboard| {
+        let focus = keyboard.current_focus()?;
+        let surface = focus.wl_surface()?;
+        let client = surface.client()?;
+        client
+            .get_credentials(&niri.display_handle)
+            .ok()
+            .map(|credentials| credentials.pid)
+    });
+    pid.filter(|pid| *pid > 0)
+        .unwrap_or_else(|| std::process::id() as i32)
+}
+
+fn pointer_capture_active(niri: &Niri) -> bool {
+    let Some(pointer) = niri.seat.get_pointer() else {
+        return false;
+    };
+    let Some(focus) = pointer.current_focus() else {
+        return false;
+    };
+    let Some(surface) = focus.wl_surface() else {
+        return false;
+    };
+
+    with_pointer_constraint(surface.as_ref(), &pointer, |constraint| {
+        constraint.map_or(false, |constraint| constraint.is_active())
+    })
+}
+
 /// Record an observed buffer size and report whether the same candidate has
 /// remained stable for the requested duration.
 fn pending_size_is_stable(
@@ -141,6 +174,8 @@ pub struct Anland {
     socket_path: String,
     frame_state: frame_state::FrameState,
     session_generation: Option<u64>,
+    sent_scheduling_pid: Option<i32>,
+    sent_capture_mouse: Option<bool>,
     pending_text_keysyms: VecDeque<Vec<xkb::Keysym>>,
     screen_w: u32,
     screen_h: u32,
@@ -226,6 +261,8 @@ impl Anland {
             socket_path,
             frame_state: frame_state::FrameState::new(),
             session_generation: None,
+            sent_scheduling_pid: None,
+            sent_capture_mouse: None,
             pending_text_keysyms: VecDeque::new(),
             screen_w: width,
             screen_h: height,
@@ -537,9 +574,56 @@ impl Anland {
             self.clipboard_read_pending = false;
             self.read_and_forward_clipboard(niri);
         }
+        self.sync_control_state(niri);
+    }
+
+    fn sync_control_state(&mut self, niri: &Niri) {
+        if !self.client.connected() {
+            return;
+        }
+
+        let wanted_pid = focused_client_pid(niri);
+        if self.sent_scheduling_pid != Some(wanted_pid) {
+            if let Some(previous_pid) = self.sent_scheduling_pid {
+                if previous_pid != wanted_pid {
+                    if let Err(err) = self
+                        .client
+                        .scheduling(previous_pid, ffi::SCHED_FLAG_SETTREE)
+                    {
+                        warn!("anland: scheduling restore: {err}");
+                        self.sent_scheduling_pid = None;
+                        return;
+                    }
+                }
+            }
+            let flags = ffi::SCHED_FLAG_SETTREE | ffi::SCHED_FLAG_ON;
+            match self.client.scheduling(wanted_pid, flags) {
+                Ok(()) => self.sent_scheduling_pid = Some(wanted_pid),
+                Err(err) => {
+                    warn!("anland: scheduling promote: {err}");
+                    self.sent_scheduling_pid = None;
+                }
+            }
+        }
+
+        let capture_mouse = pointer_capture_active(niri);
+        if self.sent_capture_mouse != Some(capture_mouse) {
+            match self.client.set_consumer_var(
+                ffi::DEVICE_VAR_CAPTURE_MOUSE,
+                if capture_mouse { 1 } else { 0 },
+            ) {
+                Ok(()) => self.sent_capture_mouse = Some(capture_mouse),
+                Err(err) => {
+                    warn!("anland: pointer capture update: {err}");
+                    self.sent_capture_mouse = None;
+                }
+            }
+        }
     }
 
     fn on_session_lost(&mut self, niri: &mut Niri) {
+        self.sent_scheduling_pid = None;
+        self.sent_capture_mouse = None;
         if self.session_generation.take().is_none() { return; }
         self.input_backend.queue_tablet_releases();
         self.client.reset_input();
@@ -720,21 +804,58 @@ impl Anland {
                     _ => {}
                 }
             }
-            ffi::INPUT_TYPE_RESOURCE => {
-                match self.client.read_fds() {
-                    Ok(fds) => {
-                        #[cfg(have_anland_audio)]
-                        if raw.resource_type == ffi::SERVICE_TYPE_CAMERA && fds.len() >= 2 {
-                            use std::os::fd::IntoRawFd;
-                            let mut fds = fds.into_iter().map(|fd| fd.into_raw_fd()).collect::<Vec<_>>();
-                            unsafe { ffi::anland_camera_set_resources(fds[0], fds.as_ptr().add(1), (fds.len() - 1) as i32) };
-                            fds.clear(); // camera engine now owns all descriptors
+            ffi::INPUT_TYPE_RESOURCE | ffi::INPUT_TYPE_RESOURCE_INVALID => {
+                if raw.fd_count == 0 {
+                    #[cfg(have_anland_audio)]
+                    if raw.resource_type == ffi::SERVICE_TYPE_CAMERA {
+                        unsafe { ffi::anland_camera_clear() };
+                    }
+                } else if raw.fd_count as usize > 9 {
+                    warn!("anland: invalid resource fd count: {}", raw.fd_count);
+                    #[cfg(have_anland_audio)]
+                    if raw.resource_type == ffi::SERVICE_TYPE_CAMERA {
+                        unsafe { ffi::anland_camera_clear() };
+                    }
+                    self.client.drop_session();
+                    return None;
+                } else {
+                    match self.client.read_fds() {
+                        Ok(fds) if fds.len() == raw.fd_count as usize => {
+                            #[cfg(have_anland_audio)]
+                            if raw.resource_type == ffi::SERVICE_TYPE_CAMERA {
+                                if raw.type_ == ffi::INPUT_TYPE_RESOURCE && fds.len() >= 2 {
+                                    use std::os::fd::IntoRawFd;
+                                    let mut fds = fds
+                                        .into_iter()
+                                        .map(|fd| fd.into_raw_fd())
+                                        .collect::<Vec<_>>();
+                                    unsafe {
+                                        ffi::anland_camera_set_resources(
+                                            fds[0],
+                                            fds.as_ptr().add(1),
+                                            (fds.len() - 1) as i32,
+                                        )
+                                    };
+                                    fds.clear(); // camera engine now owns all descriptors
+                                } else {
+                                    unsafe { ffi::anland_camera_clear() };
+                                }
+                            }
+                        }
+                        Ok(fds) => {
+                            drop(fds);
+                            warn!("anland: resource fd count does not match event header");
+                            #[cfg(have_anland_audio)]
+                            if raw.resource_type == ffi::SERVICE_TYPE_CAMERA {
+                                unsafe { ffi::anland_camera_clear() };
+                            }
+                            self.client.drop_session();
+                        }
+                        Err(err) => {
+                            warn!("anland: resource fds: {err}");
+                            self.client.drop_session();
                         }
                     }
-                    Err(err) => {
-                        warn!("anland: resource fds: {err}");
-                        self.client.drop_session();
-                    },
                 }
             }
             _ => return input::translate(&mut self.input_backend, &raw),

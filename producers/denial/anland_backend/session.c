@@ -2,6 +2,7 @@
 #include "anland_de_backend.h"
 #include "anland_tablet.h"
 #include "anland_audio.h"
+#include "anland_camera.h"
 #include <stdio.h>
 #include <errno.h>
 #include <limits.h>
@@ -42,6 +43,14 @@ static void detach_audio(ad_session *s)
     s->audio_fd = -1;
 }
 
+static void on_pre_release(void *userdata)
+{
+    ad_session *s = userdata;
+    if (!s) return;
+    detach_audio(s);
+    anland_camera_clear();
+}
+
 
 ad_session *ad_open(const char *endpoint)
 {
@@ -62,15 +71,18 @@ ad_session *ad_open(const char *endpoint)
     s->audio_started = anland_audio_start() == 0;
     if (!s->audio_started)
         fprintf(stderr, "denial: cannot initialize Anland audio bridge; continuing without audio\n");
+    anland_device_set_pre_release_cb(device(s), on_pre_release, s);
     sync_audio(s);
     return s;
 }
 void ad_close(ad_session *s)
 {
     if (!s) return;
-    /* Stop the audio thread before releasing the transport's borrowed fd. */
-    if (s->audio_started) anland_audio_stop();
+    /* Explicit close bypasses fallback callbacks, so detach borrowed fds first. */
+    on_pre_release(s);
     anland_de_backend_destroy(s->backend);
+    if (s->audio_started) anland_audio_stop();
+    anland_camera_stop();
     free(s);
 }
 int ad_connected(ad_session *s)
@@ -95,6 +107,7 @@ int ad_reopen(ad_session *s, const char *endpoint)
     if (!s) return -EINVAL;
     memset(&s->tablet, 0, sizeof(s->tablet));
     detach_audio(s);
+    anland_camera_clear();
     int rc = anland_de_backend_reopen(s->backend, endpoint);
     sync_audio(s);
     return status(rc);
@@ -105,6 +118,7 @@ void ad_drop(ad_session *s)
     memset(&s->tablet, 0, sizeof(s->tablet));
     /* Keep the PipeWire nodes alive; only the consumer socket is detached. */
     detach_audio(s);
+    anland_camera_clear();
     anland_de_backend_drop_session(s->backend);
 }
 int ad_pump(ad_session *s)
@@ -330,4 +344,38 @@ int ad_capture_pointer(ad_session *s, uint32_t capture)
 {
     if (!s || capture > 1) return -EINVAL;
     return status(anland_device_set_consumer_var(device(s), ANLAND_DEVICE_VAR_CAPTURE_MOUSE, capture));
+}
+int ad_request_resources(ad_session *s, uint32_t service_type)
+{
+    if (!s) return -EINVAL;
+    return status(anland_device_request_resources(device(s), service_type, NULL));
+}
+int ad_scheduling(ad_session *s, int32_t pid, uint8_t flags)
+{
+    if (!s) return -EINVAL;
+    return status(anland_device_scheduling(device(s), (pid_t)pid, flags));
+}
+int ad_resources(ad_session *s, uint32_t service_type, uint32_t invalid,
+                 const int32_t *fds, uint32_t count)
+{
+    if (!s || (!fds && count) || invalid > 1) {
+        for (uint32_t i = 0; fds && i < count; ++i)
+            if (fds[i] >= 0) close(fds[i]);
+        if (service_type == ANLAND_DEVICE_SERVICE_CAMERA)
+            anland_camera_clear();
+        return -EINVAL;
+    }
+    if (service_type == ANLAND_DEVICE_SERVICE_CAMERA && !invalid && count >= 2 && count <= 64) {
+        int stream_fds[63];
+        for (uint32_t i = 1; i < count; ++i)
+            stream_fds[i - 1] = fds[i];
+        anland_camera_set_resources(fds[0], stream_fds, (int)count - 1);
+        return 0;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+        if (fds && fds[i] >= 0) close(fds[i]);
+    if (service_type == ANLAND_DEVICE_SERVICE_CAMERA)
+        anland_camera_clear();
+    if (count > 64) return -EMSGSIZE;
+    return 0;
 }

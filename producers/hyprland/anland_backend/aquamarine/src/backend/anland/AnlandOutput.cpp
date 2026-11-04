@@ -1,4 +1,6 @@
 #include "AnlandOutput.hpp"
+#include "anland_de_backend.h"
+#include "anland_present.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -52,12 +54,15 @@ bool CAnlandOutput::resetForSession() {
     state->resetExplicitFences();
     state->setBuffer(nullptr);
     updateMode(true);
+    owner->resendScheduling();
     return true;
 }
 
 void CAnlandOutput::updateMode(bool forceNotification) {
     auto owner = m_backend.lock();
     if (!owner || !owner->m_width || !owner->m_height) return;
+    anland_present_note_refresh(anland_de_backend_present_object(owner->m_public),
+                                owner->m_refresh);
     const Vector2D size{double(owner->m_width), double(owner->m_height)};
     if (!forceNotification && !modes.empty() && modes[0]->pixelSize == size && modes[0]->refreshRate == owner->m_refresh) return;
     modes = {makeShared<SOutputMode>()};

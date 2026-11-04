@@ -4773,7 +4773,7 @@ diff --git a/compositor/src/bin/deniald/wayland_frontend/text_input.rs b/composi
 index a8e10cf..efd90fc 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/text_input.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/text_input.rs
-@@ -1111,12 +1111,130 @@ fn parse_available_actions(bytes: &[u8]) -> Option<Vec<u32>> {
+@@ -1111,12 +1111,144 @@ fn parse_available_actions(bytes: &[u8]) -> Option<Vec<u32>> {
      Some(actions)
  }
  
@@ -4855,6 +4855,20 @@ index a8e10cf..efd90fc 100644
 +            enter_serial: keyboard.last_enter()?,
 +            epoch: self.input_method.consumer_epoch(),
 +        })
++    }
++
++    #[cfg(feature = "external-output")]
++    pub(crate) fn focused_client_pid(&self) -> Option<i32> {
++        use smithay::wayland::seat::WaylandFocus;
++        let keyboard = self.seat.get_keyboard()?;
++        let focus = keyboard.current_focus()?;
++        let surface = focus.wl_surface()?;
++        if !surface.is_alive() {
++            return None;
++        }
++        let client = surface.client()?;
++        let pid = client.get_credentials(&self.display_handle).ok()?.pid;
++        (pid > 0).then_some(pid)
 +    }
 +
 +    #[cfg(feature = "external-output")]

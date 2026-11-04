@@ -5,8 +5,7 @@
 # Usage:
 #   ./build.sh [additional makepkg options]
 #
-# KWin follows the upstream Plasma/6.8 maintenance branch; its patch must apply
-# without fuzz. The branch may include fixes newer than the latest release.
+# KWin uses the verified 6.8.0 release; its patch must apply without fuzz.
 # BUILD_XWAYLAND=0 reuses an already installed patched Xwayland.
 # Xwayland keeps its existing upstream source policy.
 # KWIN_PATCH and XWAYLAND_PATCH override the maintained patches.
@@ -84,12 +83,13 @@ prepare_kwin_stage() {
     # must be self-contained (relative links only resolve inside the checkout).
     cp -aL "$BACKEND_SRC/src" "$KWIN_OVERLAY_ROOT/kwin/"
     tar -chf "$KWIN_STAGE/anland-overlay.tar" -C "$KWIN_OVERLAY_ROOT" "kwin/src/backends/anland"
-    # Record checksums for both local inputs in the staged makepkg recipe.
-    local patch_sha overlay_sha
+    # Freeze all local inputs in the staged makepkg recipe, not just upstream.
+    local release_sha patch_sha overlay_sha
+    release_sha="$(source "$KWIN_STAGE/PKGBUILD"; printf '%s' "${sha256sums[0]}")"
     patch_sha="$(sha256sum "$KWIN_STAGE/kwin.patch" | cut -d' ' -f1)"
     overlay_sha="$(sha256sum "$KWIN_STAGE/anland-overlay.tar" | cut -d' ' -f1)"
     printf '\n# Generated local input checksums.\nsha256sums=(\x27%s\x27 \x27%s\x27 \x27%s\x27)\n' \
-        'SKIP' "$patch_sha" "$overlay_sha" >> "$KWIN_STAGE/PKGBUILD"
+        "$release_sha" "$patch_sha" "$overlay_sha" >> "$KWIN_STAGE/PKGBUILD"
 }
 
 export JOBS="${JOBS:-$(nproc)}"
@@ -160,7 +160,7 @@ shopt -u nullglob
 
 cat <<EOF
 
-Done. KWin from Plasma/6.8 was built for aarch64 (BUILD_XWAYLAND=$BUILD_XWAYLAND).
+Done. KWin 6.8.0 was built for aarch64 (BUILD_XWAYLAND=$BUILD_XWAYLAND).
 Package artifacts: $PKGDEST_DIR
 The packages keep the names 'xorg-xwayland' and 'kwin'; KWin uses pkgrel 1.1.
 EOF

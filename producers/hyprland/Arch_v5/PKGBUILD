@@ -3,7 +3,7 @@
 # Aquamarine is renamed, so system Aquamarine and its consumers stay intact.
 pkgbase=hyprland-anland
 pkgname=(hyprland-anland hyprpm-anland)
-pkgver=0
+pkgver=0.57.0
 pkgrel=4.1
 pkgdesc='Hyprland with Anland v5, Arch Linux ARM runtime and plugin SDK layout'
 arch=(aarch64)
@@ -12,29 +12,31 @@ license=(BSD-3-Clause)
 _hyprland_depends=(
     cairo libgcc libstdc++ glibc glib2 libgio-2.0.so libgobject-2.0.so glslang
     hyprcursor libhyprcursor.so hyprgraphics libhyprgraphics.so hyprland-guiutils
-    hyprlang libhyprlang.so 'hyprutils>=0.14' 'libhyprutils.so=13-64' hyprwire libhyprwire.so
-    lcms2 liblcms2.so libdrm libglvnd libEGL.so libGLESv2.so libinput libx11 libxcb
+    hyprlang libhyprlang.so 'hyprutils>=0.14.3' 'libhyprutils.so=13-64' hyprwire libhyprwire.so
+    lcms2 liblcms2.so libcanberra 'libcanberra.so=0-64' libdrm libglvnd libEGL.so
+    libGLESv2.so libinput libx11 libxcb
     libxcomposite libxcursor libxfixes 'libxkbcommon>=1.11' libxkbcommon.so libxrender
     'lua>=5.5' 'lua<5.6' mesa muparser opengl-driver pango libpango-1.0.so
     libpangocairo-1.0.so pixman libpixman-1.so re2 libre2.so tomlplusplus
     libtomlplusplus.so util-linux-libs libuuid.so wayland libwayland-server.so
-    'wayland-protocols>=1.49' xcb-proto xcb-util xcb-util-errors xcb-util-image
-    xcb-util-keysyms xcb-util-renderutil xcb-util-wm xorg-xwayland)
+    'wayland-protocols>=1.49' sdbus-cpp 'libsdbus-c++.so=2-64' xcb-proto xcb-util
+    xcb-util-errors xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm xorg-xwayland)
 # Dependencies for the renamed bundled Aquamarine and explicit Anland launcher.
 _anland_depends=(libpipewire libdisplay-info libdisplay-info.so hwdata seatd
-    libseat.so systemd-libs libudev.so libei readline procps-ng util-linux bash)
+    libseat.so systemd-libs libudev.so libei 'libeis.so=1-64' readline 'libreadline.so=8-64'
+    procps-ng util-linux bash)
 depends=("${_hyprland_depends[@]}" "${_anland_depends[@]}")
-makedepends=(cmake 'gcc>=15' glaze hyprland-protocols hyprwayland-scanner meson
+makedepends=(cmake 'gcc>=15' glaze hyprland-protocols hyprwayland-scanner meson sdbus-cpp
     ninja xorgproto python git pkgconf patchelf glm cpio)
 checkdepends=(doctest)
-optdepends=('hyprpm: build and install plugins'
+optdepends=('hyprpm-anland: build and install plugins with the matching SDK'
     'hyprshutdown: clean logout and shutdown helper'
     'xdg-desktop-portal-hyprland: xdg-desktop-portal backend for hyprland'
     'polkit: authentication')
 source=(
- 'hyprland::git+https://github.com/hyprwm/Hyprland.git#commit=ff672deb68f6b5364f402914f006cb17389a0444'
+ 'hyprland::git+https://github.com/hyprwm/Hyprland.git#commit=0aa6745f705f2c4b0a5004eb019ef76e5bbdb426'
  'aquamarine::git+https://github.com/hyprwm/aquamarine.git#commit=f31c47a1b9d300847d8fc3108ad959448103dfc1'
- 'hyprgrass::git+https://github.com/horriblename/hyprgrass.git#commit=a8979156cd87e7c58d126ac0437cae498a5b2d18'
+ 'hyprgrass::git+https://github.com/horriblename/hyprgrass.git#commit=8ca1af717d5b4ea1215a781df52bcef02d7b15e6'
  'wf-touch::git+https://github.com/WayfireWM/wf-touch.git#commit=8974eb0f6a65464b63dd03b842795cb441fb6403'
  'udis86::git+https://github.com/canihavesomecoffee/udis86.git#commit=5336633af70f3917760a6d441ff02d93477b0c86'
  'anland-inputs.tar.gz')
@@ -46,7 +48,11 @@ pkgver() {
     local description
     description="$(git describe --long --tags --match 'v[0-9]*' 2>/dev/null || true)"
     if [[ "$description" =~ ^v([0-9]+(\.[0-9]+)+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
-        printf '%s.r%s.g%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+        if [[ ${BASH_REMATCH[3]} == 0 ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+        else
+            printf '%s.r%s.g%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+        fi
     else
         printf '0.0.0.r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
     fi
@@ -119,7 +125,7 @@ build() {
     export GIT_COMMIT_HASH="$_commit"
     export GIT_TAG="$(git -C "$srcdir/hyprland" describe --tags --always HEAD)"
     _cmake aquamarine -DCMAKE_INSTALL_INCLUDEDIR=include/aquamarine-anland
-    _cmake hyprland -DNO_HYPRPM=OFF -DNO_UWSM=OFF -DNO_RTKIT=ON -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
+    _cmake hyprland -DNO_HYPRPM=OFF -DNO_UWSM=OFF -DNO_RTKIT=OFF -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
     meson setup --reconfigure "$srcdir/build-hyprgrass" "$srcdir/trees/hyprgrass" --prefix="$_prefix" \
         --libdir=lib/hyprland/plugins --buildtype=release --wrap-mode=nodownload -Dtests=auto
     meson compile -C "$srcdir/build-hyprgrass" -j "${JOBS:-2}"

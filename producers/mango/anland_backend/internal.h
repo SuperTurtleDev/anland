@@ -10,6 +10,7 @@
 #include "mango/ext-protocol/text-input.h"
 #include <anland_de_backend.h>
 #include <anland_audio.h>
+#include <anland_camera.h>
 #include <anland_tablet.h>
 #include <drm_fourcc.h>
 #include <errno.h>
@@ -83,7 +84,13 @@ struct anland_backend {
     anland_tablet tablet_state;
 	struct wl_event_source *data_source, *ready_source, *reconnect_source;
 	struct wl_event_source *scene_source, *frame_timer, *pump_timer;
+	struct wl_event_source *controls_timer;
+	struct wl_listener focus_change;
 	bool destroying, session_lost;
+	bool focus_listener_set;
+	pid_t active_scheduling_pid;
+	bool capture_mouse_sent, capture_mouse_known;
+	bool camera_started;
 	bool ime_grabbed;
     uint32_t pressed_buttons[INPUT_PRESSED_MAX], button_count;
     uint32_t touch_ids[INPUT_PRESSED_MAX], touch_count;
@@ -101,6 +108,8 @@ struct anland_backend {
 	char *input_payload;
 	size_t input_payload_size;
 	uint32_t input_payload_type;
+	uint32_t input_resource_type;
+	bool input_resource_invalid;
 };
 
 extern const struct wlr_keyboard_impl mango_private_keyboard_impl;
@@ -132,6 +141,9 @@ void mango_private_dispatch_scene(struct anland_backend *backend);
 void mango_private_drop_session(struct anland_backend *backend);
 void mango_private_arm_frame(struct anland_backend *backend);
 void mango_private_retry_pump(struct anland_backend *backend);
+void mango_private_sync_scheduling(struct anland_backend *backend, bool force);
+void mango_private_sync_consumer_var(struct anland_backend *backend, bool force);
+void mango_private_handle_focus_change(struct wl_listener *listener, void *data);
 
 #endif
 #endif
