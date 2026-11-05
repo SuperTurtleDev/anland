@@ -3,6 +3,7 @@ use super::capture::{CaptureState, CapturingRenderer};
 use super::client::{Client, fence_signaled};
 use super::display::OutputDriver;
 use super::event_sources::EventSources;
+use super::ffi;
 use super::graphics::RenderDevice;
 use super::input::{InputStream, Message};
 use super::lifetime::{Action, Lifetime};
