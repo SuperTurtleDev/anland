@@ -6,7 +6,6 @@
 #include "steamcompmgr.hpp"
 #include "session.h"
 #include "input.h"
-#include "tablet.h"
 #include "ime.hpp"
 #include "clipboard.hpp"
 #include "touch_state.hpp"
@@ -29,13 +28,55 @@
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
 #include "wlr_end.hpp"
+// DIAG: needed for XQueryPointer (temporary).
+#include <X11/Xlib.h>
+#include <X11/extensions/XTest.h>
+
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
+
+// ArmadaOS: display_sleep is implemented upstream only for the DRM backend,
+// which blanks a real connector through cv_drm_sleep_screens[]. Anland has no
+// connector, so the request used to be accepted and dropped. Read the same
+// convars here and honour them: while asleep no frames are submitted, and a
+// reconnecting consumer clears them again.
+//
+// The convar array is defined in DRMBackend.cpp at global scope (the
+// gamescope:: only qualifies its element type), so this declaration must also
+// sit at global scope. Declaring it inside namespace gamescope mangles to
+// gamescope::cv_drm_sleep_screens and fails to link.
+extern gamescope::ConVar<bool> cv_drm_sleep_screens[];
 
 namespace gamescope
 {
     static anland_gamescope_session *s_session = nullptr;
     static uint64_t s_pending = 0;
+    static bool AnlandSleepRequested()
+    {
+        return cv_drm_sleep_screens[ GAMESCOPE_SCREEN_TYPE_INTERNAL ] ||
+               cv_drm_sleep_screens[ GAMESCOPE_SCREEN_TYPE_EXTERNAL ];
+    }
+    // Log only on edges: a per-frame wake message would drown the log, and the
+    // whole point of this patch is that the state is observable at all.
+    static void AnlandNoteSleepState()
+    {
+        static bool s_bAsleep = false;
+        const bool bAsleep = AnlandSleepRequested();
+        if ( bAsleep == s_bAsleep )
+            return;
+        s_bAsleep = bAsleep;
+        fprintf( stderr, bAsleep ? "Anland: display asleep, frames halted\n"
+                                 : "Anland: display awake, frames resumed\n" );
+    }
+    static void AnlandClearSleepRequest()
+    {
+        // Assigning the convar runs its callback (force_repaint), so the frame
+        // flow restarts immediately instead of waiting for the next input.
+        if ( cv_drm_sleep_screens[ GAMESCOPE_SCREEN_TYPE_INTERNAL ] )
+            cv_drm_sleep_screens[ GAMESCOPE_SCREEN_TYPE_INTERNAL ] = false;
+        if ( cv_drm_sleep_screens[ GAMESCOPE_SCREEN_TYPE_EXTERNAL ] )
+            cv_drm_sleep_screens[ GAMESCOPE_SCREEN_TYPE_EXTERNAL ] = false;
+    }
     class CAnlandConnector final : public CBaseBackendConnector, public INestedHints
     {
     public:
@@ -202,12 +243,12 @@ namespace gamescope
 
         virtual ~CAnlandBackend()
         {
+            // Release device-owned state before tearing down the IME and session.
+            ReleaseInput();
             // XWM destroys the backend while the Wayland loop is still running.
             // Quiesce callbacks under the same lock used by event dispatch.
             wlserver_lock();
             DetachPointerFocus();
-            anland_gamescope_tablet_destroy(m_Tablet);
-            m_Tablet = nullptr;
             if (m_Wakeup) wl_event_source_remove(m_Wakeup);
             m_Wakeup = nullptr;
             m_Connector.SetClipboard(nullptr);
@@ -364,6 +405,13 @@ namespace gamescope
                     return dirty;
                 AttachSession();
                 dirty = true;
+                // ArmadaOS: a reconnected consumer wants frames, so a sleep
+                // request left over from while it was gone is stale.
+                if ( AnlandSleepRequested() )
+                {
+                    AnlandClearSleepRequest();
+                    force_repaint();
+                }
                 fprintf(stderr, "Anland: session reconnected\n");
             }
             anland_gamescope_session_pump(s_session, 0);
@@ -507,6 +555,12 @@ namespace gamescope
 
         virtual bool IsPaused() const override
         {
+            // ArmadaOS: an explicit display_sleep request stops the frame flow.
+            // The session itself stays open, so waking does not have to rebuild
+            // the display link.
+            AnlandNoteSleepState();
+            if ( AnlandSleepRequested() )
+                return true;
             anland_gamescope_target target{};
             target.buffer.fd = -1;
             if (!s_session || s_pending ||
@@ -545,7 +599,7 @@ namespace gamescope
 
         // A separate standard-layout object lets Wayland callbacks recover their
         // owner without applying wl_container_of to the polymorphic backend.
-        struct PointerFocusWatch {
+struct PointerFocusWatch {
             wl_listener pointer_focus{};
             wl_listener keyboard_focus{};
             wl_listener destroy{};
@@ -555,10 +609,23 @@ namespace gamescope
         static void PointerFocusChanged(wl_listener *listener, void *)
         {
             PointerFocusWatch *watch = wl_container_of(listener, watch, pointer_focus);
-            // wlroots resets pointer buttons on focus changes. Do not send UPs
-            // into the new surface or let old contacts suppress its next DOWN.
+            // wlroots resets pointer buttons on focus changes, and old contacts
+            // must not suppress the new surface's next DOWN. Every button the
+            // old surface was told about still owes exactly one UP, though:
+            // clearing the set silently leaves the client holding a pressed
+            // button, which swallows the next click (a press and release shorter
+            // than one focus change reaches the game as DOWN only). Release them
+            // the same way ReleaseInput() does, then drop the contacts.
+            if (!watch->backend->m_Buttons.empty())
+            {
+                timespec now{};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                const uint32_t time = uint32_t(uint64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000);
+                for (auto button : watch->backend->m_Buttons)
+                    wlserver_mousebutton(button, false, time);
+                watch->backend->m_Buttons.clear();
+            }
             watch->backend->m_Touches.reset_pointer_focus();
-            watch->backend->m_Buttons.clear();
         }
         static void KeyboardFocusChanged(wl_listener *listener, void *data)
         {
@@ -579,8 +646,6 @@ namespace gamescope
         void AttachPointerFocus()
         {
             m_PointerFocus.backend = this;
-            m_TextFocused.store(wlserver.wlr.seat->keyboard_state.focused_surface != nullptr,
-                                 std::memory_order_relaxed);
             m_PointerFocus.pointer_focus.notify = &PointerFocusChanged;
             m_PointerFocus.keyboard_focus.notify = &KeyboardFocusChanged;
             m_PointerFocus.destroy.notify = &PointerSeatDestroyed;
@@ -612,16 +677,6 @@ namespace gamescope
             }
             wlserver_lock();
             switch (ev->kind) {
-            case AG_TABLET: {
-                if (!self->m_Tablet)
-                    self->m_Tablet = anland_gamescope_tablet_create(wlserver.display, wlserver.wlr.seat);
-                if (!self->m_Tablet || !anland_gamescope_tablet_frame(self->m_Tablet, &ev->tablet,
-                    wlserver.mouse_focus_surface,
-                    (ev->tablet.x + focusedWindowOffsetX) * focusedWindowScaleX,
-                    (ev->tablet.y + focusedWindowOffsetY) * focusedWindowScaleY))
-                    fprintf(stderr, "Anland: native tablet registration failed\n");
-                break;
-            }
             case AG_KEY:
                 if (ev->pressed) self->m_Keys.insert(ev->code); else self->m_Keys.erase(ev->code);
                 // virtual_keyboard_device is registered with keyboard_group:
@@ -633,8 +688,32 @@ namespace gamescope
                     wlr_keyboard_notify_key(wlserver.wlr.virtual_keyboard_device, &key);
                 }
                 break;
-            case AG_MOTION:
-                if (wlserver.GetCursorConstraint()) {
+            case AG_MOTION: {
+                // DIAG: prove the motion path runs and what it forwards.
+                const bool bConstrained = wlserver.GetCursorConstraint() != nullptr;
+                static int nMotionDiag = 0;
+                if (nMotionDiag < 40) {
+                    ++nMotionDiag;
+                    // Query the real X pointer so we can tell whether notify_motion
+                    // actually moves XWayland's global pointer.
+                    int nX = -1, nY = -1, nWx = -1, nWy = -1;
+                    unsigned int nMask = 0;
+                    Window nRootRet = 0, nChildRet = 0;
+                    gamescope_xwayland_server_t *pXsrv = wlserver_get_xwayland_server(0);
+                    _XDisplay *pDpy = pXsrv ? pXsrv->get_xdisplay() : nullptr;
+                    if (pDpy) {
+                        XQueryPointer(pDpy, DefaultRootWindow(pDpy), &nRootRet, &nChildRet,
+                                      &nX, &nY, &nWx, &nWy, &nMask);
+                    }
+                    fprintf(stderr, "ANLANDDIAG motion#%d con=%d abs=%.1f,%.1f d=%.1f,%.1f "
+                            "sx=%.1f sy=%.1f sc=%.2f,%.2f off=%.2f,%.2f xptr=%d,%d\n",
+                            nMotionDiag, bConstrained ? 1 : 0, ev->absolute_x, ev->absolute_y,
+                            ev->x, ev->y,
+                            wlserver.mouse_surface_cursorx, wlserver.mouse_surface_cursory,
+                            focusedWindowScaleX, focusedWindowScaleY,
+                            focusedWindowOffsetX, focusedWindowOffsetY, nX, nY);
+                }
+                if (bConstrained) {
                     wlserver_mousemotion(ev->x * focusedWindowScaleX,
                                          ev->y * focusedWindowScaleY, time);
                 } else {
@@ -643,13 +722,22 @@ namespace gamescope
                                        time, false);
                 }
                 break;
-            case AG_BUTTON:
-                // Each source owes exactly one release; duplicate events must
-                // not inflate wlroots' pressed-button count.
-                if (ev->pressed ? self->m_Buttons.insert(ev->code).second
-                                : self->m_Buttons.erase(ev->code) != 0)
+            }
+            case AG_BUTTON: {
+                // DIAG: prove whether the dedup gate forwards the event.
+                const bool bSend = ev->pressed ? self->m_Buttons.insert(ev->code).second
+                                               : self->m_Buttons.erase(ev->code) != 0;
+                fprintf(stderr, "ANLANDDIAG btn=%d pressed=%d send=%d nbuttons=%zu "
+                        "focus=%p client=%p seat_focus=%p\n",
+                        ev->code, ev->pressed ? 1 : 0, bSend ? 1 : 0,
+                        self->m_Buttons.size(),
+                        (void *)wlserver.mouse_focus_surface,
+                        (void *)wlserver.wlr.seat->pointer_state.focused_client,
+                        (void *)wlserver.wlr.seat->pointer_state.focused_surface);
+                if (bSend)
                     wlserver_mousebutton(ev->code, ev->pressed, time);
                 break;
+            }
             case AG_AXIS:
                 wlr_seat_pointer_notify_axis(wlserver.wlr.seat, time,
                     ev->code == 0 ? WL_POINTER_AXIS_VERTICAL_SCROLL : WL_POINTER_AXIS_HORIZONTAL_SCROLL,
@@ -771,7 +859,6 @@ namespace gamescope
             clock_gettime(CLOCK_MONOTONIC, &now);
             uint32_t time = uint32_t(uint64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000);
             wlserver_lock();
-            anland_gamescope_tablet_reset(m_Tablet);
             for (auto code : m_Keys) {
                 wlr_keyboard_key_event key{};
                 key.time_msec = time; key.keycode = code; key.update_state = true;
@@ -864,8 +951,8 @@ namespace gamescope
                 wlserver_unlock();
                 return;
             }
-            if (!type_local_text(self->m_Ime, text))
-                fprintf(stderr, "Anland: text input rejected (local IME queue limit)\n");
+            if (!type_local_text(self->m_Ime, text, size))
+                fprintf(stderr, "Anland: text input rejected (local IME queue limit)\\n");
             wlserver_unlock();
         }
         AnlandClipboard *m_Clipboard = nullptr;
@@ -880,7 +967,6 @@ namespace gamescope
         std::set<int32_t> m_Keys, m_Buttons;
         AnlandTouchState m_Touches;
         anland_gamescope_input m_Input{};
-        anland_gamescope_tablet *m_Tablet = nullptr;
         CAnlandConnector m_Connector;
 	};
 

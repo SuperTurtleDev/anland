@@ -7,8 +7,8 @@ anland_public = static_library('gamescope-anland-public',
   'libdisplay_producer/anland_device.c',
   'libdisplay_producer/anland_scene.c',
   'libdisplay_producer/anland_scene_legacy.c',
-  'libdisplay_producer/anland_pacing.c',
   'libdisplay_producer/anland_present.c',
+  'libdisplay_producer/anland_pacing.c',
   # One scene/device presentation path; no extra presentation service.
   'libdisplay_producer/anland_buffer_registry.c',
   'libdisplay_producer/anland_window_map.c',
@@ -22,4 +22,4 @@ anland_public = static_library('gamescope-anland-public',
 anland_dep = declare_dependency(link_with: anland_public,
   include_directories: anland_inc,
   dependencies: [dependency('libpipewire-0.3'), dependency('threads')])
-src += files('AnlandBackend.cpp', 'clipboard.cpp', 'session.c', 'input.c', 'tablet.c')
+src += files('AnlandBackend.cpp', 'clipboard.cpp', 'session.c', 'input.c')

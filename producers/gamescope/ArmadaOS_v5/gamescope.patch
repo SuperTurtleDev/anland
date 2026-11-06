@@ -1,0 +1,601 @@
+From 43ba51d012de28759932fca92abc6a118c4c9c5f Mon Sep 17 00:00:00 2001
+From: anland <anland@local>
+Date: Wed, 4 Nov 2026 21:01:15 +0800
+Subject: [PATCH] anland changes
+
+---
+ layer/VkLayer_FROG_gamescope_wsi.cpp |  33 ++++++++-
+ src/Script/Script.cpp                |   3 +-
+ src/backend.h                        |   2 +
+ src/backends.h                       |   2 +
+ src/ime.cpp                          | 100 +++++++++++++++++++++++++++
+ src/ime.hpp                          |   9 +++
+ src/main.cpp                         |   8 ++-
+ src/meson.build                      |   4 +-
+ src/rendervulkan.cpp                 |  19 ++++-
+ src/steamcompmgr.cpp                 |  47 +++++++++++--
+ src/steamcompmgr_shared.hpp          |   2 +
+ src/wlserver.cpp                     |  28 ++++++++
+ src/xwayland_ctx.hpp                 |   1 +
+ 13 files changed, 249 insertions(+), 9 deletions(-)
+
+diff --git a/layer/VkLayer_FROG_gamescope_wsi.cpp b/layer/VkLayer_FROG_gamescope_wsi.cpp
+index 5a226fb..37936ca 100644
+--- a/layer/VkLayer_FROG_gamescope_wsi.cpp
++++ b/layer/VkLayer_FROG_gamescope_wsi.cpp
+@@ -29,6 +29,8 @@
+ #include <optional>
+ 
+ #include <poll.h>
++#include <time.h>
++#include <cstdlib>
+ #include <sys/stat.h>
+ // For limiter file.
+ #include <time.h>
+@@ -585,6 +587,35 @@ namespace GamescopeWSILayer {
+     // Cached for comparison.
+     std::optional<VkRect2D> cachedWindowRect;
+ 
++    // canBypassXWayland costs several X round trips, and the answer only changes when a
++    // client is remapped, so it is re-checked at most every GAMESCOPE_WSI_BYPASS_CHECK_MS
++    // (default 100). Set it to 0 to query on every present.
++    std::optional<bool> presentBypass;
++    bool presentBypassHdr = false;
++    uint64_t presentBypassNs = 0;
++
++    static uint64_t presentBypassIntervalNs() {
++      static const uint64_t interval = [] {
++        const char *v = getenv("GAMESCOPE_WSI_BYPASS_CHECK_MS");
++        return uint64_t(v && *v ? strtoull(v, nullptr, 10) : 100) * 1000000ull;
++      }();
++      return interval;
++    }
++
++    bool canBypassXWaylandAtPresent(bool hdrColorspace) {
++      if (isWayland())
++        return true;
++      timespec ts;
++      clock_gettime(CLOCK_MONOTONIC, &ts);
++      const uint64_t now = uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
++      if (!presentBypass || presentBypassHdr != hdrColorspace || now - presentBypassNs >= presentBypassIntervalNs()) {
++        presentBypass = canBypassXWayland(hdrColorspace);
++        presentBypassHdr = hdrColorspace;
++        presentBypassNs = now;
++      }
++      return *presentBypass;
++    }
++
+     bool isWayland() const {
+       // Is native Wayland?
+       return connection == nullptr;
+@@ -2197,7 +2228,7 @@ namespace GamescopeWSILayer {
+             continue;
+           }
+ 
+-          const bool canBypass = gamescopeSurface->canBypassXWayland(gamescopeSwapchain->isHdrColorspace);
++          const bool canBypass = gamescopeSurface->canBypassXWaylandAtPresent(gamescopeSwapchain->isHdrColorspace);
+           if (canBypass != gamescopeSwapchain->isBypassingXWayland) {
+             if (canBypass) {
+               if (!(gamescopeSurface->flags & GamescopeLayerClient::Flag::NoSuboptimal))
+diff --git a/src/Script/Script.cpp b/src/Script/Script.cpp
+index fae5bfa..c289cf3 100644
+--- a/src/Script/Script.cpp
++++ b/src/Script/Script.cpp
+@@ -126,7 +126,8 @@ namespace gamescope
+         }
+         else
+         {
+-            RunFolder( SCRIPT_DIR, true );
++            // Installed system package layout (independent of the cache build prefix).
++            RunFolder( "/usr/share/gamescope/scripts", true );
+             RunFolder( "/etc/gamescope/scripts", true );
+         }
+ 
+diff --git a/src/backend.h b/src/backend.h
+index fde91d5..4687582 100644
+--- a/src/backend.h
++++ b/src/backend.h
+@@ -369,6 +369,8 @@ namespace gamescope
+         virtual bool SupportsTearing() const = 0;
+ 
+         virtual bool UsesVulkanSwapchain() const = 0;
++        virtual bool RequiresDrmPrimaryNode() const { return !UsesVulkanSwapchain(); }
++        virtual const char *GetRenderNodeOverride() const { return nullptr; }
+         virtual bool IsSessionBased() const = 0;
+ 
+         virtual bool SupportsExplicitSync() const = 0;
+diff --git a/src/backends.h b/src/backends.h
+index 4e017bf..e64f845 100644
+--- a/src/backends.h
++++ b/src/backends.h
+@@ -10,6 +10,7 @@ namespace gamescope
+         SDL,
+         OpenVR,
+         Headless,
++        Anland,
+         Wayland,
+     };
+ 
+@@ -18,5 +19,6 @@ namespace gamescope
+     class CDRMBackend;
+     class COpenVRBackend;
+     class CHeadlessBackend;
++    class CAnlandBackend;
+     class CWaylandBackend;
+ }
+diff --git a/src/ime.cpp b/src/ime.cpp
+index 518ac02..31fe880 100644
+--- a/src/ime.cpp
++++ b/src/ime.cpp
+@@ -1,12 +1,15 @@
+ #include "ime.hpp"
++#ifndef ANLAND_IME_SEAT_TEST
+ #include "wlserver.hpp"
+ #include "log.hpp"
++#endif
+ 
+ #include <assert.h>
+ #include <unistd.h>
+ #include <string.h>
+ 
+ #include <deque>
++#include <string>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -112,6 +115,8 @@ struct wlserver_input_method {
+ 	struct wl_event_source *ime_reset_ime_keyboard_event_source;
+ 	struct wl_event_source *ime_release_ime_keypress_event_source;
+ 
++    std::string local_text;
++    struct wl_event_source *local_text_timer = nullptr;
+ 	uint32_t uFakeTimestamp = 0;
+ };
+ 
+@@ -592,8 +597,69 @@ static void manager_handle_create_input_method(struct wl_client *client, struct
+ 	ime->ime_release_ime_keypress_event_source = wl_event_loop_add_timer(manager->server->event_loop, release_key_if_needed, ime);
+ }
+ 
++static int local_text_tick(void *data)
++{
++    auto *ime = static_cast<wlserver_input_method *>(data);
++    if (ime->local_text.empty()) return 0;
++
++    // Send one complete UTF-8 code point per timer tick.
++    reset_ime_keyboard(ime);
++    const size_t end = utf8_size(ime->local_text.c_str());
++    if (!end || end > ime->local_text.size()) {
++        ime->local_text.clear();
++        return 0;
++    }
++    std::string batch = ime->local_text.substr(0, end);
++    ime->local_text.erase(0, end);
++    type_text(ime, batch.c_str());
++    wl_event_source_timer_update(ime->manager->ime_reset_keyboard_event_source, 100);
++    if (!ime->local_text.empty())
++        wl_event_source_timer_update(ime->local_text_timer, 150);
++    return 0;
++}
++
++bool type_local_text(struct wlserver_input_method *ime, const char *text, size_t size)
++{
++    if (!ime || !ime->local_text_timer || !text) return false;
++    if (size > 65536 || ime->local_text.size() + size > 65536) return false;
++
++    for (size_t i = 0; i < size;) {
++        const unsigned char c = static_cast<unsigned char>(text[i]);
++        const size_t n = c == 0 ? 0 : c < 0x80 ? 1 :
++            c >= 0xC2 && c <= 0xDF ? 2 :
++            c >= 0xE0 && c <= 0xEF ? 3 :
++            c >= 0xF0 && c <= 0xF4 ? 4 : 0;
++        if (!n || i + n > size) return false;
++        for (size_t j = 1; j < n; ++j)
++            if ((static_cast<unsigned char>(text[i + j]) & 0xC0) != 0x80) return false;
++        if (n == 3 && ((c == 0xE0 && static_cast<unsigned char>(text[i + 1]) < 0xA0) ||
++                       (c == 0xED && static_cast<unsigned char>(text[i + 1]) >= 0xA0))) return false;
++        if (n == 4 && ((c == 0xF0 && static_cast<unsigned char>(text[i + 1]) < 0x90) ||
++                       (c == 0xF4 && static_cast<unsigned char>(text[i + 1]) >= 0x90))) return false;
++        i += n;
++    }
++
++    const bool idle = ime->local_text.empty();
++    ime->local_text.append(text, size);
++    // Do not restart an armed timer: bursts must not shorten keymap lifetime.
++    if (idle && size)
++        wl_event_source_timer_update(ime->local_text_timer, 150);
++    return true;
++}
++
++void cancel_local_text(struct wlserver_input_method *ime)
++{
++    if (!ime) return;
++    ime->local_text.clear();
++    if (ime->local_text_timer)
++        wl_event_source_timer_update(ime->local_text_timer, 0);
++    reset_ime_keyboard(ime);
++}
++
+ struct wlserver_input_method *create_local_ime()
+ {
++	if (!global_manager || !global_manager->server)
++		return nullptr;
+ 	struct wlserver_input_method *ime = new wlserver_input_method();
+ 	ime->resource = nullptr;
+ 	ime->manager = global_manager;
+@@ -607,9 +673,30 @@ struct wlserver_input_method *create_local_ime()
+ 
+ 	wlr_keyboard_set_repeat_info(&ime->keyboard, 0, 0);
+ 
++    ime->local_text_timer = wl_event_loop_add_timer(global_manager->server->event_loop, local_text_tick, ime);
+ 	ime->ime_reset_ime_keyboard_event_source = wl_event_loop_add_timer(global_manager->server->event_loop, reset_ime_keyboard, ime);
+ 	ime->ime_release_ime_keypress_event_source = wl_event_loop_add_timer(global_manager->server->event_loop, release_key_if_needed, ime);
+ 
++    if (!ime->local_text_timer || !ime->ime_reset_ime_keyboard_event_source ||
++        !ime->ime_release_ime_keypress_event_source) {
++        if (ime->local_text_timer) {
++            wl_event_source_remove(ime->local_text_timer);
++            ime->local_text_timer = nullptr;
++        }
++        if (ime->ime_reset_ime_keyboard_event_source &&
++            ime->ime_release_ime_keypress_event_source) {
++            destroy_ime(ime);
++        } else {
++            if (ime->ime_reset_ime_keyboard_event_source)
++                wl_event_source_remove(ime->ime_reset_ime_keyboard_event_source);
++            if (ime->ime_release_ime_keypress_event_source)
++                wl_event_source_remove(ime->ime_release_ime_keypress_event_source);
++            wlr_keyboard_finish(&ime->keyboard);
++            free(ime->pending.string);
++        }
++        delete ime;
++        return nullptr;
++    }
+ 	return ime;
+ }
+ 
+@@ -653,3 +740,16 @@ void create_ime_manager(struct wlserver_t *wlserver)
+ 
+ 	global_manager = manager;
+ }
++
++// Paired with create_local_ime; only used by local backend-owned IMEs.
++void destroy_local_ime(struct wlserver_input_method *ime)
++{
++    if (!ime) return;
++    cancel_local_text(ime);
++    if (ime->local_text_timer) {
++        wl_event_source_remove(ime->local_text_timer);
++        ime->local_text_timer = nullptr;
++    }
++    destroy_ime(ime);
++    delete ime;
++}
+\ No newline at end of file
+diff --git a/src/ime.hpp b/src/ime.hpp
+index 0887083..66e0e1c 100644
+--- a/src/ime.hpp
++++ b/src/ime.hpp
+@@ -2,7 +2,10 @@
+ 
+ #pragma once
+ 
++#include <stddef.h>
++#ifndef ANLAND_IME_SEAT_TEST
+ #include "wlserver.hpp"
++#endif
+ #include "gamescope-input-method-protocol.h"
+ 
+ void create_ime_manager(struct wlserver_t *wlserver);
+@@ -11,3 +14,9 @@ struct wlserver_input_method *create_local_ime();
+ void destroy_ime(struct wlserver_input_method * ime);
+ void type_text(struct wlserver_input_method *ime, const char *text);
+ void perform_action(struct wlserver_input_method *ime, enum gamescope_input_method_action action);
++
++void destroy_local_ime(struct wlserver_input_method *ime);
++
++// Bounded asynchronous input for backend-owned local IMEs. Returns false on invalid UTF-8 or overflow.
++bool type_local_text(struct wlserver_input_method *ime, const char *text, size_t size);
++void cancel_local_text(struct wlserver_input_method *ime);
+\ No newline at end of file
+diff --git a/src/main.cpp b/src/main.cpp
+index eee5a02..2179868 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -206,6 +206,7 @@ const char usage[] =
+ #if HAVE_OPENVR
+ 	"                                     openvr => use OpenVR backend (outputs as a VR overlay)\n"
+ #endif
++	"                                     anland => direct Anland output (experimental, legacy only)\n"
+ 	"                                     headless => use headless backend (no window, no DRM output)\n"
+ 	"                                     wayland => use Wayland backend\n"
+ 	"  --cursor                       path to default cursor image\n"
+@@ -491,6 +492,8 @@ static enum gamescope::GamescopeBackend parse_backend_name(const char *str)
+ 	} else if (strcmp(str, "openvr") == 0) {
+ 		return gamescope::GamescopeBackend::OpenVR;
+ #endif
++	} else if (strcmp(str, "anland") == 0) {
++        return gamescope::GamescopeBackend::Anland;
+ 	} else if (strcmp(str, "headless") == 0) {
+ 		return gamescope::GamescopeBackend::Headless;
+ 	} else if (strcmp(str, "wayland") == 0) {
+@@ -1083,7 +1086,7 @@ int main(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+-	if ( g_pOriginalWaylandDisplay != NULL )
++	if ( g_pOriginalWaylandDisplay != NULL && eCurrentBackend != gamescope::GamescopeBackend::Anland )
+ 	{
+         if (CheckWaylandPresentationTime())
+         {
+@@ -1121,6 +1124,9 @@ int main(int argc, char **argv)
+ 			gamescope::IBackend::Set<gamescope::COpenVRBackend>();
+ 			break;
+ #endif
++		case gamescope::GamescopeBackend::Anland:
++            gamescope::IBackend::Set<gamescope::CAnlandBackend>();
++            break;
+ 		case gamescope::GamescopeBackend::Headless:
+ 			gamescope::IBackend::Set<gamescope::CHeadlessBackend>();
+ 			break;
+diff --git a/src/meson.build b/src/meson.build
+index 498bca6..0ee1052 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -128,6 +128,8 @@ src = [
+   'LibInputHandler.cpp',
+ ]
+ 
++subdir('Backends/anland')
++
+ luajit_dep = dependency( 'luajit' )
+ libinput_dep = dependency('libinput', required: true)
+ 
+@@ -197,7 +199,7 @@ gamescope_version = configure_file(
+     src, reshade_src, gamescope_version,
+     include_directories : [reshade_include, sol2_include],
+     dependencies: [
+-      dep_wayland, dep_x11, dep_xdamage, dep_xcomposite, dep_xrender, dep_xext, dep_xfixes,
++      anland_dep, dep_wayland, dep_x11, dep_xdamage, dep_xcomposite, dep_xrender, dep_xext, dep_xfixes,
+       dep_xxf86vm, dep_xres, glm_dep, drm_dep, wayland_server,
+       xkbcommon, thread_dep, sdl2_dep, wlroots_dep,
+       vulkan_dep, liftoff_dep, dep_xtst, dep_xmu, cap_dep, epoll_dep, pipewire_dep, librt_dep,
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 8d577e1..082497d 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -483,7 +483,7 @@ bool CVulkanDevice::createDevice()
+ 		};
+ 		vk.GetPhysicalDeviceProperties2( physDev(), &props2 );
+ 
+-		if ( !GetBackend()->UsesVulkanSwapchain() && !drmProps.hasPrimary ) {
++		if ( GetBackend()->RequiresDrmPrimaryNode() && !drmProps.hasPrimary ) {
+ 			vk_log.errorf( "physical device has no primary node" );
+ 			return false;
+ 		}
+@@ -517,6 +517,23 @@ bool CVulkanDevice::createDevice()
+ #endif
+ 	}
+ 
++	// Imported-output backends can provide an explicit render node when the
++	// Vulkan driver (e.g. Turnip KGSL) cannot expose physical_device_drm.
++	if ( !hasDrmProps && GetBackend()->GetRenderNodeOverride() ) {
++		const char *path = GetBackend()->GetRenderNodeOverride();
++		int fd = open( path, O_RDWR | O_CLOEXEC );
++		if ( fd < 0 ) {
++			vk_log.errorf_errno( "failed to open explicit render node %s", path );
++			return false;
++		}
++		if ( drmGetNodeTypeFromFd( fd ) != DRM_NODE_RENDER ) {
++			vk_log.errorf( "explicit device is not a DRM render node: %s", path );
++			close( fd );
++			return false;
++		}
++		m_drmRendererFd = fd;
++		vk_log.infof( "using explicit render node %s; Vulkan/device pairing is caller-selected", path );
++	}
+ 	if ( m_bSupportsModifiers && !supportsForeignQueue ) {
+ 		vk_log.infof( "The vulkan driver does not support foreign queues,"
+ 		              " disabling modifier support.");
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 409dd6e..3df836b 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -4825,6 +4825,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
+ 			/* Some games (e.g. DOOM Eternal) don't react well to being put back as
+ 			* iconic, so never do that. Only take them out of iconic. */
+ 			set_wm_state( ctx, id, ICCCM_NORMAL_STATE );
++			ctx->focus.focusWindow->iconifyRequested = false;
+ 
+ 			gpuvis_trace_printf( "determine_and_apply_focus focus %lu", id );
+ 
+@@ -4912,6 +4913,19 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
+ 	if ( keyboardFocusWindow && ctx->currentKeyboardFocusWindow && find_win( ctx, ctx->currentKeyboardFocusWindow ) == keyboardFocusWin )
+ 		keyboardFocusWindow = ctx->currentKeyboardFocusWindow;
+ 
++
++
++
++
++
++	if ( inputFocus == ctx->focus.focusWindow && ctx->focus.focusWindow->iconifyRequested )
++	{
++		ctx->focus.focusWindow->iconifyRequested = false;
++		xwm_log.infof( "restoring iconified focus window 0x%lx as input returns to it", ctx->focus.focusWindow->xwayland().id );
++		set_wm_state( ctx, ctx->focus.focusWindow->xwayland().id, ICCCM_NORMAL_STATE );
++		ctx->currentKeyboardFocusWindow = None;
++	}
++
+ 	if ( ctx->focus.inputFocusWindow != inputFocus ||
+ 		ctx->focus.inputFocusMode != inputFocus->inputFocusMode ||
+ 		ctx->currentKeyboardFocusWindow != keyboardFocusWindow )
+@@ -6682,6 +6696,8 @@ handle_wm_change_state(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, XClientMessag
+ 	if (state == ICCCM_ICONIC_STATE) {
+ 		xwm_log.debugf("Faking WM_CHANGE_STATE to ICONIC for window 0x%lx", w->xwayland().id);
+ 		set_wm_state( ctx, w->xwayland().id, ICCCM_ICONIC_STATE );
++		w->iconifyRequested = true;
++		MakeFocusDirty();
+ 	} else {
+ 		xwm_log.debugf("Unhandled WM_CHANGE_STATE to %ld for window 0x%lx", state, w->xwayland().id);
+ 	}
+@@ -7676,6 +7692,19 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+ 		if ( set_sdr_input_gain( bit_cast<float>(val) ) )
+ 			hasRepaint = true;
+ 	}
++	if ( ev->atom == ctx->atoms.gamescopeRestoreFocusWindow )
++	{
++
++
++		if ( ctx->focus.focusWindow && get_prop( ctx, ctx->root, ctx->atoms.gamescopeRestoreFocusWindow, 0 ) )
++		{
++			xwm_log.infof( "restore requested for focus window 0x%lx", ctx->focus.focusWindow->xwayland().id );
++			ctx->focus.focusWindow->iconifyRequested = false;
++			set_wm_state( ctx, ctx->focus.focusWindow->xwayland().id, ICCCM_NORMAL_STATE );
++			ctx->currentKeyboardFocusWindow = None;
++			MakeFocusDirty();
++		}
++	}
+ 	if ( ev->atom == ctx->atoms.gamescopeForceWindowsFullscreen )
+ 	{
+ 		ctx->force_windows_fullscreen = !!get_prop( ctx, ctx->root, ctx->atoms.gamescopeForceWindowsFullscreen, 0 );
+@@ -7713,9 +7742,17 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+ 		}
+ 
+ 		nightmode_t nightmode;
++		
++		#if defined (__aarch64__)
++		nightmode.amount = vec[0];
++		nightmode.hue = 25.0f / 360.0f;
++		nightmode.saturation = vec[1];
++		#else
+ 		nightmode.amount = vec[0];
+ 		nightmode.hue = vec[1];
+ 		nightmode.saturation = vec[2];
++		#endif
++
+ 
+ 		if ( set_color_nightmode( nightmode ) )
+ 			hasRepaint = true;
+@@ -9362,6 +9399,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
+ 	ctx->atoms.gamescopeHDRTonemapOperator = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_TONEMAP_OPERATOR", false );
+ 
+ 	ctx->atoms.gamescopeForceWindowsFullscreen = XInternAtom( ctx->dpy, "GAMESCOPE_FORCE_WINDOWS_FULLSCREEN", false );
++	ctx->atoms.gamescopeRestoreFocusWindow = XInternAtom( ctx->dpy, "GAMESCOPE_RESTORE_FOCUS_WINDOW", false );
+ 
+ 	ctx->atoms.gamescopeColorLut3DOverride = XInternAtom( ctx->dpy, "GAMESCOPE_COLOR_3DLUT_OVERRIDE", false );
+ 	ctx->atoms.gamescopeColorShaperLutOverride = XInternAtom( ctx->dpy, "GAMESCOPE_COLOR_SHAPERLUT_OVERRIDE", false );
+@@ -10944,9 +10982,9 @@ steamcompmgr_main(int argc, char **argv)
+ 
+ 			// If we are running behind, allow tearing.
+ 
+-			// A false vblank value means bShouldPaint will resolve to false below, effectively ignoring this flag and losing any request
+-			// to force a repaint. Don't clear g_bForceRepaint unless vblank is true.
+-			const bool bForceRepaint = vblank && g_bForceRepaint.exchange(false);
++			const bool bBackendPaused = GetBackend()->IsPaused();
++			// A force request must survive until a vblank with a writable target.
++			const bool bForceRepaint = vblank && !bBackendPaused && g_bForceRepaint.exchange(false);
+ 			const bool bForceSyncFlip = bForceRepaint || is_fading_out( pPaintFocus );
+ 
+ 			// If we are compositing, always force sync flips because we currently wait
+@@ -11063,7 +11101,8 @@ steamcompmgr_main(int argc, char **argv)
+ 				bShouldPaint = false;
+ 			}
+ 
+-			if ( bShouldPaint )
++			// Keep pending damage while the backend is waiting for a writable target.
++			if ( bShouldPaint && !bBackendPaused )
+ 			{
+ 				paint_all( pPaintFocus, eFlipType == FlipType::Async, bRepeatFrame );
+ 
+diff --git a/src/steamcompmgr_shared.hpp b/src/steamcompmgr_shared.hpp
+index 9951393..3a7529a 100644
+--- a/src/steamcompmgr_shared.hpp
++++ b/src/steamcompmgr_shared.hpp
+@@ -146,6 +146,8 @@ struct steamcompmgr_win_t {
+ 
+ 	bool isFullscreen = false;
+ 	bool isSysTrayIcon = false;
++
++	bool iconifyRequested = false;
+ 	bool sizeHintsSpecified = false;
+ 	bool skipTaskbar = false; 
+ 	bool skipPager = false;
+diff --git a/src/wlserver.cpp b/src/wlserver.cpp
+index 731b17e..f40d156 100644
+--- a/src/wlserver.cpp
++++ b/src/wlserver.cpp
+@@ -110,6 +110,8 @@ struct wlserver_content_override {
+ 	uint32_t x11_window;
+ 	struct wl_listener surface_destroy_listener;
+ 	struct wl_resource *gamescope_swapchain;
++	uint32_t requested_window;
++	uint64_t ulCheckedNs;
+ };
+ 
+ std::mutex g_wlserver_xdg_shell_windows_lock;
+@@ -233,6 +235,12 @@ void wlserver_xdg_commit( ResListEntry_t entry )
+ }
+ 
+ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
++	// Cursor surfaces never acquire an X11/xdg window association. Keeping their
++	// commits in g_PendingCommits pins every old SHM buffer until the cursor
++	// surface is destroyed. X11 cursor images are handled by MouseCursor.
++	if ( wlr_surface->role && strcmp( wlr_surface->role->name, "wl_pointer-cursor" ) == 0 )
++		return;
++
+ 	wlr_surface->current.committed = 0;
+ 
+ 	wlserver_x11_surface_info *wlserver_x11_surface_info = get_wl_surface_info(wlr_surface)->x11_surface;
+@@ -909,6 +917,20 @@ static void gamescope_swapchain_destroy_co( struct wl_resource *resource );
+ 
+ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_client *client, struct wl_resource *gamescope_swapchain_resource, struct wlr_surface *surface, uint32_t x11_window )
+ {
++	// The WSI layer sends this on every present. Finding the top level walks the X tree with a
++	// round trip per level, so a swapchain repeating the same window skips it for 100 ms.
++	const uint64_t ulNow = get_time_in_nanos();
++	if ( gamescope_swapchain_resource )
++	{
++		for ( const auto &[ window, existing ] : content_overrides )
++		{
++			if ( existing->gamescope_swapchain == gamescope_swapchain_resource && existing->surface == surface &&
++				 existing->requested_window == x11_window && ulNow - existing->ulCheckedNs < 100'000'000ul )
++				return;
++		}
++	}
++
++	const uint32_t requested_window = x11_window;
+ 	x11_window = x11_find_toplevel_for_xid( this->ctx->dpy, x11_window );
+ 
+ 	wlserver_x11_surface_info *x11_surface = lookup_x11_surface_info_from_xid( this, x11_window );
+@@ -922,7 +944,11 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
+ 
+ 	if ( content_overrides.count( x11_window ) ) {
+ 		if ( content_overrides[x11_window]->gamescope_swapchain == gamescope_swapchain_resource )
++		{
++			content_overrides[x11_window]->requested_window = requested_window;
++			content_overrides[x11_window]->ulCheckedNs = ulNow;
+ 			return;
++		}
+ #ifdef GAMESCOPE_SWAPCHAIN_DEBUG
+ 		wl_log.infof( "handle_override_window_content: (2) DESTROYING x11_window: 0x%x old_swapchain: %p new_swapchain: %p", x11_window, content_overrides[x11_window]->gamescope_swapchain, gamescope_swapchain_resource );
+ #endif
+@@ -939,6 +965,8 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
+ 	co->surface = surface;
+ 	co->x11_window = x11_window;
+ 	co->gamescope_swapchain = gamescope_swapchain_resource;
++	co->requested_window = requested_window;
++	co->ulCheckedNs = ulNow;
+ 	co->surface_destroy_listener.notify = content_override_handle_surface_destroy;
+ 	wl_signal_add( &surface->events.destroy, &co->surface_destroy_listener );
+ 	content_overrides[ x11_window ] = co;
+diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
+index 4dd8198..2c87887 100644
+--- a/src/xwayland_ctx.hpp
++++ b/src/xwayland_ctx.hpp
+@@ -234,6 +234,7 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
+ 		Atom gamescopeHDRTonemapOperator;
+ 
+ 		Atom gamescopeForceWindowsFullscreen;
++		Atom gamescopeRestoreFocusWindow;
+ 
+ 		Atom gamescopeColorLut3DOverride;
+ 		Atom gamescopeColorShaperLutOverride;

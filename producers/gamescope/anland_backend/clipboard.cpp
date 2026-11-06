@@ -1,7 +1,9 @@
 // wlroots selection translation only. Wire transport remains in anland_device.
 #include "clipboard.hpp"
+#ifndef ANLAND_CLIPBOARD_SEAT_TEST
 #include "wlserver.hpp"
 #include "steamcompmgr.hpp"
+#endif
 #include "anland_device.h"
 #include "wlr_begin.hpp"
 #include <wlr/types/wlr_data_device.h>
