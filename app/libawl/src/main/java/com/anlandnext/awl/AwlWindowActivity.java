@@ -108,6 +108,7 @@ public class AwlWindowActivity extends Activity {
     private long id = -1;   /* -1 = unbound (bindWindowId's firstBind test; a plain long would read 0 = "bound to window 0") */
     private long host;
     private SurfaceView sv;
+    private int[] svOffset = new int[2];
     private FrameLayout root;
     private EditText hiddenInput;
     private InputMethodManager imm;
@@ -484,6 +485,7 @@ public class AwlWindowActivity extends Activity {
             @Override public void surfaceCreated(SurfaceHolder holder) { }
             @Override public void surfaceChanged(SurfaceHolder holder, int format,
                                                  int width, int height) {
+                sv.getLocationInWindow(svOffset);
                 if (id < 0) {
                     /* still awaiting: remember the surface, report after bind */
                     Log.i(TAG, "awaiting: surface ready " + width + "x" + height);
@@ -1419,6 +1421,14 @@ public class AwlWindowActivity extends Activity {
         lastMouseX = lastMouseY = Float.NaN;   /* no rel diff across a leave */
     }
 
+    private float getEvtRelX(MotionEvent ev, int idx) {
+        return ev.getX(idx) - svOffset[0];
+    }
+
+    private float getEvtRelY(MotionEvent ev, int idx) {
+        return ev.getY(idx) - svOffset[1];
+    }
+
     /** Make up the pointer enter at the mode-valid position (NONE = raw event
      *  position, CONFINE = the virtual clamped position, LOCK = the frozen
      *  anchor, window center when unknown) — protocol requires enter before
@@ -1435,8 +1445,8 @@ public class AwlWindowActivity extends Activity {
             lastMouseY = confiney;
             break;
         default:
-            lastMouseX = ev.getX();
-            lastMouseY = ev.getY();
+            lastMouseX = getEvtRelX(ev, 0);
+            lastMouseY = getEvtRelY(ev, 0);
             break;
         }
         AwlClient.input(id, PTR_ENTER, 0, lastMouseX, lastMouseY, 0, 0, 0);
@@ -1467,7 +1477,7 @@ public class AwlWindowActivity extends Activity {
      * virtual position, sent as absolute motion. lastMouseX/Y always hold
      * the position the client believes the pointer is at. */
     private void handleMouseEvent(MotionEvent ev) {
-        float ex = ev.getX(), ey = ev.getY();
+        float ex = getEvtRelX(ev, 0), ey = getEvtRelY(ev, 0);
         float dx, dy;
         boolean sendabs;
         float x, y;
@@ -1585,7 +1595,7 @@ public class AwlWindowActivity extends Activity {
              * close the pointer stream. */
             if (padInWin) {
                 AwlClient.input(id, TOUCH_DOWN, ev.getPointerId(0),
-                        ev.getX(0), ev.getY(0), 0, 0, 0);
+                        getEvtRelX(ev, 0), getEvtRelY(ev, 0), 0, 0, 0);
                 endPadStream();
             }
         }
@@ -1617,7 +1627,7 @@ public class AwlWindowActivity extends Activity {
 
     private void sendTouch(int type, MotionEvent ev, int idx) {
         AwlClient.input(id, type, ev.getPointerId(idx),
-                       ev.getX(idx), ev.getY(idx), 0, 0, 0);
+                       getEvtRelX(ev, idx), getEvtRelY(ev, idx), 0, 0, 0);
     }
 
     /** Mouse/touchpad generic events: hover enter/move/exit + all buttons
@@ -1685,7 +1695,7 @@ public class AwlWindowActivity extends Activity {
                  * clamped virtual position, NONE = raw */
                 float px = 0f, py = 0f;
                 if (captureMode == CAPTURE_CONFINE) { px = confinex; py = confiney; }
-                else if (captureMode == CAPTURE_NONE) { px = ev.getX(); py = ev.getY(); }
+                else if (captureMode == CAPTURE_NONE) { px = getEvtRelX(ev, 0); py = getEvtRelY(ev, 0); }
                 AwlClient.input(id, PTR_AXIS, 0, -v, h, px, py, 0);
             }
             return true;
