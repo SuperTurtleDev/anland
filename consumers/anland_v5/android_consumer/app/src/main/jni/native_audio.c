@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "native_audio.h"
 #include "protocol.h"
+#include "socket_utils.h"
 #include "tracy_zones.h"
 
 #include <aaudio/AAudio.h>
@@ -12,6 +13,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <poll.h>
 #include <time.h>
@@ -30,10 +32,10 @@
 #define MIC_MAX_FRAMES     1024   /* upper bound on frames per mic read */
 #define MIC_MAX_CHANNELS   2      /* protocol supports mono and stereo */
 #define MIC_RETRY_MS       250
-#define PLAY_POLL_MS       100
-#define PLAY_RING_MS       160
-#define PLAY_RING_MIN      (32 * 1024)
-#define PLAY_RING_MAX      (256 * 1024)
+#define PLAY_POLL_MS       20
+#define PLAY_RING_MS       48
+#define PLAY_RING_MIN      (16 * 1024)
+#define PLAY_RING_MAX      (128 * 1024)
 #define PLAY_KEEPALIVE_AMPLITUDE 1
 #define PLAY_WAKE_FADE_MS  8
 /* Keep the output stream running while the desktop is producing audio (short
@@ -56,7 +58,15 @@ struct audio_bridge {
     pthread_t cap_thread;
 
     AAudioStream *play;   /* output: desktop -> speaker */
-    /* Actual device-chosen playback format, read back after the stream opens. */
+    AAudioStream *rec;    /* input:  mic -> producer    */
+
+    /* Shared memory zero-copy audio transport */
+    int shm_fd;
+    struct anland_shm_audio_header *shm_ring;
+    size_t shm_total_size;
+    bool shm_requested;
+
+    /* Actual device-chosen formats, read back after the streams open. */
     int play_rate, play_channels;
 
     /* Latency presets in ms (0 = engine default), set from the settings UI. */
@@ -534,6 +544,15 @@ static void *play_thread_func(void *arg)
             pthread_mutex_lock(&b->play_lock);
             play_ring_reset_locked(b);
             pthread_mutex_unlock(&b->play_lock);
+            if (b->shm_ring) {
+                munmap(b->shm_ring, b->shm_total_size);
+                b->shm_ring = NULL;
+            }
+            if (b->shm_fd >= 0) {
+                close(b->shm_fd);
+                b->shm_fd = -1;
+            }
+            b->shm_requested = false;
             had_fd = false;
             last_fd = fd;
         }
@@ -550,11 +569,47 @@ static void *play_thread_func(void *arg)
             b->resend_formats = false;
             send_format(fd, AUDIO_ROLE_PLAYBACK, b->play_rate, b->play_channels,
                         ms_to_frames(b->play_latency_ms, b->play_rate));
+            send_format(fd, AUDIO_ROLE_CAPTURE, b->cap_rate, b->cap_channels,
+                        ms_to_frames(b->cap_latency_ms, b->cap_rate));
+            /* Request zero-copy shared-memory audio transport */
+            struct audio_msg shm_req = { .type = AUDIO_MSG_SHM, .size = 0 };
+            send(fd, &shm_req, sizeof(shm_req), MSG_DONTWAIT | MSG_NOSIGNAL);
+            b->shm_requested = true;
             had_fd = true;
         }
 
+        /* Zero-copy SHM playback check */
+        if (b->shm_ring) {
+            struct anland_shm_audio_header *ring = b->shm_ring;
+            uint32_t head = __atomic_load_n(&ring->write_head, __ATOMIC_ACQUIRE);
+            uint32_t tail = __atomic_load_n(&ring->read_tail, __ATOMIC_RELAXED);
+            uint32_t cap = ring->buffer_size;
+            uint32_t avail = (head >= tail) ? (head - tail) : (cap - (tail - head));
+            int play_channels = b->play_channels > 0 ? b->play_channels : WANT_PLAY_CHANNELS;
+            size_t frame_bytes = sizeof(int16_t) * (size_t)play_channels;
+
+            if (avail >= frame_bytes) {
+                avail -= avail % frame_bytes;
+                size_t first = cap - tail;
+                if (first > avail) first = avail;
+                int32_t frames1 = (int32_t)(first / frame_bytes);
+                if (frames1 > 0) {
+                    queue_playback_frames(b, ring->data + tail, frames1, play_channels);
+                }
+                if (avail > first) {
+                    int32_t frames2 = (int32_t)((avail - first) / frame_bytes);
+                    if (frames2 > 0) {
+                        queue_playback_frames(b, ring->data, frames2, play_channels);
+                    }
+                }
+                uint32_t new_tail = (tail + avail) % cap;
+                __atomic_store_n(&ring->read_tail, new_tail, __ATOMIC_RELEASE);
+                last_pcm_ms = now_ms();
+            }
+        }
+
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int poll_result = poll(&pfd, 1, PLAY_POLL_MS);
+        int poll_result = poll(&pfd, 1, b->shm_ring ? 5 : PLAY_POLL_MS);
         if (poll_result == 0)
             continue;
         if (poll_result < 0)
@@ -563,23 +618,55 @@ static void *play_thread_func(void *arg)
             pthread_mutex_lock(&b->play_lock);
             play_ring_reset_locked(b);
             pthread_mutex_unlock(&b->play_lock);
+            if (b->shm_ring) {
+                munmap(b->shm_ring, b->shm_total_size);
+                b->shm_ring = NULL;
+            }
+            if (b->shm_fd >= 0) {
+                close(b->shm_fd);
+                b->shm_fd = -1;
+            }
+            b->shm_requested = false;
             had_fd = false;
             last_fd = -1;
             usleep(20000);
             continue;
         }
 
-        ssize_t n;
+        int rx_fds[2];
+        int rx_fd_count = 0;
         TracyCZoneN(zRecv, "audio recv PCM", 1);
-        n = recv(fd, b->rx, sizeof(b->rx), 0);
+        int n = recv_fds(fd, b->rx, sizeof(b->rx), rx_fds, 1, &rx_fd_count);
         TracyCZoneEnd(zRecv);
-        if (n < (ssize_t)sizeof(struct audio_msg))
+        if (n < (int)sizeof(struct audio_msg))
             continue;
 
         struct audio_msg h;
         memcpy(&h, b->rx, sizeof(h));
+
+        if (h.type == AUDIO_MSG_SHM_FD && rx_fd_count > 0) {
+            size_t total_size = sizeof(struct anland_shm_audio_header) + ANLAND_SHM_AUDIO_DEFAULT_SIZE;
+            struct anland_shm_audio_header *ring = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, rx_fds[0], 0);
+            if (ring != MAP_FAILED && ring->magic == ANLAND_SHM_AUDIO_MAGIC) {
+                if (b->shm_ring) {
+                    munmap(b->shm_ring, b->shm_total_size);
+                }
+                if (b->shm_fd >= 0) {
+                    close(b->shm_fd);
+                }
+                b->shm_fd = rx_fds[0];
+                b->shm_ring = ring;
+                b->shm_total_size = total_size;
+                LOGI("zero-copy SHM audio established (%u KB ring)", ring->buffer_size / 1024);
+            } else {
+                if (ring != MAP_FAILED) munmap(ring, total_size);
+                close(rx_fds[0]);
+            }
+            continue;
+        }
+
         if (h.type != AUDIO_MSG_PCM)
-            continue;   /* the producer only sends PCM back; formats flow upstream */
+            continue;   /* formats flow upstream */
 
         size_t avail = (size_t)n - sizeof(struct audio_msg);
         size_t bytes = h.size < avail ? h.size : avail;
@@ -774,6 +861,20 @@ void audio_stop(audio_bridge *b)
     pthread_join(b->cap_thread, NULL);
 
     close_play_stream(b, true);
+    if (b->shm_ring) {
+        munmap(b->shm_ring, b->shm_total_size);
+        b->shm_ring = NULL;
+    }
+    if (b->shm_fd >= 0) {
+        close(b->shm_fd);
+        b->shm_fd = -1;
+    }
+    b->shm_requested = false;
+    if (b->rec) {
+        AAudioStream_requestStop(b->rec);
+        AAudioStream_close(b->rec);
+        b->rec = NULL;
+    }
     pthread_mutex_lock(&b->play_lock);
     free(b->play_ring);
     b->play_ring = NULL;

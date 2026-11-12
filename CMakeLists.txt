@@ -22,6 +22,19 @@ set_target_properties(socket_utils PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(socket_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
 if(ANDROID)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__")
+endif()
+
+option(BUILD_BENCHMARKS "Build Anland IPC and audio benchmarks" ON)
+if(BUILD_BENCHMARKS)
+    add_executable(benchmark_audio_ipc engineering/benchmarks/benchmark_audio_ipc.c)
+    target_link_libraries(benchmark_audio_ipc pthread)
+
+    add_executable(benchmark_shm_audio engineering/benchmarks/benchmark_shm_audio.c)
+    target_link_libraries(benchmark_shm_audio pthread)
+endif()
+
+if(ANDROID)
     add_library(display_daemon_lib STATIC libdisplay_daemon/display_daemon.c)
     target_link_libraries(display_daemon_lib socket_utils)
 

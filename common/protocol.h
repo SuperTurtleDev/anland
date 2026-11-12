@@ -237,6 +237,31 @@ struct OutputEvent{
 #define AUDIO_MSG_SHM 3 // request shared-memory ring-buffer audio transport instead of socket sends (fewer copies, lower latency)
 #define AUDIO_MSG_SHM_FD 4 // producer -> consumer: shared-memory fd, consumer mmaps it and reads audio data directly
 
+#define ANLAND_SHM_AUDIO_MAGIC 0x414E4C41u /* "ANLA" */
+#define ANLAND_SHM_AUDIO_VERSION 1u
+#define ANLAND_SHM_AUDIO_DEFAULT_SIZE (128u * 1024u) /* 128 KB ring */
+
+/* Shared-memory audio ring buffer layout. Zero-copy lock-free SPSC queue. */
+struct anland_shm_audio_header {
+    uint32_t magic;         /* ANLAND_SHM_AUDIO_MAGIC */
+    uint32_t version;       /* ANLAND_SHM_AUDIO_VERSION */
+    uint32_t buffer_size;   /* PCM data ring capacity in bytes */
+    uint32_t rate;          /* Sample rate (e.g. 48000) */
+    uint32_t channels;      /* Channel count (e.g. 2) */
+    uint32_t format;        /* AUDIO_FORMAT_* */
+    uint32_t flags;         /* Runtime status flags */
+    uint32_t padding;       /* Alignment padding */
+
+    /* Cache-line separated atomic indices (64 bytes apart to prevent false sharing on ARM64) */
+    uint32_t write_head __attribute__((aligned(64)));
+    uint32_t read_tail  __attribute__((aligned(64)));
+
+    /* Ring PCM payload buffer starts here */
+    uint8_t data[] __attribute__((aligned(64)));
+};
+
+
+
 /* PCM sample format codes for struct audio_format.format. */
 #define AUDIO_FORMAT_S16LE 0
 
