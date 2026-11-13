@@ -144,13 +144,14 @@ module: native pulse
 	rm -rf "$(OUT)/module"
 	mkdir -p "$$MOD"
 	cp module/module.prop module/sepolicy.rule module/service.sh \
-	   module/customize.sh module/plat_service_contexts.anland "$$MOD/"
+	   module/customize.sh module/post-fs-data.sh module/service-contexts.sh \
+	   module/plat_service_contexts.anland "$$MOD/"
 	cp LICENSE "$$MOD/"
 	cp "$(OUT)/waylandbridge" "$$MOD/"
 	cp -r "$(PA_ROOT)" "$$MOD/pulse"   # PulseAudio tree (bin/lib/etc), see `make pulse`
-	chmod 755 "$$MOD/waylandbridge" "$$MOD/service.sh" "$$MOD/customize.sh" "$$MOD"/pulse/bin/*
+	chmod 755 "$$MOD/waylandbridge" "$$MOD/service.sh" "$$MOD/customize.sh" "$$MOD/post-fs-data.sh" "$$MOD"/pulse/bin/*
 	(cd "$$MOD" && zip -qr "$(OUT)/module/anland-awl.zip" \
-	  module.prop sepolicy.rule service.sh customize.sh \
+	  module.prop sepolicy.rule service.sh customize.sh post-fs-data.sh service-contexts.sh \
 	  plat_service_contexts.anland waylandbridge pulse \
 	  LICENSE)
 	echo "OK: $(OUT)/module/anland-awl.zip"
