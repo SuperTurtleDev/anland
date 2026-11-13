@@ -17,13 +17,91 @@ MODDIR=${0%/*}
 RT=$(sed -n 's/.*"runtime_dir": *"\([^"]*\)".*/\1/p' "$MODDIR/config.json" 2>/dev/null | head -1)
 case "$RT" in /*) ;; *) RT=/data/local/tmp/awl ;; esac
 
+SERVICE_LOG=/data/local/tmp/awl_service.log
+DAEMON_POLICY_RETRIES=90
+KSU_BUSYBOX=/data/adb/ksu/bin/busybox
+
 start_daemon() {
+  echo "anland: service start (boot $(cat /proc/sys/kernel/random/boot_id 2>/dev/null))" >> "$SERVICE_LOG"
   chmod 755 "$MODDIR/waylandbridge" 2>/dev/null
-  # custom SELinux domain: relabel → exec transitions into awl_daemon
-  # (module sepolicy.rule is applied by ksud before service stage)
-  chcon u:object_r:awl_daemon_exec:s0 "$MODDIR/waylandbridge" 2>/dev/null
-  rm -f "$RT/wayland-0"
-  nohup "$MODDIR/waylandbridge" > /data/local/tmp/awl_daemon.log 2>&1 &
+  if [ ! -x "$KSU_BUSYBOX" ]; then
+    echo "anland: daemon not started (KernelSU BusyBox unavailable)" >> "$SERVICE_LOG"
+    return 1
+  fi
+  # ReSukiSU 35229 can invoke module service scripts before a module's custom
+  # SELinux transition is usable. A retained awl_daemon_exec xattr can make
+  # chcon succeed during that interval, so the file label is not a sufficient
+  # readiness probe. Use a disposable BusyBox copy to test the actual process
+  # transition without repeatedly initializing the full Binder/Wayland daemon.
+  mkdir -p "$RT/.domain-probe" || return 1
+  probe="$RT/.domain-probe/busybox"
+  if ! cp "$KSU_BUSYBOX" "$probe" || ! chmod 700 "$probe"; then
+    echo "anland: daemon not started (cannot prepare SELinux domain probe)" >> "$SERVICE_LOG"
+    rm -f "$probe"
+    rmdir "$RT/.domain-probe" 2>/dev/null || true
+    return 1
+  fi
+
+  attempt=1
+  while [ "$attempt" -le "$DAEMON_POLICY_RETRIES" ]; do
+    probe_domain=""
+    if chcon u:object_r:awl_daemon_exec:s0 "$probe" 2>/dev/null; then
+      "$probe" sleep 2 &
+      probe_pid=$!
+      sleep 0.2
+      probe_domain=$(cat "/proc/$probe_pid/attr/current" 2>/dev/null)
+      kill "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+    fi
+    if [ "$probe_domain" = "u:r:awl_daemon:s0" ]; then
+      echo "anland: SELinux transition ready (probe $attempt/$DAEMON_POLICY_RETRIES)" >> "$SERVICE_LOG"
+      # The bridge may already carry awl_daemon_exec on disk when Android
+      # first reads it, before KernelSU has installed the custom type. SELinux
+      # then leaves that inode context unmapped, and writing the identical
+      # xattr later does not reliably refresh the cached inode security state.
+      # Bounce through a platform context after the disposable probe proves
+      # the custom transition is live, then restore the intended exec label.
+      if chcon u:object_r:system_file:s0 "$MODDIR/waylandbridge" 2>/dev/null &&
+         chcon u:object_r:awl_daemon_exec:s0 "$MODDIR/waylandbridge" 2>/dev/null; then
+        rm -f "$RT/wayland-0"
+        # Run the bridge in its supported foreground mode under BusyBox
+        # nohup. Without -f the bridge daemonizes itself, so $! identifies
+        # its exited parent rather than the process whose SELinux domain must
+        # be verified.
+        "$KSU_BUSYBOX" nohup "$MODDIR/waylandbridge" -f > /data/local/tmp/awl_daemon.log 2>&1 &
+        daemon_pid=$!
+        sleep 1
+        daemon_domain=$(cat "/proc/$daemon_pid/attr/current" 2>/dev/null)
+        if kill -0 "$daemon_pid" 2>/dev/null &&
+           [ "$daemon_domain" = "u:r:awl_daemon:s0" ]; then
+          echo "anland: daemon domain ready (attempt $attempt/$DAEMON_POLICY_RETRIES; pid $daemon_pid)" >> "$SERVICE_LOG"
+          rm -f "$probe"
+          rmdir "$RT/.domain-probe" 2>/dev/null || true
+          return 0
+        fi
+
+        # The disposable probe can transition a fraction earlier than this
+        # executable during cold boot. Reject and reap only the verified
+        # foreground child, then keep the same bounded readiness loop going.
+        echo "anland: rejecting daemon attempt $attempt/$DAEMON_POLICY_RETRIES (pid $daemon_pid; domain ${daemon_domain:-exited})" >> "$SERVICE_LOG"
+        kill "$daemon_pid" 2>/dev/null || true
+        wait "$daemon_pid" 2>/dev/null || true
+      fi
+    else
+      case "$attempt" in
+        1|10|20|30|40|50|60|70|80|90)
+          echo "anland: waiting for SELinux transition (probe $attempt/$DAEMON_POLICY_RETRIES; domain ${probe_domain:-unavailable})" >> "$SERVICE_LOG"
+          ;;
+      esac
+    fi
+    [ "$attempt" -lt "$DAEMON_POLICY_RETRIES" ] && sleep 1
+    attempt=$((attempt + 1))
+  done
+  rm -f "$probe"
+  rmdir "$RT/.domain-probe" 2>/dev/null || true
+
+  echo "anland: daemon not started (SELinux transition unavailable after $DAEMON_POLICY_RETRIES attempts)" >> "$SERVICE_LOG"
+  return 1
 }
 
 # ---- PulseAudio (module pulse/: Termux OpenSL ES / AAudio sink) — the Linux
@@ -31,8 +109,9 @@ start_daemon() {
 # MUST run under the host APK's uid: Android 12+ AudioPolicyService rejects
 # stream creation from a process whose uid resolves to no package (root →
 # createTrack_l INVALID_OPERATION, OpenSL ES error 9 / AAudio -896; Termux's
-# pulseaudio works the same way — as the app). su <uid> keeps the awl_daemon
-# domain (permissive) via the exec label; the app uid needs no app running.
+# pulseaudio works the same way — as the app). KernelSU BusyBox setuidgid
+# changes uid/gid while the exec label transitions into awl_daemon; the app uid
+# needs no app running.
 # /data/adb is 0700 root → the tree is copied out to $RT/pulse each boot
 # (module search path + libs point there: PULSE_CONFIG_PATH + daemon.conf
 # dl-search-path + LD_LIBRARY_PATH — all runtime-dir relative, no baked path).
@@ -118,6 +197,11 @@ wait_for_pulse() {
 
 launch_pulse() {
   attempt="$1"
+  if [ ! -x "$KSU_BUSYBOX" ] ||
+     ! "$KSU_BUSYBOX" --list 2>/dev/null | grep -qx setuidgid; then
+    echo "anland: pulse attempt $attempt failed (KernelSU BusyBox setuidgid unavailable)" >> "$LOG"
+    return 1
+  fi
   if ! rm -rf "$PH" || ! mkdir -p "$PH/run" "$PH/state"; then
     echo "anland: pulse attempt $attempt failed (cannot create $PH)" >> "$LOG"
     return 1
@@ -129,7 +213,8 @@ launch_pulse() {
   fi
   rm -f "$RT/pulse.sock"
   echo "anland: pulse starting as uid $PAUID (attempt $attempt/$PULSE_START_RETRIES; tree $PAR, socket $RT/pulse.sock)" >> "$LOG"
-  nohup su "$PAUID" -c "export HOME='$PH' TMPDIR='$PH' PULSE_RUNTIME_PATH='$PH/run' \
+  nohup "$KSU_BUSYBOX" setuidgid "$PAUID:$PAUID" /system/bin/sh -c \
+    "export HOME='$PH' TMPDIR='$PH' PULSE_RUNTIME_PATH='$PH/run' \
 PULSE_STATE_PATH='$PH/state' PULSE_CONFIG_PATH='$PAR/etc/pulse' \
 LD_LIBRARY_PATH='$PAR/lib:$PAR/lib/pulseaudio:$PAR/lib/pulseaudio/modules'; \
 exec '$PAR/bin/pulseaudio' --daemonize=no --exit-idle-time=-1 --disallow-exit \
