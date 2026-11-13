@@ -248,7 +248,8 @@ struct awl_surface {
     int32_t geom_x, geom_y, geom_w, geom_h;
     int32_t pend_gx, pend_gy, pend_gw, pend_gh;
     int32_t phys_w, phys_h;          /* Android window size (recorded by awl_window_resize; 0=unknown) */
-    int32_t buf_scale;               /* wl_surface.set_buffer_scale (default 1; bookkeeping only) */
+    int32_t buf_scale;               /* wl_surface.set_buffer_scale, current (default 1) */
+    int32_t pend_buf_scale;          /* 0 = nothing pending */
     int32_t buf_transform;           /* wl_surface.set_buffer_transform, current (wl_output.transform
                                       * 0..7; 90/270 swap the logical size). Applied on commit like
                                       * viewport state — the render side reads it per frame. */
@@ -259,8 +260,11 @@ struct awl_surface {
     float pend_vps_x, pend_vps_y, pend_vps_w, pend_vps_h;
     int32_t sub_x, sub_y;                 /* applied position (buffer pixels, Y down) */
     int32_t pending_offset_x, pending_offset_y;
-    /* damage (wl_surface.damage/damage_buffer accumulated in pending —
-     * surface-local px, bbox merge; moved to cur on the commit/latch-apply).
+    /* damage accumulated separately until commit because wl_surface.damage is
+     * surface-local while damage_buffer is already buffer-local. psd/pbd are
+     * endpoint bboxes (int64 avoids int32 x+w overflow); commit converts psd
+     * through the then-current viewport/scale/transform and unions both into
+     * the buffer-coordinate cur rect.
      * cur_* = damage since a backend last uploaded the wl_shm content
      * (awl_surface_shm_begin/end) — dmabuf layers never read it (the GPU
      * samples the memory in place):
@@ -269,7 +273,8 @@ struct awl_surface {
      *   FULL    a commit attached a buffer with NO damage — protocol
      *           default: whole surface (client gave no information)
      * Over-copy is always safe, under-copy never. All owned by ev_lock. */
-    int32_t pd_x, pd_y, pd_w, pd_h;
+    int64_t psd_x1, psd_y1, psd_x2, psd_y2;
+    int64_t pbd_x1, pbd_y1, pbd_x2, pbd_y2;
     int32_t cur_damage_x, cur_damage_y, cur_damage_w, cur_damage_h;
 
     /* ---- flags: two bit-field words, split BY WRITER THREAD ----
@@ -323,7 +328,8 @@ struct awl_surface {
                                           * applying leaves current alone) */
     bool sub_pos_pending : 1;
     bool pending_attached : 1;          /* this commit cycle attached */
-    bool pending_damage_empty : 1;      /* damage accumulator empty */
+    bool pending_surface_damage_empty : 1;
+    bool pending_buffer_damage_empty : 1;
     bool pend_vpd : 1;
     bool vp_has_src : 1;
     bool pend_vps : 1;
@@ -701,6 +707,9 @@ void awl_viewport_setup(void);
  * no buffer). viewport dst | source | buffer/buf_scale — shared by the render
  * dst and input hit-testing. */
 void awl_surface_logical_size(struct awl_surface* s, float* w, float* h);
+/* Promote viewport, buffer-scale and buffer-transform pending state at commit
+ * or synchronized-subsurface parent apply. Caller holds ev_lock. */
+void awl_surface_apply_mapping_state_locked(struct awl_surface* s);
 /* Content base size of a root (logical px; caller holds its ev_lock): the
  * xdg geometry rectangle when valid (chrome-like clients' viewport dst
  * carries shadow margins around it), else the surface logical size. Shared

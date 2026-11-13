@@ -12,8 +12,12 @@
  * Binds wl_compositor / wl_shm / xdg_wm_base and runs an animated ARGB8888
  * window (moving color bands + a blinking liveness block), honoring xdg
  * configure/close; two buffers from one memfd pool, redraw driven by
- * wl_surface.frame callbacks. Exit path check: xdg_toplevel.close must end
- * the process cleanly.
+ * wl_surface.frame callbacks. The buffer scale is 2 and the default mode uses
+ * full-surface `damage`: it must upload the complete 800x600 buffer, making a
+ * surface→buffer coordinate regression visible as stale outer quadrants.
+ * Pass `buffer` to use full-buffer `damage_buffer` as the unchanged control.
+ * Exit path check:
+ * xdg_toplevel.close must end the process cleanly.
  */
 #define _GNU_SOURCE   /* memfd_create: __USE_GNU (bionic and glibc alike) */
 #include <errno.h>
@@ -63,6 +67,7 @@ static void* g_map;                 /* pool mapping: 2 buffers */
 static struct wl_buffer* g_bufs[2];
 static int g_cur;                   /* buffer being painted next */
 static uint32_t g_paint_ms;
+static int g_buffer_damage;
 
 
 static void frame_done(void* data, struct wl_callback* cb, uint32_t ms);
@@ -84,7 +89,10 @@ static void redraw(void) {
     uint32_t* px = (uint32_t*)((char*)g_map + (size_t)g_cur * w * h * 4);
     paint(px, w, h);
     wl_surface_attach(g_surf, g_bufs[g_cur], 0, 0);
-    wl_surface_damage_buffer(g_surf, 0, 0, INT32_MAX, INT32_MAX);
+    if (g_buffer_damage)
+        wl_surface_damage_buffer(g_surf, 0, 0, TEST_W, TEST_H);
+    else
+        wl_surface_damage(g_surf, 0, 0, TEST_W / 2, TEST_H / 2);
     wl_surface_commit(g_surf);
     g_cur ^= 1;
 }
@@ -154,9 +162,11 @@ static void registry_global(void* data, struct wl_registry* r, uint32_t name,
 
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    g_buffer_damage = argc > 1 && strcmp(argv[1], "buffer") == 0;
     const char* env = getenv("WAYLAND_SOCKET");
-    LOG("client pid=%d uid=%d WAYLAND_SOCKET=%s",
-        getpid(), getuid(), env ? env : "(unset, connecting via WAYLAND_DISPLAY)");
+    LOG("client pid=%d uid=%d WAYLAND_SOCKET=%s damage=%s scale=2",
+        getpid(), getuid(), env ? env : "(unset, connecting via WAYLAND_DISPLAY)",
+        g_buffer_damage ? "buffer" : "surface");
 
     g_disp = wl_display_connect(NULL);   /* consumes WAYLAND_SOCKET, takes fd ownership */
     if (!g_disp) {
@@ -196,13 +206,14 @@ int main(int argc, char** argv) {
     close(fd);
 
     g_surf = wl_compositor_create_surface(g_comp);
+    wl_surface_set_buffer_scale(g_surf, 2);
     static const struct xdg_surface_listener xsurf_l = { xdg_configure };
     static const struct xdg_toplevel_listener tlp_l = { toplevel_configure, toplevel_close };
     g_xsurf = xdg_wm_base_get_xdg_surface(g_wm, g_surf);
     xdg_surface_add_listener(g_xsurf, &xsurf_l, NULL);
     struct xdg_toplevel* tlp = xdg_surface_get_toplevel(g_xsurf);
     xdg_toplevel_add_listener(tlp, &tlp_l, NULL);
-    xdg_toplevel_set_title(tlp, "awl shm test");
+    xdg_toplevel_set_title(tlp, "awl scaled shm damage test");
     xdg_toplevel_set_app_id(tlp, "com.anlandtest.shm");
 
     wl_surface_commit(g_surf);   /* commit the roles → server answers with configure */

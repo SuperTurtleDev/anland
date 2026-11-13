@@ -24,6 +24,7 @@
  *        → g_bufref_lock (leaf, buffer liveness).
  */
 #include "awl_internal.h"
+#include "awl_damage.h"
 
 #include <fcntl.h>
 #include <string.h>
@@ -702,25 +703,29 @@ static void surface_damage(struct wl_client* client, struct wl_resource* res,
                            int32_t x, int32_t y, int32_t w, int32_t h) {
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
-    /* Accumulate bounding box (surface coordinates; extendable to a rectangle list in production) */
-    if (s->pending_damage_empty) {
-        s->pd_x = x; s->pd_y = y; s->pd_w = w; s->pd_h = h;
-        s->pending_damage_empty = 0;
-    } else {
-        int32_t x2 = s->pd_x + s->pd_w, y2 = s->pd_y + s->pd_h;
-        if (x < s->pd_x) s->pd_x = x;
-        if (y < s->pd_y) s->pd_y = y;
-        if (x + w > x2) x2 = x + w;
-        if (y + h > y2) y2 = y + h;
-        s->pd_w = x2 - s->pd_x; s->pd_h = y2 - s->pd_y;
-    }
+    struct awl_damage_box box = {
+        s->psd_x1, s->psd_y1, s->psd_x2, s->psd_y2
+    };
+    int empty = s->pending_surface_damage_empty;
+    awl_damage_box_add(&box, &empty, x, y, w, h);
+    s->psd_x1 = box.x1; s->psd_y1 = box.y1;
+    s->psd_x2 = box.x2; s->psd_y2 = box.y2;
+    s->pending_surface_damage_empty = empty;
 }
 
 static void surface_damage_buffer(struct wl_client* client,
                                   struct wl_resource* res,
                                   int32_t x, int32_t y, int32_t w, int32_t h) {
-    /* buffer-coordinate damage (only differs when scale≠1, equivalent at scale=1) */
-    surface_damage(client, res, x, y, w, h);
+    struct awl_surface* s = wl_resource_get_user_data(res);
+    if (!s) return;
+    struct awl_damage_box box = {
+        s->pbd_x1, s->pbd_y1, s->pbd_x2, s->pbd_y2
+    };
+    int empty = s->pending_buffer_damage_empty;
+    awl_damage_box_add(&box, &empty, x, y, w, h);
+    s->pbd_x1 = box.x1; s->pbd_y1 = box.y1;
+    s->pbd_x2 = box.x2; s->pbd_y2 = box.y2;
+    s->pending_buffer_damage_empty = empty;
 }
 
 /* Pending damage merges into the renderer-visible damage at every commit
@@ -733,26 +738,79 @@ static void surface_damage_buffer(struct wl_client* client,
  * force a full re-upload). Caller holds s->ev_lock (surface_commit immediate
  * path + sync-subsurface latch apply, awl_subsurface.c). */
 void awl_damage_merge_pending(struct awl_surface* s, int has_attach) {
-    if (s->pending_damage_empty) {
+    int surface_empty = s->pending_surface_damage_empty;
+    int buffer_empty = s->pending_buffer_damage_empty;
+    if (surface_empty && buffer_empty) {
         if (!has_attach) return;   /* empty commit: nothing changed */
         s->cd_state = AWL_DMG_FULL;
-    } else if (s->cd_state == AWL_DMG_NONE) {
-        s->cur_damage_x = s->pd_x;
-        s->cur_damage_y = s->pd_y;
-        s->cur_damage_w = s->pd_w;
-        s->cur_damage_h = s->pd_h;
+        return;
+    }
+
+    uint32_t bw = 0, bh = 0;
+    if (s->current_buffer_res) {
+        struct wl_shm_buffer* shm = wl_shm_buffer_get(s->current_buffer_res);
+        if (shm) {
+            bw = (uint32_t)wl_shm_buffer_get_width(shm);
+            bh = (uint32_t)wl_shm_buffer_get_height(shm);
+        } else {
+            struct awl_buffer* b = wl_resource_get_user_data(s->current_buffer_res);
+            if (b) { bw = b->width; bh = b->height; }
+        }
+    }
+
+    struct awl_damage_rect merged = {0}, one;
+    int have = 0;
+    enum awl_damage_result result = AWL_DAMAGE_EMPTY;
+    if (!surface_empty) {
+        struct awl_damage_box box = {
+            s->psd_x1, s->psd_y1, s->psd_x2, s->psd_y2
+        };
+        struct awl_damage_map map = {
+            .buffer_width = bw,
+            .buffer_height = bh,
+            .buffer_scale = s->buf_scale,
+            .buffer_transform = s->buf_transform,
+            .viewport_dst_width = s->vp_dst_w,
+            .viewport_dst_height = s->vp_dst_h,
+            .viewport_has_source = s->vp_has_src,
+            .viewport_src_x = s->vp_sx,
+            .viewport_src_y = s->vp_sy,
+            .viewport_src_width = s->vp_sw,
+            .viewport_src_height = s->vp_sh,
+        };
+        result = awl_damage_surface_box(&box, &map, &one);
+        if (result == AWL_DAMAGE_RECT) { merged = one; have = 1; }
+    }
+    if (result != AWL_DAMAGE_FULL && !buffer_empty) {
+        struct awl_damage_box box = {
+            s->pbd_x1, s->pbd_y1, s->pbd_x2, s->pbd_y2
+        };
+        result = awl_damage_buffer_box(&box, bw, bh, &one);
+        if (result == AWL_DAMAGE_RECT) {
+            if (have) awl_damage_rect_union(&merged, &one);
+            else { merged = one; have = 1; }
+        }
+    }
+    s->pending_surface_damage_empty = 1;
+    s->pending_buffer_damage_empty = 1;
+    if (result == AWL_DAMAGE_FULL) {
+        s->cd_state = AWL_DMG_FULL;
+        return;
+    }
+    if (!have || s->cd_state == AWL_DMG_FULL) return;
+    if (s->cd_state == AWL_DMG_NONE) {
+        s->cur_damage_x = merged.x; s->cur_damage_y = merged.y;
+        s->cur_damage_w = merged.w; s->cur_damage_h = merged.h;
         s->cd_state = AWL_DMG_RECT;
-    } else if (s->cd_state == AWL_DMG_RECT) {   /* bbox union */
-        int32_t x2 = s->cur_damage_x + s->cur_damage_w;
-        int32_t y2 = s->cur_damage_y + s->cur_damage_h;
-        if (s->pd_x < s->cur_damage_x) s->cur_damage_x = s->pd_x;
-        if (s->pd_y < s->cur_damage_y) s->cur_damage_y = s->pd_y;
-        if (s->pd_x + s->pd_w > x2) x2 = s->pd_x + s->pd_w;
-        if (s->pd_y + s->pd_h > y2) y2 = s->pd_y + s->pd_h;
-        s->cur_damage_w = x2 - s->cur_damage_x;
-        s->cur_damage_h = y2 - s->cur_damage_y;
-    }   /* FULL stays full (rect damage subsumed) */
-    s->pending_damage_empty = 1;
+    } else {
+        struct awl_damage_rect current = {
+            s->cur_damage_x, s->cur_damage_y,
+            s->cur_damage_w, s->cur_damage_h
+        };
+        awl_damage_rect_union(&current, &merged);
+        s->cur_damage_x = current.x; s->cur_damage_y = current.y;
+        s->cur_damage_w = current.w; s->cur_damage_h = current.h;
+    }
 }
 
 /* set_input_region / set_opaque_region share one shape: snapshot the
@@ -819,7 +877,7 @@ static void surface_set_buffer_scale(struct wl_client* c, struct wl_resource* r,
     struct awl_surface* s = wl_resource_get_user_data(r);
     if (!s) return;
     pthread_mutex_lock(&s->ev_lock);
-    s->buf_scale = scale;
+    s->pend_buf_scale = scale;
     pthread_mutex_unlock(&s->ev_lock);
 }
 
@@ -899,21 +957,7 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         s->geom_valid = 1;
         s->pend_geom = 0;
     }
-    if (s->pend_vpd) {           /* #31 viewport dst double-buffered (same as kwin) */
-        s->vp_dst_w = s->pend_vpd_w;
-        s->vp_dst_h = s->pend_vpd_h;
-        s->pend_vpd = 0;
-    }
-    if (s->pend_vps) {           /* viewport source (0 size = reset) */
-        s->vp_sx = s->pend_vps_x; s->vp_sy = s->pend_vps_y;
-        s->vp_sw = s->pend_vps_w; s->vp_sh = s->pend_vps_h;
-        s->vp_has_src = s->vp_sw > 0 && s->vp_sh > 0;
-        s->pend_vps = 0;
-    }
-    if (s->pend_buf_transform >= 0) {   /* set_buffer_transform (double-buffered) */
-        s->buf_transform = s->pend_buf_transform;
-        s->pend_buf_transform = -1;
-    }
+    awl_surface_apply_mapping_state_locked(s);
     awl_surface_apply_regions_locked(s);   /* set_input_region / set_opaque_region (#85) */
     int attached = s->pending_attached;
     int32_t off_x = 0, off_y = 0;   /* attach dx,dy of this cycle (cursor role: moves the hotspot) */
@@ -1059,7 +1103,8 @@ static void compositor_create_surface(struct wl_client* client,
     s->buf_scale = 1;   /* #31: wl_surface.set_buffer_scale defaults to 1 */
     s->buf_transform = 0;   /* set_buffer_transform default = wl_output.transform.normal */
     s->pend_buf_transform = -1;   /* -1 = nothing pending */
-    s->pending_damage_empty = 1;   /* damage accumulator starts empty (calloc 0 = "has rect") */
+    s->pending_surface_damage_empty = 1;
+    s->pending_buffer_damage_empty = 1;
     s->pend_acquire_fd = -1;
     /* u.sub.latched_acquire_fd: initialized at role assignment (get_subsurface) */
     wl_list_init(&s->esync_all);
