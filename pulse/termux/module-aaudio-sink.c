@@ -223,15 +223,16 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
 static void resume_stream(struct userdata *u) {
     uint32_t pin;
     aaudio_result_t r = u->stream ? AAudioStream_requestStart(u->stream) : AAUDIO_ERROR_DISCONNECTED;
+    aaudio_stream_state_t state = u->stream ? AAudioStream_getState(u->stream) : AAUDIO_STREAM_STATE_DISCONNECTED;
 
-    if (r != AAUDIO_ERROR_DISCONNECTED) {
+    if (r != AAUDIO_ERROR_DISCONNECTED && state != AAUDIO_STREAM_STATE_DISCONNECTED) {
         if (r < 0)
             pa_log("AAudioStream_requestStart() failed: %d.", r);
         return;
     }
 
     pin = u->sink->sample_spec.rate;
-    pa_log("AAudio stream disconnected - reopening on the new route.");
+    pa_log("AAudio stream disconnected (start result %d, state %d) - reopening on the new route.", r, state);
 
     if (u->stream) {
         AAudioStream_requestStop(u->stream);

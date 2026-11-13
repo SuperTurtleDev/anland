@@ -5,6 +5,8 @@
 #   sh service.sh pulse    (re)start only PulseAudio — dev/repair path after a
 #                          module reflash or a host-APK reinstall (uid change),
 #                          without touching the running daemon and its windows
+#   sh service.sh pulse-recover
+#                          retry AAudio in the existing PulseAudio server
 #
 # NOTE on file modes: ksud's installer runs `set_perm_recursive $MODPATH 0 0
 # 0755 0644` on the extracted zip BEFORE customize.sh — every file lands 0644,
@@ -42,16 +44,53 @@ start_daemon() {
 # Log: /data/local/tmp/awl_pulse.log (root-owned fd, inherited by the child).
 # Every skip path writes its reason there — a silent skip is what made "no
 # sound" undiagnosable after a reflash.
-# Keep boot bounded: 2 attempts × (4 probes × 2s + 3 intervals) + 1s backoff
-# is at most about 23s when the audio service is unavailable.
+# Keep the service-stage work bounded.  If PulseAudio itself starts but Android
+# audio is not ready, retain that server/socket and let one background worker
+# retry only the AAudio module.  Existing clients can use auto_null meanwhile
+# and migrate when the Android sink appears.
 PULSE_PROBE_TIMEOUT=2
 PULSE_PROBE_POLLS=4
 PULSE_START_RETRIES=2
+PULSE_RECOVERY_RETRIES=24
+PULSE_RECOVERY_INTERVAL=5
+PULSE_RECOVERY_PID="$RT/pulse-recovery.pid"
+
+init_pulse_paths() {
+  PA="$MODDIR/pulse"
+  LOG=/data/local/tmp/awl_pulse.log
+  PAR="$RT/pulse"
+  PH="$RT/pulse-home"
+}
+
+stop_pulse_recovery() {
+  [ -f "$PULSE_RECOVERY_PID" ] || return 0
+
+  recovery_pid=$(cat "$PULSE_RECOVERY_PID" 2>/dev/null)
+  case "$recovery_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      # Runtime storage survives reboot. A stale PID must not signal an
+      # unrelated Android process after PID reuse.
+      if [ -r "/proc/$recovery_pid/cmdline" ] &&
+         tr '\000' '\n' < "/proc/$recovery_pid/cmdline" |
+         awk -v script="$MODDIR/service.sh" '
+           NR == 1 { owned = ($0 ~ /(^|\/)sh$/) }
+           NR == 2 { owned = owned && ($0 == script) }
+           NR == 3 { owned = owned && ($0 == "pulse-recovery") }
+           END { exit !(owned && NR == 3) }
+         '; then
+        kill "$recovery_pid" 2>/dev/null || true
+      fi
+      ;;
+  esac
+  rm -f "$PULSE_RECOVERY_PID"
+}
 
 stop_pulse() {
   # The runtime copy is disposable, but the process must be stopped before it
   # is replaced.  Otherwise an old instance can keep the old UID/audio state
   # alive across a module update or an APK reinstall.
+  stop_pulse_recovery
   if pkill -f "$PAR/bin/pulseaudio" 2>/dev/null; then
     sleep 1
     # A stuck instance must not survive into the next attempt and race the
@@ -102,6 +141,73 @@ pulse_is_ready() {
      END { exit(found ? 0 : 1) }'
 }
 
+pulse_server_is_ready() {
+  [ -S "$RT/pulse.sock" ] || return 1
+  pulse_query info >/dev/null 2>>"$LOG"
+}
+
+load_aaudio_sink() {
+  if pulse_is_ready; then
+    return 0
+  fi
+
+  module_id=$(pulse_query load-module module-aaudio-sink \
+    sink_name=android sink_properties=device.description=Android \
+    no_close_hack=1 2>>"$LOG")
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "anland: delayed AAudio load failed (pactl status $status)" >> "$LOG"
+    return 1
+  fi
+
+  echo "anland: delayed AAudio module loaded (index $module_id)" >> "$LOG"
+  if ! pulse_query set-default-sink android >/dev/null 2>>"$LOG"; then
+    echo "anland: delayed AAudio default-sink selection failed" >> "$LOG"
+    return 1
+  fi
+  pulse_is_ready
+}
+
+cleanup_pulse_recovery_pid() {
+  current_pid=$(cat "$PULSE_RECOVERY_PID" 2>/dev/null)
+  if [ "$current_pid" = "$$" ]; then
+    rm -f "$PULSE_RECOVERY_PID"
+  fi
+}
+
+run_pulse_recovery() {
+  trap 'cleanup_pulse_recovery_pid; exit 0' HUP INT TERM
+  trap 'cleanup_pulse_recovery_pid' EXIT
+
+  attempt=1
+  while [ "$attempt" -le "$PULSE_RECOVERY_RETRIES" ]; do
+    sleep "$PULSE_RECOVERY_INTERVAL"
+
+    if ! pulse_server_is_ready; then
+      echo "anland: delayed AAudio recovery stopped (PulseAudio unavailable)" >> "$LOG"
+      return 1
+    fi
+    if load_aaudio_sink; then
+      echo "anland: delayed AAudio recovery ready (attempt $attempt/$PULSE_RECOVERY_RETRIES)" >> "$LOG"
+      return 0
+    fi
+
+    echo "anland: delayed AAudio recovery attempt $attempt/$PULSE_RECOVERY_RETRIES failed" >> "$LOG"
+    attempt=$((attempt + 1))
+  done
+
+  echo "anland: delayed AAudio recovery exhausted after $PULSE_RECOVERY_RETRIES attempts" >> "$LOG"
+  return 1
+}
+
+start_pulse_recovery() {
+  stop_pulse_recovery
+  nohup sh "$MODDIR/service.sh" pulse-recovery >> "$LOG" 2>&1 &
+  recovery_pid=$!
+  echo "$recovery_pid" > "$PULSE_RECOVERY_PID"
+  echo "anland: delayed AAudio recovery started (pid $recovery_pid; $PULSE_RECOVERY_RETRIES attempts every ${PULSE_RECOVERY_INTERVAL}s)" >> "$LOG"
+}
+
 wait_for_pulse() {
   probe=1
   while [ "$probe" -le "$PULSE_PROBE_POLLS" ]; do
@@ -139,10 +245,7 @@ exec '$PAR/bin/pulseaudio' --daemonize=no --exit-idle-time=-1 --disallow-exit \
 }
 
 start_pulse() {
-  PA="$MODDIR/pulse"
-  LOG=/data/local/tmp/awl_pulse.log
-  PAR="$RT/pulse"
-  PH="$RT/pulse-home"
+  init_pulse_paths
   : > "$LOG"
   if [ ! -f "$PA/bin/pulseaudio" ]; then
     stop_pulse
@@ -189,6 +292,12 @@ start_pulse() {
     fi
 
     echo "anland: pulse attempt $attempt/$PULSE_START_RETRIES did not produce an Android sink" >> "$LOG"
+    if pulse_server_is_ready; then
+      echo "anland: pulse retained with fallback sink; deferring AAudio load" >> "$LOG"
+      start_pulse_recovery
+      return 0
+    fi
+
     stop_pulse
     if [ "$attempt" -lt "$PULSE_START_RETRIES" ]; then
       sleep 1
@@ -203,5 +312,18 @@ start_pulse() {
 
 case "${1:-}" in
   pulse) start_pulse ;;
+  pulse-recover)
+    init_pulse_paths
+    if pulse_server_is_ready; then
+      start_pulse_recovery
+    else
+      echo "anland: delayed AAudio recovery not started (PulseAudio unavailable)" >> "$LOG"
+      exit 1
+    fi
+    ;;
+  pulse-recovery)
+    init_pulse_paths
+    run_pulse_recovery
+    ;;
   *)     start_daemon; start_pulse ;;
 esac

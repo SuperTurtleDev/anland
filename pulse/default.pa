@@ -15,10 +15,13 @@
 load-module module-stream-restore restore_device=false
 
 .nofail
-load-module module-sles-sink sink_name=android sink_properties=device.description=Android
-#load-module module-aaudio-sink sink_name=android sink_properties=device.description=Android
+# OpenSL ES fails initialization with error 9 on alioth / Android 16.
+# AAudio is the working backend on this stack.
+#load-module module-sles-sink sink_name=android sink_properties=device.description=Android
+load-module module-aaudio-sink sink_name=android sink_properties=device.description=Android no_close_hack=1
 set-default-sink android
 .fail
 
 load-module module-always-sink
+# Avoid an indefinitely active Android audio track while no client is playing.
 load-module module-suspend-on-idle
