@@ -1280,7 +1280,7 @@ public class AwlWindowActivity extends Activity {
 
     private static final int PTR_ENTER = 1, PTR_LEAVE = 2, PTR_MOTION = 3,
             PTR_BUTTON = 4, PTR_AXIS = 5, PTR_REL = 6,
-            KEY = 9, TOUCH_DOWN = 11, TOUCH_MOTION = 12, TOUCH_UP = 13,
+            KEY = 9, MODIFIERS = 10, TOUCH_DOWN = 11, TOUCH_MOTION = 12, TOUCH_UP = 13,
             TOUCH_CANCEL = 14;
 
     /* ---- Pointer capture (zwp_pointer_constraints_v1 state sync) ----
@@ -1579,6 +1579,7 @@ public class AwlWindowActivity extends Activity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         if (id < 0) return super.dispatchTouchEvent(ev);   /* awaiting */
+        syncPressModifiers(ev);
         if (isMouse(ev)) {
             int cls = ev.getClassification();
             if (cls == CLS_TWO_FINGER_SWIPE) {
@@ -1625,6 +1626,15 @@ public class AwlWindowActivity extends Activity {
         }
     }
 
+    /** Reconcile the fresh Android snapshot before forwarding its press. */
+    private void syncPressModifiers(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN
+                || action == MotionEvent.ACTION_BUTTON_PRESS) {
+            AwlClient.input(id, MODIFIERS, 0, 0, 0, 0, 0, ev.getMetaState());
+        }
+    }
+
     private void sendTouch(int type, MotionEvent ev, int idx) {
         AwlClient.input(id, type, ev.getPointerId(idx),
                        getEvtRelX(ev, idx), getEvtRelY(ev, idx), 0, 0, 0);
@@ -1646,6 +1656,7 @@ public class AwlWindowActivity extends Activity {
     @Override
     public boolean onGenericMotionEvent(MotionEvent ev) {
         if (id < 0) return super.onGenericMotionEvent(ev);   /* awaiting */
+        syncPressModifiers(ev);
         boolean capturedPad = captureMode != CAPTURE_NONE
                 && ev.isFromSource(InputDevice.SOURCE_TOUCHPAD);
         if (!isMouse(ev) && !capturedPad)
@@ -1733,7 +1744,7 @@ public class AwlWindowActivity extends Activity {
             return super.dispatchKeyEvent(ev);
         if (kc == KeyEvent.KEYCODE_DEL && imeWanted) {
             if (ev.getAction() == KeyEvent.ACTION_DOWN) {
-                int bs = ev.getScanCode() != 0 ? ev.getScanCode() : fallbackSc(kc);
+                int bs = ev.getScanCode() != 0 ? ev.getScanCode() : AndroidKeyCode.toEvdev(kc);
                 if (bs > 0) {
                     AwlClient.input(id, KEY, bs, 0, 0, 1, 0, ev.getMetaState());
                     AwlClient.input(id, KEY, bs, 0, 0, 0, 0, 0);
@@ -1744,7 +1755,7 @@ public class AwlWindowActivity extends Activity {
         if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() > 0)
             return true;   /* synthetic repeat — swallow (see above) */
         int sc = ev.getScanCode();
-        if (sc == 0) sc = fallbackSc(kc);
+        if (sc == 0) sc = AndroidKeyCode.toEvdev(kc);
         if (sc > 0) {
             AwlClient.input(id, KEY, sc, 0, 0,
                            ev.getAction() == KeyEvent.ACTION_DOWN ? 1 : 0, 0,
@@ -1752,28 +1763,6 @@ public class AwlWindowActivity extends Activity {
             return true;
         }
         return super.dispatchKeyEvent(ev);
-    }
-
-    /** IME-synthesized key (scanCode=0) → evdev code (matches the embedded keymap) */
-    private static int fallbackSc(int keyCode) {
-        switch (keyCode) {
-        case KeyEvent.KEYCODE_ENTER:
-        case KeyEvent.KEYCODE_NUMPAD_ENTER: return 0x1c;
-        case KeyEvent.KEYCODE_DEL:          return 0x0e;   /* Android DEL = backspace */
-        case KeyEvent.KEYCODE_FORWARD_DEL:  return 0x6f;
-        case KeyEvent.KEYCODE_TAB:          return 0x0f;
-        case KeyEvent.KEYCODE_ESCAPE:       return 0x01;
-        case KeyEvent.KEYCODE_SPACE:        return 0x39;
-        case KeyEvent.KEYCODE_DPAD_UP:      return 0x67;
-        case KeyEvent.KEYCODE_DPAD_DOWN:    return 0x6c;
-        case KeyEvent.KEYCODE_DPAD_LEFT:    return 0x69;
-        case KeyEvent.KEYCODE_DPAD_RIGHT:   return 0x6a;
-        case KeyEvent.KEYCODE_PAGE_UP:      return 0x68;
-        case KeyEvent.KEYCODE_PAGE_DOWN:    return 0x6d;
-        case KeyEvent.KEYCODE_MOVE_HOME:    return 0x66;
-        case KeyEvent.KEYCODE_MOVE_END:     return 0x6b;
-        default:                            return 0;
-        }
     }
 
     @Override

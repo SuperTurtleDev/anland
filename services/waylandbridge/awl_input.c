@@ -58,6 +58,7 @@ static struct wl_list g_ptrs, g_kbds, g_tchs;
 /* Keyboard derived state (single-threaded access under binder serial
  * delivery; g_input_lock only defensively protects the bitmap and modifier
  * bits, used to restore the keys/modifiers arrays on enter) */
+static uint64_t g_kbd_owner; /* key bitmap owner, protected by g_input_lock */
 static uint8_t  g_keys_down[256 / 8];   /* bitmap of pressed evdev codes (keymap range 8..255) */
 static uint32_t g_mods_depressed, g_mods_locked;   /* last known xkb mask */
 static pthread_mutex_t g_input_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -745,6 +746,7 @@ static void tr_kbd_enter(uint64_t win) {
         struct wl_array keys;
         wl_array_init(&keys);
         pthread_mutex_lock(&g_input_lock);
+        g_kbd_owner = win;
         for (uint32_t kc = 8; kc < 256; kc++)
             if (g_keys_down[kc / 8] & (1u << (kc % 8))) {
                 uint32_t* slot = wl_array_add(&keys, sizeof(uint32_t));
@@ -768,21 +770,78 @@ static void tr_kbd_enter(uint64_t win) {
     awl_datadev_focus_enter(NULL);
 }
 
+/* Focus revocation and binder host death may omit the last key-up. Only
+ * the departing owner can clear the seat bitmap, so stale leaves are safe. */
 static void tr_kbd_leave(uint64_t win) {
+    uint8_t released[sizeof(g_keys_down)] = {0};
+    uint32_t locked;
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s;
     struct wl_resource* kbd = resolve(&g_kbds, win, &s);
-    if (kbd) {
-        awl_ime_set_focus(NULL, 0);
-        pthread_mutex_lock(&s->ev_lock);
-        wl_keyboard_send_leave(kbd, wl_display_next_serial(g_srv.display),
-                               s->resource);
+    if (kbd) pthread_mutex_lock(&s->ev_lock);
+    pthread_mutex_lock(&g_input_lock);
+    int owner = g_kbd_owner == win;
+    if (owner) {
+        memcpy(released, g_keys_down, sizeof(released));
+        memset(g_keys_down, 0, sizeof(g_keys_down));
+        g_mods_depressed = 0;
+        g_kbd_owner = 0;
+    }
+    locked = g_mods_locked;
+    pthread_mutex_unlock(&g_input_lock);
+    if (kbd && owner) {
+        for (uint32_t code = 8; code < 256; code++)
+            if (released[code / 8] & (1u << (code % 8)))
+                wl_keyboard_send_key(kbd, wl_display_next_serial(g_srv.display),
+                                     awl_now_ms(), code, WL_KEYBOARD_KEY_STATE_RELEASED);
+        wl_keyboard_send_modifiers(kbd, wl_display_next_serial(g_srv.display),
+                                   0, 0, locked, 0);
+        wl_keyboard_send_leave(kbd, wl_display_next_serial(g_srv.display), s->resource);
         wl_client_flush(wl_resource_get_client(kbd));
-        pthread_mutex_unlock(&s->ev_lock);
-        awl_ime_focus_leave(win);   /* the leave symmetric to the text-input enter */
+    }
+    if (kbd) pthread_mutex_unlock(&s->ev_lock);
+    if (owner) {
+        awl_ime_set_focus(NULL, 0);
+        awl_ime_focus_leave(win);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
-    awl_datadev_focus_leave();
+    if (owner) {
+        awl_datadev_key_mods(0);
+        awl_datadev_focus_leave();
+    }
+}
+
+/* A fresh Android motion snapshot can repair a stale KeyEvent meta mask
+ * without inventing key events or clearing a genuinely held modifier. */
+#include "awl_modifier_state.h"
+static void tr_modifiers(uint64_t win, uint32_t meta) {
+    uint32_t dep, lck;
+    meta_to_masks(meta, &dep, &lck);
+    pthread_mutex_lock(&g_input_lock);
+    uint32_t old_dep = g_mods_depressed, old_lck = g_mods_locked;
+    dep |= awl_held_modifiers(g_keys_down);
+    g_mods_depressed = dep;
+    g_mods_locked = lck;
+    pthread_mutex_unlock(&g_input_lock);
+    if (dep != old_dep || lck != old_lck) {
+        pthread_rwlock_rdlock(&g_srv.rwl);
+        struct awl_surface* s;
+        struct wl_resource* kbd = resolve(&g_kbds, win, &s);
+        if (kbd) {
+            pthread_mutex_lock(&s->ev_lock);
+            wl_keyboard_send_modifiers(kbd, wl_display_next_serial(g_srv.display),
+                                       dep, 0, lck, 0);
+            wl_client_flush(wl_resource_get_client(kbd));
+            pthread_mutex_unlock(&s->ev_lock);
+        }
+        pthread_rwlock_unlock(&g_srv.rwl);
+        LOGI("motion modifiers win=%llu depressed=%u->%u locked=%u->%u",
+             (unsigned long long)win, old_dep, dep, old_lck, lck);
+    }
+    uint32_t dm = 0;
+    if (dep & (1u << 2)) dm |= AWL_DMOD_CTRL;
+    if (dep & (1u << 0)) dm |= AWL_DMOD_SHIFT;
+    awl_datadev_key_mods(dm);
 }
 
 /* Key: update the bitmap/modifiers (consistent under the lock) → send key + modifiers directly */
@@ -937,6 +996,7 @@ void awl_input_dispatch(const awl_input_ev_t* ev) {
     case AWL_IN_KBD_LEAVE:  tr_kbd_leave(ev->id); break;
     case AWL_IN_KEY:        tr_key(ev->id, ev->code, (uint32_t)ev->v1,
                                    ev->meta); break;
+    case AWL_IN_MODIFIERS:  tr_modifiers(ev->id, ev->meta); break;
     case AWL_IN_TOUCH_DOWN:
     case AWL_IN_TOUCH_MOTION:
     case AWL_IN_TOUCH_UP:
