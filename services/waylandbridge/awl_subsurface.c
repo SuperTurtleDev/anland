@@ -187,6 +187,7 @@ static void sub_apply_state(struct awl_surface* ch) {
      * every role-exit path drops the latch first) */
     AWL_ASSERT(ch->role == AWL_ROLE_SUBSURFACE);
     pthread_mutex_lock(&ch->ev_lock);
+    awl_surface_apply_mapping_state_locked(ch);
     int had_attach = ch->latched_attach;
     int acquire_fd = ch->u.sub.latched_acquire_fd;
     struct wl_resource* release_res = ch->u.sub.latched_release_res;

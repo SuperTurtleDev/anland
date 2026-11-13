@@ -78,6 +78,28 @@ void awl_surface_logical_size(struct awl_surface* s, float* w, float* h) {
     }
 }
 
+void awl_surface_apply_mapping_state_locked(struct awl_surface* s) {
+    if (s->pend_vpd) {
+        s->vp_dst_w = s->pend_vpd_w;
+        s->vp_dst_h = s->pend_vpd_h;
+        s->pend_vpd = 0;
+    }
+    if (s->pend_vps) {
+        s->vp_sx = s->pend_vps_x; s->vp_sy = s->pend_vps_y;
+        s->vp_sw = s->pend_vps_w; s->vp_sh = s->pend_vps_h;
+        s->vp_has_src = s->vp_sw > 0 && s->vp_sh > 0;
+        s->pend_vps = 0;
+    }
+    if (s->pend_buf_scale > 0) {
+        s->buf_scale = s->pend_buf_scale;
+        s->pend_buf_scale = 0;
+    }
+    if (s->pend_buf_transform >= 0) {
+        s->buf_transform = s->pend_buf_transform;
+        s->pend_buf_transform = -1;
+    }
+}
+
 /* View mapping base size (#31 chrome shadow-margin findings: viewport dst =
  * configure + margins 16/10/16/32, real content = the xdg geometry
  * rectangle). Valid geometry → geometry size; otherwise the surface logical

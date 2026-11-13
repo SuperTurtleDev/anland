@@ -308,6 +308,7 @@ set_target_properties(awlshm PROPERTIES
 # (own bionic-compat flags below).
 add_executable(waylandbridge
   # logic layer
+  awl_damage.c
   awl_server.c
   awl_surface.c
   awl_xdg.c
@@ -354,6 +355,11 @@ add_executable(waylandbridge
   awl_renderer.cpp
   waylandbridge.cpp
 )
+
+# Pure coordinate regression; also compilable/runnable directly on the host:
+# cc awl_damage.c awl_damage_test.c -lm -o /tmp/awl_damage_test
+add_executable(awl_damage_test awl_damage.c awl_damage_test.c)
+target_link_libraries(awl_damage_test PRIVATE m)
 target_include_directories(waylandbridge PRIVATE
   ${AWL}/include ${AWL_GENERATED}
   ${WAYLAND_SRC}/src
