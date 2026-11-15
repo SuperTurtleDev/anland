@@ -6,7 +6,8 @@
 
 ClutterColorState * meta_anland_color_state_new (ClutterContext *context,
                                                 gboolean        hdr,
-                                                gboolean        output);
+                                                gboolean        output,
+                                                float           sdr_white_nits);
 
 MtkRegion * meta_anland_accumulate_copy_damage (MtkRegion       **slot_damage,
                                                 unsigned int      n_slots,

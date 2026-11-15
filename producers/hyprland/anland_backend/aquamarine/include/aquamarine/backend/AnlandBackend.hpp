@@ -47,7 +47,7 @@ namespace Aquamarine {
         void deliverTextQueuedKey(uint32_t key, bool pressed, uint32_t time);
         size_t renderBufferCount() const;
         bool hdrEnabled() const;
-        static float hdrSdrWhiteNits();
+        float hdrSdrWhiteNits() const;
         static float hdrPeakNits();
         bool sendClipboardToConsumer(const std::string& text);
         void updateMouseCapture(bool active);

@@ -23,6 +23,7 @@
 #define _GNU_SOURCE /* for dup(); KWin/mutter build systems already define it */
 #endif
 #include "anland_device.h"
+#include "anland_hdr.h"
 
 #include "display_producer.h"
 #include "protocol.h"
@@ -44,6 +45,7 @@ struct anland_device {
     bool deferred;
     uint32_t     format;     /* screen_info.format (1 = ABGR8888) */
     int          pending_fb; /* committed fb index for the next pageflip */
+    uint32_t     hdr_sdr_white_nits;
     char         socket_path[108]; /* resolved daemon socket (for diagnostics) */
     anland_device_fallback_cb fallback_cb;
     void *fallback_userdata;
@@ -111,6 +113,7 @@ static anland_device *device_open(const char *socket_path, bool deferred)
     dev->ctx = ctx;
     dev->deferred = deferred;
     dev->pending_fb = -1;
+    dev->hdr_sdr_white_nits = (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
     /* Record which candidate answered so callers can log the real path. */
     snprintf(dev->socket_path, sizeof(dev->socket_path), "%s", used ? used : "");
 
@@ -144,6 +147,11 @@ bool anland_device_is_connected(const anland_device *dev)
     return dev && !is_fallback(dev->ctx);
 }
 
+uint32_t anland_device_hdr_sdr_white_nits(const anland_device *dev)
+{
+    return dev ? dev->hdr_sdr_white_nits : (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
+}
+
 int anland_device_poll_buffer_ready(anland_device *dev, int timeout_ms)
 {
     return poll_buffer_ready(dev ? dev->ctx : NULL, timeout_ms);
@@ -152,14 +160,18 @@ int anland_device_connect(anland_device *dev)
 {
     if (!dev)
         return -1;
-    return try_exit_fallback(dev->ctx);
+    const bool was_connected = !is_fallback(dev->ctx);
+    const int rc = try_exit_fallback(dev->ctx);
+    if (rc == 0 && !was_connected)
+        dev->hdr_sdr_white_nits = (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
+    return rc;
 }
 
 anland_device_connect_result_t anland_device_connect_result(anland_device *dev)
 {
     if (!dev)
         return ANLAND_DEVICE_CONNECT_DAEMON_LOST;
-    if (try_exit_fallback(dev->ctx) == 0)
+    if (anland_device_connect(dev) == 0)
         return ANLAND_DEVICE_CONNECT_READY;
 
     /* pickup can only fail for two reasons, and the return code alone cannot
@@ -175,6 +187,7 @@ void anland_device_force_fallback(anland_device *dev)
 {
     if (!dev)
         return;
+    dev->hdr_sdr_white_nits = (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
     force_fallback(dev->ctx);
 }
 
@@ -196,6 +209,7 @@ int anland_device_reopen(anland_device *dev, const char *socket_path)
     disconnect(dev->ctx);
     dev->ctx = ctx;
     dev->pending_fb = -1;
+    dev->hdr_sdr_white_nits = (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
     snprintf(dev->socket_path, sizeof(dev->socket_path), "%s", path ? path : "");
 
     uint32_t w = 0, h = 0, f = 0, r = 0;
@@ -429,6 +443,9 @@ int anland_device_poll_input(anland_device *dev, anland_device_input_t *ev,
     /* Layout-compatible by the static assert above: hand the raw event
      * through verbatim (preserves pointer ids / tool types / axes). */
     memcpy(ev, &in, sizeof(in));
+    if (in.type == INPUT_TYPE_ACTION)
+        anland_hdr_sdr_white_from_action(in.input_action.action,
+            in.input_action.value, &dev->hdr_sdr_white_nits);
     return 1;
 }
 

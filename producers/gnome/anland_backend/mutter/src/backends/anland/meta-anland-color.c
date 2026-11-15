@@ -21,7 +21,8 @@ meta_anland_accumulate_copy_damage (MtkRegion       **slot_damage,
 ClutterColorState *
 meta_anland_color_state_new (ClutterContext *context,
                              gboolean        hdr,
-                             gboolean        output)
+                             gboolean        output,
+                             float           sdr_white_nits)
 {
   ClutterColorspace colorspace = hdr ? CLUTTER_COLORSPACE_BT2020 : CLUTTER_COLORSPACE_SRGB;
 #if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
@@ -38,12 +39,12 @@ meta_anland_color_state_new (ClutterContext *context,
 
   /* Scene code 1 is 1000 nits, while wire PQ code 1 remains 10000 nits.
    * Linear BT.2020 forces Clutter's real FP16 intermediate and keeps alpha
-   * blending out of PQ. All content uses the same 203-nit SDR reference. */
+   * blending out of PQ. All content uses the selected SDR reference. */
   return clutter_color_state_params_new_full (context, colorspace, transfer,
                                                NULL, -1.0f, 0.0f,
                                                output ? ANLAND_HDR_PQ_SCALE_NITS
                                                       : ANLAND_HDR_PEAK_NITS,
-                                               ANLAND_HDR_SDR_WHITE_NITS
+                                               sdr_white_nits
 #if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
                                                , ANLAND_HDR_PEAK_NITS
 #elif defined(ANLAND_MUTTER_49)

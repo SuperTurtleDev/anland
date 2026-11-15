@@ -20,7 +20,7 @@
   },
   "patches": {
     "aquamarine.patch": "da8f1577eb2a8d3907119b61b1c45104a6fe04f0297a82f2dec120071207df01",
-    "hyprland.patch": "1adc866b6c35e439dc233fec12e0d46c4e29d584fab9d3d5c7f506cb952ffe3a",
+    "hyprland.patch": "448df2ff4cbe334f8aaf726181c619f9f0510b158d6e7ce2fc2775e199098b6d",
     "hyprgrass.patch": "24c05fef279dff8dcc7fa6b2bd2a20487c41abc56a995c042fa56ca59c7289cf",
     "xwayland.patch": "897fae87e2f3e94d19cf36a41b07951666f3a7a9f0612d5b5a5e077d652bf28d"
   },

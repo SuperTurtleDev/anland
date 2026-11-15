@@ -78,8 +78,10 @@ std::optional<bool> Anland::outputHdrMode(SP<Aquamarine::IOutput> output) {
 void Anland::configureColorRule(SP<Aquamarine::IOutput> output, Config::CMonitorRule& rule) {
     const auto hdr = outputHdrMode(output);
     if (!hdr.has_value()) return;
+    const auto owner = Hyprutils::Memory::dynamicPointerCast<Aquamarine::CAnlandBackend>(output->getBackend());
+    if (!owner) return;
     // Fixed consumer buffers determine both precision and encoding. Monitor
     // rules/ICC/auto-HDR must not silently put sRGB pixels into a PQ surface.
     fixedOutputColorRule(rule, *hdr, NCMType::CM_HDR, NCMType::CM_SRGB, NTransferFunction::TF_SRGB,
-                         Aquamarine::CAnlandBackend::hdrSdrWhiteNits(), Aquamarine::CAnlandBackend::hdrPeakNits());
+                         owner->hdrSdrWhiteNits(), Aquamarine::CAnlandBackend::hdrPeakNits());
 }

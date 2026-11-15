@@ -111,6 +111,7 @@ struct _MetaBackendAnland
   gboolean consumer_active;
   gboolean hdr_allowed;
   gboolean hdr_enabled;
+  uint32_t hdr_sdr_white_nits;
   gboolean frame_clock_inhibited;
   gboolean frame_pending;
   gboolean warned_sync_fallback;
@@ -126,7 +127,7 @@ meta_backend_anland_create_output_color_state (MetaBackendAnland *backend)
 {
   return meta_anland_color_state_new (
     meta_backend_get_clutter_context (META_BACKEND (backend)),
-    backend->hdr_enabled, TRUE);
+    backend->hdr_enabled, TRUE, backend->hdr_sdr_white_nits);
 }
 
 ClutterColorState *
@@ -134,7 +135,7 @@ meta_backend_anland_create_view_color_state (MetaBackendAnland *backend)
 {
   return meta_anland_color_state_new (
     meta_backend_get_clutter_context (META_BACKEND (backend)),
-    backend->hdr_enabled, FALSE);
+    backend->hdr_enabled, FALSE, backend->hdr_sdr_white_nits);
 }
 
 static void deactivate_consumer (MetaBackendAnland *backend);
@@ -1245,6 +1246,37 @@ on_stage_view_present (ClutterStageView *stage_view,
   return TRUE;
 }
 
+/* The shared input layer has validated and stored this session's reference.
+ * Refresh both native client preferences and the linear scene, then invalidate
+ * every rotating target: an old slot must not retain the previous brightness. */
+static void
+update_hdr_sdr_white (MetaBackendAnland *backend)
+{
+  uint32_t white = anland_device_hdr_sdr_white_nits (backend->device);
+  MetaColorDevice *color_device;
+  MtkRectangle layout;
+
+  if (!backend->hdr_enabled || white == backend->hdr_sdr_white_nits ||
+      !backend->stage_view || !backend->virtual_monitor)
+    return;
+
+  backend->hdr_sdr_white_nits = white;
+  color_device = meta_color_manager_get_color_device (
+    meta_backend_get_color_manager (META_BACKEND (backend)),
+    meta_output_get_monitor (meta_virtual_monitor_get_output (backend->virtual_monitor)));
+  if (color_device)
+    meta_color_device_update (color_device);
+
+  clutter_stage_view_get_layout (CLUTTER_STAGE_VIEW (backend->stage_view), &layout);
+  for (uint32_t i = 0; i < backend->buffer_count; i++)
+    {
+      g_clear_pointer (&backend->buffer_damage[i], mtk_region_unref);
+      backend->buffer_damage[i] = mtk_region_create_rectangle (&layout);
+    }
+  clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view), NULL);
+  clutter_stage_view_schedule_update_now (CLUTTER_STAGE_VIEW (backend->stage_view));
+}
+
 static gboolean
 input_source_prepare (gpointer user_data)
 {
@@ -1274,6 +1306,13 @@ input_source_dispatch (gpointer user_data)
               invalidate_consumer (backend);
               return G_SOURCE_REMOVE;
             }
+          continue;
+        }
+
+      if (event.type == ANLAND_DEVICE_IN_ACTION &&
+          event.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE)
+        {
+          update_hdr_sdr_white (backend);
           continue;
         }
 
@@ -1602,15 +1641,16 @@ activate_consumer (MetaBackendAnland *backend)
    * MetaColorDevice too, so Wayland HDR clients receive the actual preference.
    * RendererView uses our linear scene state instead of blending PQ values. */
   backend->hdr_enabled = color_mode == ANLAND_HDR_HDR10;
+  backend->hdr_sdr_white_nits = anland_device_hdr_sdr_white_nits (backend->device);
   clutter_stage_view_set_anland_hdr_copy_func (
     CLUTTER_STAGE_VIEW (backend->stage_view),
     backend->hdr_enabled ? get_hdr_copy_region : NULL,
     backend->hdr_enabled ? backend : NULL);
   meta_color_device_update (color_device);
   clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view), NULL);
-  g_message ("Anland consumer color: %s", backend->hdr_enabled
-             ? "BT.2020/PQ 10bit (linear FP16 scene, 203-nit SDR white, 1000-nit peak)"
-             : "sRGB 8bit");
+  g_message ("Anland consumer color: %s (SDR white %u nit)", backend->hdr_enabled
+             ? "BT.2020/PQ 10bit, linear FP16 scene, 1000-nit peak"
+             : "sRGB 8bit", backend->hdr_sdr_white_nits);
 
   for (i = 0; i < n_buffers; i++)
     {
@@ -1886,6 +1926,7 @@ meta_backend_anland_init (MetaBackendAnland *backend_anland)
 {
   const char *hdr_policy = g_getenv ("ANLAND_HDR");
   backend_anland->hdr_allowed = !anland_hdr_environment_disabled (hdr_policy);
+  backend_anland->hdr_sdr_white_nits = ANLAND_HDR_SDR_WHITE_NITS;
   backend_anland->socket_path = get_default_socket_path ();
   backend_anland->current_buffer = -1;
   backend_anland->constraint_watches =

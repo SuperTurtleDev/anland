@@ -121,7 +121,7 @@ static void testPolicy()
     }
 }
 
-static bool outputHasMode(const AnlandOutput& output, bool hdr)
+static bool outputHasMode(const AnlandOutput& output, bool hdr, unsigned int referenceWhite = 203)
 {
     const auto& render = output.renderColorDescription();
     const auto& wire = output.wireColorDescription();
@@ -131,7 +131,7 @@ static bool outputHasMode(const AnlandOutput& output, bool hdr)
     const auto range = output.bitsPerColorRange();
     bool result = output.hdrEnabled() == hdr && output.highDynamicRange() == hdr && output.wideColorGamut() == hdr
         && hasHdr == hdr && hasWcg == hdr && range.min == (hdr ? 10u : 8u) && range.max == range.min
-        && output.maxBitsPerColor() == range.max && output.referenceLuminance() == (hdr ? 203u : 200u)
+        && output.maxBitsPerColor() == range.max && output.referenceLuminance() == (hdr ? referenceWhite : 200u)
         && output.colorDescription().get() == wire.get() && output.layerBlendingColor().get() == wire.get()
         && output.blendingColor().get() == render.get();
     if (hdr) {
@@ -141,7 +141,7 @@ static bool outputHasMode(const AnlandOutput& output, bool hdr)
             && render->transferFunction().minLuminance == 0 && render->transferFunction().maxLuminance == 1000
             && wire->transferFunction().type == TransferFunction::PerceptualQuantizer
             && wire->transferFunction().minLuminance == 0 && wire->transferFunction().maxLuminance == 10000
-            && render->referenceLuminance() == 203 && wire->referenceLuminance() == 203
+            && render->referenceLuminance() == referenceWhite && wire->referenceLuminance() == referenceWhite
             && render->maxAverageLuminance() == 1000 && render->maxHdrLuminance() == 1000
             && wire->maxAverageLuminance() == 1000 && wire->maxHdrLuminance() == 1000
             && output.advertisedMaxPeakBrightness() == 1000 && output.advertisedMaxAverageBrightness() == 1000;
@@ -210,6 +210,52 @@ static void testStateTransitions()
         sdrConsumer == false && outputHasMode(requested, false), "ANLAND_HDR=1 with app 8-bit buffers stays fully SDR");
 }
 
+static void testReferenceWhite()
+{
+    qunsetenv("ANLAND_HDR");
+    AnlandOutput output(nullptr, QStringLiteral("anland-white-test"));
+    output.init(QSize(1920, 1080), 120000, 1);
+    check(output.setHdrSdrWhiteNits(400) && output.hdrSdrWhiteNits() == 400
+            && outputHasMode(output, false),
+        "brightness request in SDR records the value without changing SDR color, brightness or HDR state");
+    // A freshly connected session supplies its default 203, replacing the old
+    // consumer's value even if the output and buffer size are retained.
+    output.setConsumerHdrMode(true, 203);
+    check(outputHasMode(output, true) && output.hdrSdrWhiteNits() == 203,
+        "new HDR session uses its own 203 nit default rather than a stale session preference");
+    const auto originalMode = output.currentMode();
+    int references = 0, colors = 0, blends = 0, hdr = 0, bpc = 0;
+    QObject::connect(&output, &BackendOutput::referenceLuminanceChanged, [&] { ++references; });
+    QObject::connect(&output, &BackendOutput::colorDescriptionChanged, [&] { ++colors; });
+    QObject::connect(&output, &BackendOutput::blendingColorChanged, [&] { ++blends; });
+    QObject::connect(&output, &BackendOutput::highDynamicRangeChanged, [&] { ++hdr; });
+    QObject::connect(&output, &BackendOutput::maxBitsPerColorChanged, [&] { ++bpc; });
+    int changes = 0;
+    for (unsigned int white : {80u, 203u, 300u, 300u, 400u, 500u, 203u}) {
+        changes += output.hdrSdrWhiteNits() != white;
+        const bool accepted = output.setHdrSdrWhiteNits(white);
+        char label[180];
+        std::snprintf(label, sizeof(label),
+            "SDR white %u nits: coherent render/wire reference, fixed 0/1000-nit scene, absolute PQ, one notification", white);
+        check(accepted && outputHasMode(output, true, white) && output.hdrSdrWhiteNits() == white
+                && output.currentMode() == originalMode && references == changes && colors == changes
+                && blends == changes && hdr == 0 && bpc == 0, label);
+    }
+    for (unsigned int invalid : {0u, 79u, 501u, 0xffffffffu}) {
+        check(!output.setHdrSdrWhiteNits(invalid) && outputHasMode(output, true)
+                && references == changes && colors == changes && blends == changes,
+            "out-of-range white is rejected without state or notification changes");
+    }
+    output.setConsumerHdrMode(true, 400);
+    output.setConsumerHdrMode(true, 203);
+    check(outputHasMode(output, true) && output.hdrSdrWhiteNits() == 203,
+        "same-size HDR reconnect resets the old 400 nit reference to the new session's 203 nits");
+    output.setConsumerHdrMode(false, 500);
+    check(outputHasMode(output, false), "HDR-to-SDR import ignores the reference white in its SDR output state");
+    check(output.setHdrSdrWhiteNits(80) && outputHasMode(output, false),
+        "live action in SDR cannot enable HDR or lower SDR brightness");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -217,6 +263,7 @@ int main(int argc, char** argv)
     std::printf("KWin: %s\n", KWIN_PLUGIN_VERSION_STRING);
     testPolicy();
     testStateTransitions();
+    testReferenceWhite();
     std::printf("RESULT %s failures=%d\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

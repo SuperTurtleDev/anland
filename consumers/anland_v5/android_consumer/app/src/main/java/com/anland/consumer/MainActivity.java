@@ -95,6 +95,19 @@ public class MainActivity extends Activity
     static final String EXTRA_WINDOW_NAME = "window_name";
     // This window's own native transport instance (its own consumer_state handle).
     private Native mNative;
+    // Keep the listener strongly referenced for this window's entire lifetime.
+    // Paused HDR windows must also receive changes made from Settings.
+    private final SharedPreferences.OnSharedPreferenceChangeListener hdrBrightnessListener =
+            (prefs, key) -> {
+                if (HdrBrightness.KEY_SDR_WHITE_NITS.equals(key))
+                    applyHdrBrightness(prefs);
+            };
+
+    private void applyHdrBrightness(SharedPreferences prefs) {
+        if (hdrEnabled && mNative != null)
+            mNative.setHdrSdrWhiteNits(HdrBrightness.clamp(prefs.getInt(
+                    HdrBrightness.KEY_SDR_WHITE_NITS, HdrBrightness.DEFAULT_NITS)));
+    }
     private final TabletInput tabletInput = new TabletInput(frame -> {
         if (mNative != null) {
             mNative.sendTabletSample(frame.toolId, frame.toolType, frame.capabilities,
@@ -432,6 +445,7 @@ public class MainActivity extends Activity
         String topAppPath = getApplicationInfo().nativeLibraryDir + "/libsettopapp.so";
         mNative.configure(sock, useRoot, helperPath, bridgePath, topApp, topAppPath,
                 topAppMode, topAppStops, hdrEnabled, supportsHdr10());
+        applyHdrBrightness(prefs);
         int customW = prefs.getInt("custom_width", 0);
         int customH = prefs.getInt("custom_height", 0);
         customScreenWidth = prefs.getInt("custom_width", 0);
@@ -786,6 +800,9 @@ public class MainActivity extends Activity
 
         // Each window owns its own native pipeline.
         mNative = new Native();
+        SharedPreferences hdrPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        hdrPrefs.registerOnSharedPreferenceChangeListener(hdrBrightnessListener);
+        applyHdrBrightness(hdrPrefs);
         setTaskDescription(new ActivityManager.TaskDescription(mWindowName));
 
         clipboard = new Clipboard(this, mNative);
@@ -2070,6 +2087,8 @@ public class MainActivity extends Activity
     @Override
     protected void onDestroy() {
         Log.i(TAG, "onDestroy: releasing native and immersive input");
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .unregisterOnSharedPreferenceChangeListener(hdrBrightnessListener);
         cancelPendingReconnect();
         lifecycleHandler.removeCallbacks(delayedFocusStop);
         lifecycleHandler.removeCallbacks(delayedSurfaceStop);

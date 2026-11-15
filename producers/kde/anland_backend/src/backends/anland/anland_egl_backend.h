@@ -127,6 +127,7 @@ public:
 
 private:
     void onOutputTransformChanged();
+    void onOutputColorDescriptionChanged();
     bool createHdrRenderTarget(const QSize &size, const OutputTransform &transform);
     bool encodeHdrFrame(const QRegion &deviceDamage);
 
@@ -144,7 +145,7 @@ private:
     std::array<std::shared_ptr<GLTexture>, ANLAND_DEVICE_MAX_BUFS> m_textures;
     std::array<std::unique_ptr<GLFramebuffer>, ANLAND_DEVICE_MAX_BUFS> m_fbos;
     // The scene persists across consumer slot changes. Only its first frame or
-    // an orientation change needs a full repaint; each consumer slot separately
+    // an orientation or color change needs a full repaint; each consumer slot separately
     // accumulates the damage that still needs final PQ encoding.
     std::unique_ptr<GLTexture> m_hdrTexture;
     std::unique_ptr<GLFramebuffer> m_hdrFbo;

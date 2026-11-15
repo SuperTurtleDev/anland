@@ -138,8 +138,8 @@ int main (void)
   CoglContext *ctx = cogl_context_egl_new(COGL_DISPLAY(display),&error);
   if(!ctx) g_error("context: %s",error->message);
   ClutterContext *cc = g_object_new(CLUTTER_TYPE_CONTEXT,NULL);
-  ClutterColorState *scene_color = meta_anland_color_state_new(cc,TRUE,FALSE);
-  ClutterColorState *wire_color = meta_anland_color_state_new(cc,TRUE,TRUE);
+  ClutterColorState *scene_color = meta_anland_color_state_new(cc,TRUE,FALSE,203);
+  ClutterColorState *wire_color = meta_anland_color_state_new(cc,TRUE,TRUE,203);
   CHECK(clutter_color_state_required_format(scene_color)==CLUTTER_ENCODING_REQUIRED_FORMAT_FP16);
   const ClutterLuminance *lum = clutter_color_state_params_get_luminance(CLUTTER_COLOR_STATE_PARAMS(wire_color));
   CHECK(lum->min==0 && lum->max==10000 && lum->ref==203);
@@ -199,7 +199,7 @@ int main (void)
     clutter_stage_view_after_paint(view,pending); mtk_region_unref(pending);
     read_pixel(out[i],4,3,pixels); CHECK(fabs(pixels[0]-pq(203))*1023<1.1);
   }
-  ClutterColorState *sdr=meta_anland_color_state_new(cc,FALSE,FALSE);
+  ClutterColorState *sdr=meta_anland_color_state_new(cc,FALSE,FALSE,203);
   CoglPipeline *sdr_pipeline=cogl_pipeline_new(ctx);
   clutter_color_pipeline_shader_set_color_state(sdr_pipeline,sdr,scene_color,CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
   cogl_framebuffer_clear4f(scene,COGL_BUFFER_BIT_COLOR,0,0,0,1);
@@ -218,6 +218,39 @@ int main (void)
   current=0; clutter_stage_view_after_paint(view,full);
   read_pixel(out[0],8,5,pixels); CHECK(fabs(pixels[0]-pq(1000))*1023<1.1);
   printf("HDR client 1000-nit PQ %.7f expected %.7f\n",pixels[0],pq(1000));
+  /* Live reference changes rebuild the native transforms. SDR white follows
+   * the selected nit value. HDR clients following the new preferred reference
+   * retain their absolute PQ highlights through the native transform.
+   * Every rotating slot is invalidated, including copy-only catch-up frames. */
+  const unsigned int whites[] = {80, 300, 400, 500, 203};
+  for (unsigned int w = 0; w < G_N_ELEMENTS(whites); w++) {
+    ClutterColorState *new_scene = meta_anland_color_state_new(cc,TRUE,FALSE,whites[w]);
+    ClutterColorState *new_wire = meta_anland_color_state_new(cc,TRUE,TRUE,whites[w]);
+    lum = clutter_color_state_params_get_luminance(CLUTTER_COLOR_STATE_PARAMS(new_wire));
+    CHECK(lum->ref == whites[w] && lum->min == 0 && lum->max == 10000 && lum->mastering_max == 1000);
+    clutter_stage_view_set_color_state(view,new_scene);
+    clutter_stage_view_set_output_color_state(view,new_wire);
+    while(g_main_context_iteration(NULL,FALSE));
+    scene = clutter_stage_view_get_framebuffer(view);
+    CHECK(cogl_framebuffer_get_red_bits(scene)>=16);
+    cogl_framebuffer_orthographic(scene,0,0,17,11,-1,1);
+    g_object_unref(sdr_pipeline); sdr_pipeline=cogl_pipeline_new(ctx);
+    clutter_color_pipeline_shader_set_color_state(sdr_pipeline,sdr,new_scene,CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
+    cogl_framebuffer_draw_rectangle(scene,sdr_pipeline,0,0,17,11);
+    for (int i=0;i<3;i++) { mtk_region_unref(debts[i]); debts[i]=mtk_region_copy(full); }
+    for (int i=0;i<3;i++) {
+      current=i; clutter_stage_view_replace_framebuffer(view,out[i]); clutter_stage_view_after_paint(view,empty);
+      read_pixel(out[i],8,5,pixels); CHECK(fabs(pixels[0]-pq(whites[w]))*1023<1.1);
+    }
+    g_object_unref(hdr_pipeline); hdr_pipeline=cogl_pipeline_new(ctx);
+    clutter_color_pipeline_shader_set_color_state(hdr_pipeline,new_wire,new_scene,CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
+    cogl_pipeline_set_layer_texture(hdr_pipeline,0,cogl_offscreen_get_texture(COGL_OFFSCREEN(hdr_client)));
+    cogl_framebuffer_draw_textured_rectangle(scene,hdr_pipeline,0,0,17,11,0,0,1,1);
+    current=0; clutter_stage_view_replace_framebuffer(view,out[0]); clutter_stage_view_after_paint(view,full);
+    read_pixel(out[0],8,5,pixels); CHECK(fabs(pixels[0]-pq(1000))*1023<1.1);
+    printf("live SDR white %u nit: HDR 1000-nit highlight PQ %.7f expected %.7f\n",whites[w],pixels[0],pq(1000));
+    g_object_unref(new_scene); g_object_unref(new_wire);
+  }
   g_object_unref(hdr_client); g_object_unref(hdr_pipeline); g_object_unref(sdr_pipeline);
   g_object_unref(view);
   test_transforms(ctx,scene_color,wire_color);

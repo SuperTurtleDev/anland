@@ -239,7 +239,45 @@ Subject: Anland v5 hyprland native integration (Debian 13)
          if (m_pendingDpmsAnimation) {
              m_pendingDpmsAnimationCounter++;
              // we give ourselves 5 frames of a buffer. The first presentation event still doesn't usually say that we actually
-@@ -641,10 +649,13 @@
+@@ -176,6 +184,20 @@
+     });
+
+     m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
++        if (event.size == Vector2D{} && Anland::outputHdrMode(m_output).value_or(false)) {
++            // Consumer SDR-white action: update only native color state. Do not
++            // modeset or replace the fixed 10-bit targets during an input poll.
++            Anland::configureColorRule(m_output, m_activeMonitorRule);
++            m_sdrMinLuminance = m_activeMonitorRule.m_sdrMinLuminance;
++            m_sdrMaxLuminance = m_activeMonitorRule.m_sdrMaxLuminance;
++            m_sdrBrightness = m_activeMonitorRule.m_sdrBrightness;
++            m_sdrSaturation = m_activeMonitorRule.m_sdrSaturation;
++            applyCMType(m_cmType, m_sdrEotf);
++            m_blurFBDirty = true;
++            m_damage.damageEntire();
++            g_pHyprRenderer->damageMonitor(m_self.lock());
++            return;
++        }
+         if (event.size == Vector2D{}) {
+             // an indication to re-set state
+             // we can't do much for createdByUser displays I think
+@@ -628,6 +650,16 @@
+             .reference = m_imageDescription->value().luminances.reference                                   //
+         });
+
++    if (Anland::outputHdrMode(m_output).value_or(false)) {
++        // Publish the selected reference to native HDR clients and the FP16
++        // work-buffer description as well as the SDR shader input range.
++        m_imageDescription = m_imageDescription->with({
++            .min = m_imageDescription->value().luminances.min,
++            .max = m_imageDescription->value().luminances.max,
++            .reference = sc<uint32_t>(m_sdrMaxLuminance),
++        });
++    }
++
+     if (oldImageDescription != m_imageDescription) {
+         if (PROTO::colorManagement)
+             PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
+@@ -641,10 +673,13 @@
 
      Log::logger->log(Log::DEBUG, "Applying monitor rule for {}", m_name);
 
@@ -254,7 +292,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 
      const auto RULE = &m_activeMonitorRule;
 
-@@ -829,7 +840,13 @@
+@@ -829,7 +864,13 @@
      m_customDrmMode = {};
      m_currentMode   = nullptr;
 
@@ -269,7 +307,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      m_output->state->setFormat(initialFormat);
      m_prevDrmFormat = m_drmFormat;
      m_drmFormat     = initialFormat;
-@@ -955,18 +972,26 @@
+@@ -955,18 +996,26 @@
 
      bool set10bit = false;
 
@@ -308,7 +346,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
          }
      }
 
-@@ -1100,6 +1125,7 @@
+@@ -1100,6 +1149,7 @@
      if (m_background && (OLDPIXELSIZE != m_pixelSize || OLDTRANSFORMEDSIZE != m_transformedSize)) {
          Log::logger->log(Log::DEBUG, "{} reset BGTex: pixelSize {} -> {}, transformedSize {} -> {}", m_name, OLDPIXELSIZE, m_pixelSize, OLDTRANSFORMEDSIZE, m_transformedSize);
          m_background.reset();
@@ -316,7 +354,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      }
 
      g_pCompositor->scheduleMonitorStateRecheck();
-@@ -2401,6 +2427,10 @@
+@@ -2401,6 +2451,10 @@
 
  // TODO support more drm properties
  bool CMonitor::canNoShaderCM(bool forDSmode) {
@@ -327,7 +365,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      static auto PNONSHADER = CConfigValue<Config::INTEGER>("render:non_shader_cm");
      if (*PNONSHADER == CM_NS_DISABLE)
          return false;
-@@ -2431,6 +2461,8 @@
+@@ -2431,6 +2485,8 @@
  }
 
  bool CMonitor::doesNoShaderCM() {
@@ -336,7 +374,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      return m_noShaderCTM;
  }
 
-@@ -2504,6 +2536,11 @@
+@@ -2504,6 +2560,11 @@
  }
 
  void CMonitorState::ensureBufferPresent() {
@@ -348,7 +386,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      const auto& STATE = m_owner->m_output->state->state();
      if (!STATE.enabled) {
          Log::logger->log(Log::TRACE, "CMonitorState::ensureBufferPresent: Ignoring, monitor is not enabled");
-@@ -2552,13 +2589,15 @@
+@@ -2552,13 +2613,15 @@
          return true;
      }
 
@@ -366,7 +404,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      options.size    = MODE->pixelSize;
      return m_owner->m_output->swapchain->reconfigure(options);
  }
-@@ -2595,6 +2634,12 @@
+@@ -2595,6 +2658,12 @@
  }
 
  bool CMonitor::useFP16() {

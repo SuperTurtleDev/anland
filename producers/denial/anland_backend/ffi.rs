@@ -124,6 +124,7 @@ unsafe extern "C" {
     pub fn ad_drop(session: *mut Session);
     pub fn ad_get_fds(session: *mut Session, out: *mut Fds) -> i32;
     pub fn ad_get_output(session: *mut Session, out: *mut Output) -> i32;
+    pub fn ad_hdr_sdr_white_nits(session: *mut Session) -> u32;
     pub fn ad_writable(session: *mut Session, out: *mut Target) -> i32;
     pub fn ad_import(session: *mut Session, generation: u64, index: u32, out: *mut Image) -> i32;
     pub fn ad_commit(session: *mut Session, target: *const Target, fence: i32, id: *mut u64)

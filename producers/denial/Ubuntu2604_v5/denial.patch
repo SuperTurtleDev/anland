@@ -1498,10 +1498,10 @@ index d3543ed..1017c42 100644
              assert_eq!(broker.authorize(request, now, None), Some(view.get()));
              let framebuffer = broker.acquire(view.get(), size).unwrap();
 diff --git a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
-index 7cfa290..07fc49d 100644
+index 7cfa290..392a096 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
-@@ -211,6 +211,94 @@ impl FlutterRuntime {
+@@ -211,6 +211,128 @@ impl FlutterRuntime {
          })
      }
  
@@ -1528,6 +1528,40 @@ index 7cfa290..07fc49d 100644
 +        )?;
 +        self.frame_interval = Duration::from_nanos(1_000_000_000_000 / u64::from(refresh));
 +        Ok(())
++    }
++
++    #[cfg(feature = "external-output")]
++    pub(crate) fn begin_external_hdr_update(
++        &self,
++        pool: ExternalPoolDescriptor,
++        hdr: crate::output_color::HdrOutput,
++    ) -> Result<
++        std::sync::mpsc::Receiver<denial_flutter_engine::RenderOperationResult>,
++        Box<dyn Error>,
++    > {
++        let handler = Arc::clone(&self.handler);
++        // Only owned values cross runners. The caller pauses authorization and
++        // drains old raster work before posting this color-only transaction.
++        self.host()
++            .post_render_operation(move || handler.update_external_hdr_on_render_thread(pool, hdr))
++    }
++
++    #[cfg(feature = "external-output")]
++    pub(crate) fn finish_external_hdr_update(&mut self) -> Result<Vec<i64>, Box<dyn Error>> {
++        // Re-sample HDR sources even when a client is idle: its normalized scene
++        // values depend on the new reference white and headroom. The engine's
++        // texture-only scheduling API marks the retained scene textures dirty.
++        let textures: Vec<_> = self.registered_external_textures.iter().copied().collect();
++        self.host()
++            .engine()
++            .schedule_frame_for_external_textures(&textures)?;
++        for output in &self.render_outputs {
++            self.pending_output_updates
++                .entry(output.output_id)
++                .or_default()
++                .extend(textures.iter().copied());
++        }
++        Ok(textures)
 +    }
 +
 +    #[cfg(feature = "external-output")]
@@ -1596,7 +1630,7 @@ index 7cfa290..07fc49d 100644
      pub fn publish_output(&self, output: &ReadyOutputFrame) -> Result<(), Box<dyn Error>> {
          self.handler.publish_output(output).map_err(Into::into)
      }
-@@ -385,23 +473,42 @@ impl FlutterRuntime {
+@@ -385,23 +507,42 @@ impl FlutterRuntime {
          Ok(true)
      }
  
@@ -1643,7 +1677,7 @@ index 7cfa290..07fc49d 100644
          }
          let completion_id = self
              .host
-@@ -418,7 +525,7 @@ impl FlutterRuntime {
+@@ -418,7 +559,7 @@ impl FlutterRuntime {
              completion_id,
          );
          if self.render_view_scratch.is_empty() {
@@ -1652,7 +1686,7 @@ index 7cfa290..07fc49d 100644
          }
  
          let flutter_tick = flutter_output.and_then(|output_id| {
-@@ -477,7 +584,7 @@ impl FlutterRuntime {
+@@ -477,7 +618,7 @@ impl FlutterRuntime {
              let Some(baton) = baton else {
                  self.handler
                      .cancel_output_authorizations(&self.render_view_scratch);
@@ -1661,7 +1695,7 @@ index 7cfa290..07fc49d 100644
              };
              Some(baton)
          } else {
-@@ -573,7 +680,10 @@ impl FlutterRuntime {
+@@ -573,7 +714,10 @@ impl FlutterRuntime {
                  .cancel_output_authorizations(&self.render_view_scratch);
              return Err(error.into());
          }
@@ -1852,7 +1886,7 @@ index f2680eb..8f3e61f 100644
  // before encoding, 3: straight.\n\
  uniform int alpha_mode;\n\
 diff --git a/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs b/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
-index 5ab657d..0144f98 100644
+index 5ab657d..78fe8fb 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
 @@ -129,7 +129,7 @@ pub(in crate::flutter_runtime) struct FlutterGlHandler {
@@ -2138,7 +2172,7 @@ index 5ab657d..0144f98 100644
                  return Err(error.into());
              }
          };
-@@ -576,75 +668,105 @@ impl FlutterGlHandler {
+@@ -576,75 +668,179 @@ impl FlutterGlHandler {
              render_modifier = ?offscreen_blit.then_some(Modifier::Linear),
              "imported native output pools into Flutter EGL context"
          );
@@ -2162,6 +2196,80 @@ index 5ab657d..0144f98 100644
 -        if let Err(error) = render_context.unbind() {
 -            native_clients.destroy();
 -            return Err(error.into());
++    #[cfg(feature = "external-output")]
++    pub(in crate::flutter_runtime) fn update_external_hdr_on_render_thread(
++        &self,
++        expected: ExternalPoolDescriptor,
++        hdr: crate::output_color::HdrOutput,
++    ) -> denial_flutter_engine::RenderOperationResult {
++        use denial_flutter_engine::RenderOperationResult::{Busy, Completed, Rejected, Uncertain};
++        if self.shutdown_started.load(Ordering::Acquire) {
++            return Uncertain;
++        }
++        if !hdr.white.is_finite() || !(80.0..=500.0).contains(&hdr.white) {
++            return Rejected;
++        }
++        let mut broker = lock(&self.broker);
++        let Some(pool) = broker.pools.iter_mut().find(|pool| {
++            pool.output_id == expected.output
++                && pool.render_view_id == expected.view
++                && pool.configuration_generation == expected.configuration
++                && pool.size == expected.size
++                && matches!(pool.selection, PoolSelection::External { generation, .. }
++                    if generation == expected.generation)
++        }) else {
++            return Rejected;
++        };
++        if pool.authorized_request.is_some()
++            || pool
++                .slots
++                .iter()
++                .any(|slot| slot.state != output_pipeline::BufferState::Free)
++            || self.backing_store_borrows.load(Ordering::Acquire) != 0
++            || !lock(&self.ready_frames).is_empty()
++            || lock(&self.pending_output_presentation).is_some()
++        {
++            return Busy;
++        }
++        let mut targets = lock(&self.targets);
++        let resident: Vec<_> = targets
++            .iter_mut()
++            .filter(|target| {
++                target.output_id == expected.output
++                    && target.render_view_id == expected.view
++                    && target.configuration_generation == expected.configuration
++            })
++            .collect();
++        // This API can only retune an already validated native HDR pool. A
++        // delayed SDR-session action cannot enable HDR or change its storage.
++        if resident.len() != pool.slots.len()
++            || resident.iter().any(|target| {
++                target.pq_white <= 0.0 || target.gl_format != gl::RGBA16F || !target.needs_blit()
++            })
++        {
++            return Rejected;
++        }
++        let color = hdr.output_color();
++        for target in resident {
++            target.pq_white = color.pq_white;
++            target.gamut = Some(color.matrix);
++        }
++        for slot in &mut pool.slots {
++            // Includes currently published slots: their ownership is retained,
++            // and their next writable generation gets a complete repaint.
++            slot.damage.invalidate();
++        }
++        lock(&self.prepared_external_texture).take();
++        crate::output_color::clear_hdr_requests();
++        crate::output_color::set_hdr_displays(vec![crate::output_color::HdrDisplay {
++            id: expected.output,
++            name: "Anland".into(),
++            display: hdr.display,
++            active: Some(hdr.mode()),
++        }]);
++        Completed
++    }
++
 +    #[cfg(feature = "external-output")]
 +    pub(in crate::flutter_runtime) fn replace_external_pool_on_render_thread(
 +        &self,
@@ -2311,7 +2419,7 @@ index 5ab657d..0144f98 100644
      }
  
      pub(in crate::flutter_runtime) fn take_ready_frame(
-@@ -707,6 +829,43 @@ impl FlutterGlHandler {
+@@ -707,6 +903,43 @@ impl FlutterGlHandler {
          lock(&self.broker).cancel_authorizations(render_view_ids);
      }
  

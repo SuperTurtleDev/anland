@@ -395,8 +395,14 @@
 
     <!-- The app selects the mode; KDE follows the reported buffer format. -->
     <string name="hdr_switch">10bit HDR（实验性）</string>
-    <string name="hdr_hint">仅供支持 HDR10 的屏幕及更新后的 KDE、GNOME、Hyprland、Gamescope、Denial 后端使用。后端在重新连接时自动跟随此开关。修改后请关闭并重新打开桌面窗口；现有窗口保持原模式。固定输出 BT.2020/PQ，峰值 1000 nit、SDR 参考白 203 nit。不自动降级到 SDR，不协商 HDR 元数据。</string>
+    <string name="hdr_hint">仅供支持 HDR10 的屏幕及更新后的 KDE、GNOME、Hyprland、Gamescope、Denial 后端使用。后端在重新连接时自动跟随此开关。修改开关后请关闭并重新打开桌面窗口；现有窗口保持原模式。固定输出 BT.2020/PQ，峰值 1000 nit。旁边的亮度按钮可即时调节 SDR 参考白。不自动降级到 SDR，不协商 HDR 元数据。</string>
     <string name="hdr_error_title">HDR 连接被拒绝</string>
     <string name="hdr_error_unsupported">当前显示模式未报告 HDR10/PQ 支持。此窗口已停止连接，未降级到 SDR。使用 SDR 时，请关闭桌面窗口、关闭此选项，再重新打开窗口；受支持的后端会自动跟随。</string>
     <string name="hdr_error_surface">Android 无法配置或保持 10bit BT.2020/PQ Surface。此窗口已停止连接，未降级到 SDR。请在 Anland 日志中检查缓冲区格式或 Surface 错误。使用 SDR 时，请关闭桌面窗口、关闭此选项，再重新打开窗口；受支持的后端会自动跟随。</string>
+    <string name="hdr_brightness_button">亮度 · %1$d nit</string>
+    <string name="hdr_brightness_accessibility">HDR SDR 参考白：%1$d nit，调节亮度</string>
+    <string name="hdr_brightness_title">HDR 桌面亮度</string>
+    <string name="hdr_brightness_hint">调节 SDR 参考白，范围 80～500 nit，默认 203。整个桌面偏暗时可试试 300 或 400 nit。修改会自动保存，并即时应用到使用新版后端的已打开 HDR 窗口。这会调整桌面亮度，不改变黑位或 1000 nit 的 HDR 峰值。</string>
+    <string name="hdr_brightness_value">%1$d nit</string>
+    <string name="hdr_brightness_reset">恢复 203 nit</string>
 </resources>

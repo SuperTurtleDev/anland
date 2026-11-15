@@ -28,6 +28,7 @@ struct SceneBuffer {
 pub(crate) struct ImportedPool {
     pub identity: Pool,
     pub hdr: bool,
+    pub sdr_white_nits: u32,
     buffers: Vec<Dmabuf>,
     scenes: Vec<SceneBuffer>,
 }
@@ -171,6 +172,7 @@ impl ImportedPool {
         Ok(Self {
             identity,
             hdr,
+            sdr_white_nits: client.hdr_sdr_white_nits(),
             buffers,
             scenes,
         })
@@ -192,7 +194,9 @@ impl ImportedPool {
             configuration_generation: self.identity.configuration,
             size: self.identity.size,
             #[cfg(feature = "anland-runtime-v2")]
-            color: self.hdr.then(|| super::hdr::output().output_color()),
+            color: self
+                .hdr
+                .then(|| super::hdr::output(self.sdr_white_nits).output_color()),
             selection: PoolSelection::External {
                 generation: self.identity.generation,
                 selected: None,
@@ -222,7 +226,9 @@ impl ImportedPool {
                 view: self.identity.view,
                 size: self.identity.size,
                 #[cfg(feature = "anland-runtime-v2")]
-                color: self.hdr.then(|| super::hdr::output().output_color()),
+                color: self
+                    .hdr
+                    .then(|| super::hdr::output(self.sdr_white_nits).output_color()),
             },
             self.buffers.clone(),
             #[cfg(feature = "anland-runtime-v2")]
@@ -262,7 +268,7 @@ impl ImportedPool {
         let prepared =
             launcher.prepare_with_pools(context, [self.descriptor()], atlas.pixel_size)?;
         #[cfg(feature = "anland-runtime-v2")]
-        super::hdr::activate(self.identity.output, self.hdr);
+        super::hdr::activate(self.identity.output, self.hdr, self.sdr_white_nits);
         let mut runtime = launcher.start_with_pools(
             context,
             [self.descriptor()],

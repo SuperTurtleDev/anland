@@ -37,6 +37,7 @@ add_library(anland_consumer SHARED
 target_include_directories(anland_consumer PRIVATE
     ${LIBDISPLAY_DIR}/libdisplay_consumer
     ${LIBDISPLAY_DIR}/common
+    ${LIBDISPLAY_DIR}/../../libdisplay_producer
 )
 
 target_compile_options(anland_consumer PRIVATE -O3 -flto)

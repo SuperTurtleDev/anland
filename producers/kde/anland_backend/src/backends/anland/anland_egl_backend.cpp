@@ -53,8 +53,10 @@ AnlandEglLayer::AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend)
     // signal instead of polling the transform in the per-frame render path.
 #ifdef ANLAND_KWIN_66
     connect(m_output, &BackendOutput::transformChanged, this, &AnlandEglLayer::onOutputTransformChanged);
+    connect(m_output, &BackendOutput::colorDescriptionChanged, this, &AnlandEglLayer::onOutputColorDescriptionChanged);
 #else
     connect(m_output, &Output::transformChanged, this, &AnlandEglLayer::onOutputTransformChanged);
+    connect(m_output, &Output::colorDescriptionChanged, this, &AnlandEglLayer::onOutputColorDescriptionChanged);
 #endif
 }
 
@@ -259,7 +261,7 @@ bool AnlandEglLayer::importBuffers(int count)
     // Only publish the new color mode after the complete buffer set and its
     // render resources are usable. A failed reconnect keeps the last valid
     // output state while rendering remains inhibited.
-    m_output->setConsumerHdrMode(consumerHdr);
+    m_output->setConsumerHdrMode(consumerHdr, anland_device_hdr_sdr_white_nits(m_device));
     // Color/capability notifications can synchronously reapply output layout.
     // Keep the imported slots in sync even though m_bufCount is still zero and
     // transformChanged() could not visit them during that notification.
@@ -288,6 +290,24 @@ void AnlandEglLayer::onOutputTransformChanged()
     }
     if (m_hdrTexture) {
         m_hdrTexture->setContentTransform(contentTransform);
+        m_hdrSceneNeedsFullRepaint = true;
+    }
+#ifdef ANLAND_KWIN_66
+    addDeviceRepaint(ANLAND_FULL_REPAINT);
+#else
+    addRepaint(ANLAND_FULL_REPAINT);
+#endif
+}
+
+void AnlandEglLayer::onOutputColorDescriptionChanged()
+{
+    // SDR reference-white changes alter the scene's content mapping even though
+    // its fixed gamma22/1000-nit encoding and the final absolute PQ LUT do not
+    // change. Repaint the whole FP16 scene and re-encode every rotating slot.
+    for (int i = 0; i < m_bufCount; ++i) {
+        m_accumDamage[i] = ANLAND_FULL_REPAINT;
+    }
+    if (m_hdrTexture) {
         m_hdrSceneNeedsFullRepaint = true;
     }
 #ifdef ANLAND_KWIN_66

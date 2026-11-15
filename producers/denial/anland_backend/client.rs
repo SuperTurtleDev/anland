@@ -110,6 +110,11 @@ impl Client {
         check(unsafe { ffi::ad_get_output(self.session.as_ptr(), &mut out) })?;
         Ok(out)
     }
+    /// Includes actions consumed by the public library during bootstrap.
+    pub fn hdr_sdr_white_nits(&self) -> u32 {
+        // SAFETY: the live session is exclusively owned by this compositor thread.
+        unsafe { ffi::ad_hdr_sdr_white_nits(self.session.as_ptr()) }.clamp(80, 500)
+    }
     pub fn writable(&self) -> io::Result<Option<Target>> {
         let mut out = Target::default();
         // SAFETY: initialized output storage and live session.
@@ -276,7 +281,10 @@ impl Client {
         fds: Vec<OwnedFd>,
     ) -> io::Result<()> {
         use std::os::fd::IntoRawFd;
-        let raw_fds = fds.into_iter().map(IntoRawFd::into_raw_fd).collect::<Vec<_>>();
+        let raw_fds = fds
+            .into_iter()
+            .map(IntoRawFd::into_raw_fd)
+            .collect::<Vec<_>>();
         check(unsafe {
             ffi::ad_resources(
                 self.session.as_ptr(),

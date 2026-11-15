@@ -165,6 +165,11 @@ static int valid_target(const anland_de_target_t *t)
         t->index < t->count && t->width && t->height &&
         t->width <= INT32_MAX && t->height <= INT32_MAX;
 }
+uint32_t ad_hdr_sdr_white_nits(ad_session *s)
+{
+    return s ? anland_device_hdr_sdr_white_nits(device(s))
+             : (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
+}
 int ad_writable(ad_session *s, ad_target *out)
 {
     if (!out) return -EINVAL;

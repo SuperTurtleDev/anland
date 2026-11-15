@@ -2,6 +2,7 @@
 #include "anland_hdr.h"
 #include <assert.h>
 #include <stdio.h>
+#include <limits.h>
 
 int main(void)
 {
@@ -22,6 +23,21 @@ int main(void)
         assert(anland_hdr_mode_for_hal(0, !disabled) == ANLAND_HDR_REJECTED);
         assert(anland_hdr_mode_for_hal(999, !disabled) == ANLAND_HDR_REJECTED);
     }
-    puts("HDR policy: 17 environment cases and all supported/unknown formats passed");
+    for (int32_t value = 80; value <= 500; ++value) {
+        uint32_t white = 203;
+        assert(anland_hdr_sdr_white_from_action(ANLAND_HDR_ACTION_SDR_WHITE, value, &white));
+        assert(white == (uint32_t)value);
+    }
+    const int32_t invalid[] = {INT32_MIN, -1, 0, 79, 501, INT32_MAX};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        uint32_t white = 300;
+        assert(!anland_hdr_sdr_white_from_action(ANLAND_HDR_ACTION_SDR_WHITE, invalid[i], &white));
+        assert(white == 300);
+    }
+    uint32_t white = 400;
+    assert(!anland_hdr_sdr_white_from_action(0, 300, &white));
+    assert(white == 400);
+    assert(!anland_hdr_sdr_white_from_action(ANLAND_HDR_ACTION_SDR_WHITE, 300, NULL));
+    puts("HDR policy: environment/format and SDR reference white validation passed");
     return 0;
 }

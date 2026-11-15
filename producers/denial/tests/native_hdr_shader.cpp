@@ -108,7 +108,7 @@ int main()
     double maximumError = 0.0;
     double idealMaximumError = 0.0;
     double maximumBlackLeakNits = 0.0;
-    auto check = [&](std::array<float, 4> pixel, bool hdrClient, std::array<double, 3> expected) {
+    auto check = [&](std::array<float, 4> pixel, bool hdrClient, std::array<double, 3> expected, double white) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, input);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
@@ -117,18 +117,20 @@ int main()
             glUniform1i(uniform("convert"), 1);
             glUniform1i(uniform("decode"), 3);
             glUniformMatrix3fv(uniform("to_scene"), 1, GL_FALSE, scaled);
-            glUniform4f(uniform("tone"), 10000.0f / 203.0f, 1000.0f / 203.0f, 1000.0f / 203.0f, 1.0f);
+            glUniform4f(uniform("tone"), 10000.0f / 203.0f, float(1000.0 / white), float(1000.0 / white), 1.0f);
             glUniform1f(uniform("pq_white"), 0.0f);
             glUniform1i(uniform("correct_gamut"), 0);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             std::array<float, 4> stored{};
             glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, stored.data());
             require(glGetError() == GL_NO_ERROR, "native FP16 scene readback failed");
+            std::array<double, 3> idealLight{};
             for (int channel = 0; channel < 3; ++channel) {
                 double linear = 0.0;
                 for (int inputChannel = 0; inputChannel < 3; ++inputChannel)
                     linear += toSrgb[inputChannel * 3 + channel] * unpq(pixel[inputChannel]) / 203.0;
-                const double idealScene = signedPower(std::fmin(linear, 1000.0 / 203.0), 1.0 / 2.2);
+                idealLight[channel] = std::fmin(linear, 1000.0 / white);
+                const double idealScene = signedPower(idealLight[channel], 1.0 / 2.2);
                 // GLES permits directed half-float rounding. Bound one FP16
                 // ULP plus shader arithmetic, without assuming CPU RNE.
                 require(std::abs(stored[channel] - idealScene) <= std::fmax(std::abs(idealScene) * 0.0011, 0.000002),
@@ -142,14 +144,20 @@ int main()
                 double linear = 0.0;
                 for (int inputChannel = 0; inputChannel < 3; ++inputChannel)
                     linear += to2020[inputChannel * 3 + channel] * signedPower(stored[inputChannel], 2.2);
-                const double nativeExpected = pq(std::clamp(linear * 203.0, 0.0, 10000.0));
+                const double nativeExpected = pq(std::clamp(linear * white, 0.0, 10000.0));
                 expected[channel] = nativeExpected;
+                double ideal = 0.0;
+                for (int sourceChannel = 0; sourceChannel < 3; ++sourceChannel)
+                    ideal += to2020[sourceChannel * 3 + channel] * idealLight[sourceChannel];
+                // Native HDR content is reference-relative: changing desktop
+                // white rescales it and clips at the unchanged 1000-nit peak.
+                pixel[channel] = float(pq(std::clamp(ideal * white, 0.0, 10000.0)));
             }
             glBindTexture(GL_TEXTURE_2D, sceneTexture);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, output);
         glUniform1i(uniform("convert"), 0);
-        glUniform1f(uniform("pq_white"), 203.0f);
+        glUniform1f(uniform("pq_white"), float(white));
         glUniformMatrix3fv(uniform("gamut"), 1, GL_FALSE, to2020);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         std::array<GLuint, 4> actual{};
@@ -171,25 +179,29 @@ int main()
             }
         }
     };
-    for (double gray : {0.0, 0.001, 0.1, 0.5, 1.0}) {
-        const double expected = pq(std::pow(gray, 2.2) * 203.0);
-        check({float(gray), float(gray), float(gray), 1.0f}, false, {expected, expected, expected});
-    }
-    for (double nits : {0.0, 0.005, 1.0, 80.0, 203.0, 1000.0}) {
-        const double code = pq(nits);
-        check({float(code), float(code), float(code), 1.0f}, true, {code, code, code});
-    }
-    // Native wide-gamut content requires negative sRGB scene components;
-    // test them below peak so per-channel scene headroom clipping is avoided.
-    for (int primary = 0; primary < 3; ++primary)
-        for (double nits : {0.005, 1.0, 80.0, 203.0, 500.0}) {
-            std::array<float, 4> pixel{0, 0, 0, 1};
-            std::array<double, 3> expected{};
-            pixel[primary] = float(pq(nits));
-            expected[primary] = pq(nits);
-            check(pixel, true, expected);
+    // Retune the same native FP16 scene and RGB10 scanout targets repeatedly;
+    // no shader rebuild or storage replacement is involved in a live update.
+    for (double white : {80.0, 203.0, 300.0, 400.0, 500.0, 203.0}) {
+        for (double gray : {0.0, 0.001, 0.1, 0.5, 1.0}) {
+            const double expected = pq(std::pow(gray, 2.2) * white);
+            check({float(gray), float(gray), float(gray), 1.0f}, false, {expected, expected, expected}, white);
         }
-    std::printf("Native Denial HDR GLES shader passed: FP16 content conversion + real RGB10 PQ encoder, SDR white 203 nit; encoder error %.3f codes (%s)\n", maximumError, glGetString(GL_RENDERER));
+        for (double nits : {0.0, 0.005, 1.0, 80.0, 203.0, 1000.0}) {
+            const double code = pq(nits);
+            check({float(code), float(code), float(code), 1.0f}, true, {code, code, code}, white);
+        }
+        // Negative sRGB scene components retain the native wide gamut. The
+        // oracle includes headroom clipping at the newly selected reference.
+        for (int primary = 0; primary < 3; ++primary)
+            for (double nits : {0.005, 1.0, 80.0, 203.0, 500.0}) {
+                std::array<float, 4> pixel{0, 0, 0, 1};
+                std::array<double, 3> expected{};
+                pixel[primary] = float(pq(nits));
+                expected[primary] = pq(nits);
+                check(pixel, true, expected, white);
+            }
+    }
+    std::printf("Native Denial HDR GLES shader passed: FP16 content conversion + real RGB10 PQ encoder, SDR white 80/203/300/400/500/203 nit; encoder error %.3f codes (%s)\n", maximumError, glGetString(GL_RENDERER));
     std::printf("Native signed-gamma sRGB FP16 limitation: ideal input round-trip max %.3f codes; zero-channel gamut cross-talk %.6f nit\n", idealMaximumError, maximumBlackLeakNits);
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(display, context);

@@ -177,6 +177,10 @@ void anland_device_close(anland_device *dev);
 
 /* True once a consumer session is up (not in fallback). */
 bool anland_device_is_connected(const anland_device *dev);
+/* Consumer's optional SDR reference white within HDR, in nits (80..500).
+ * Defaults to 203 on every new session and for old apps. Set by the existing
+ * ACTION input when polled; does not change the consumer's HDR/SDR mode. */
+uint32_t anland_device_hdr_sdr_white_nits(const anland_device *dev);
 /* Poll target-ready and peer hangups together without consuming any bytes.
  * 1 ready / 0 pending / -1 lost (fallback callback run); timeout is per-call.
  * Detects closure before the first target as well as during normal ACK waits. */

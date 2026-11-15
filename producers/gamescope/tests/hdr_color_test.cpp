@@ -33,8 +33,64 @@ static glm::vec3 encode(const lut1d_t &shaper, const lut3d_t &lut, glm::vec3 val
     // The native composite shader uses linear 1D + tetrahedral 3D sampling.
     return anland_test_native_luts(shaper, lut, value);
 }
+static void testAdjustableReferenceWhite()
+{
+    displaycolorimetry_t display{}, output{};
+    EOTF displayTF{}, outputTF{};
+    gamescope::AnlandNativeColorimetry(true, true, &display, &displayTF, &output, &outputTF);
+    gamescope_color_mgmt_t settings{};
+    double worstSdr = 0, worstHdr = 0;
+    for (float white : {80.f, 203.f, 300.f, 400.f, 500.f, 203.f}) {
+        gamescope::AnlandConfigureHDRColorMgmt(settings, white);
+        require(settings.enabled && settings.flSDROnHDRBrightness == white,
+            "dynamic reference white reaches the native pending color-management state");
+        displaycolorimetry_t input{};
+        colormapping_t mapping{};
+        buildSDRColorimetry(&input, &mapping, settings.sdrGamutWideness, display);
+        tonemapping_t tone{};
+        tone.bNormalizeShaper = true;
+        tone.g22_luminance = settings.flSDROnHDRBrightness;
+        lut1d_t shaper;
+        lut3d_t lut;
+        calcColorTransform<rendervulkan::s_nLutEdgeSize3d>(&shaper, rendervulkan::s_nLutSize1d, &lut,
+            input, EOTF_Gamma22, output, outputTF, display, glm::vec2(0.f),
+            k_EChromaticAdapatationMethod_Bradford, mapping, nightmode_t{}, tone, nullptr, 1.f);
+        double sdrError = 0;
+        for (int i = 0; i <= 4096; ++i) {
+            const double value = i / 4096.0;
+            sdrError = std::max(sdrError, code_error(encode(shaper, lut, glm::vec3(value)),
+                glm::vec3(pq(std::pow(value, 2.2) * white))));
+        }
+        require(code_error(encode(shaper, lut, glm::vec3(0.f)), glm::vec3(pq(0))) < 0.5,
+            "SDR black stays zero for every reference white");
+        require(code_error(encode(shaper, lut, glm::vec3(1.f)), glm::vec3(pq(white))) < 0.5,
+            "SDR white reaches the selected absolute PQ luminance");
+        require(sdrError < 0.5, "adjustable SDR reference white keeps native gray-ramp accuracy");
+        worstSdr = std::max(worstSdr, sdrError);
+        // Native HDR follows its separate absolute PQ path; the SDR white
+        // must never rescale black, HDR content or the 1000 nit peak.
+        buildPQColorimetry(&input, &mapping, display);
+        tone.g22_luminance = 1.f;
+        calcColorTransform<rendervulkan::s_nLutEdgeSize3d>(&shaper, rendervulkan::s_nLutSize1d, &lut,
+            input, EOTF_PQ, output, outputTF, display, glm::vec2(0.f),
+            k_EChromaticAdapatationMethod_Bradford, mapping, nightmode_t{}, tone, nullptr, 1.f);
+        double hdrError = 0;
+        for (double nits : {0., 0.001, 0.005, 1., 80., 203., 300., 400., 500., 1000.}) {
+            const float encoded = pq(nits);
+            hdrError = std::max(hdrError, code_error(encode(shaper, lut, glm::vec3(encoded)), glm::vec3(encoded)));
+        }
+        require(hdrError < 0.5, "all selected SDR whites preserve absolute native HDR luminance and peak");
+        worstHdr = std::max(worstHdr, hdrError);
+        std::printf("native reference white %.0f nits: gray error %.4f / absolute HDR error %.4f codes\n",
+            white, sdrError, hdrError);
+    }
+    std::printf("PASS: 80/203/300/400/500-nit live white and reset, SDR black/white and absolute HDR peak; "
+        "native LUT max gray %.4f / HDR %.4f codes\n", worstSdr, worstHdr);
+}
+
 int main()
 {
+    testAdjustableReferenceWhite();
     struct Env { const char *value; bool disabled; } environments[] = {
         {nullptr, false}, {"", false}, {"1", false}, {"auto", false},
         {"0", true}, {"false", true}, {"no", true}, {"off", true},

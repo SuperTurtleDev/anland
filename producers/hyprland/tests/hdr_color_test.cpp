@@ -17,10 +17,10 @@ struct Rule {
     int m_maxLuminance = 500, m_maxAvgLuminance = 200;
 };
 
-static void apply(Rule& rule, anland_hdr_mode mode) {
+static void apply(Rule& rule, anland_hdr_mode mode, float white = ANLAND_HDR_SDR_WHITE_NITS) {
     assert(mode != ANLAND_HDR_REJECTED);
     Anland::fixedOutputColorRule(rule, mode == ANLAND_HDR_HDR10, CM::HDR, CM::SRGB, TF::SRGB,
-                                ANLAND_HDR_SDR_WHITE_NITS, ANLAND_HDR_PEAK_NITS);
+                                mode == ANLAND_HDR_HDR10 ? white : ANLAND_HDR_SDR_WHITE_NITS, ANLAND_HDR_PEAK_NITS);
 }
 
 int main() {
@@ -40,6 +40,16 @@ int main() {
         assert(rule.m_iccFile.empty() && rule.m_sdrSaturation == 1 && rule.m_sdrBrightness == 1);
         apply(rule, anland_hdr_mode_for_hal(1, true));
         assert(!rule.m_enable10bit && rule.m_cmType == CM::SRGB && rule.m_maxLuminance == -1);
+    }
+    // Brightness updates retain HDR precision, peak, black and native CM.
+    // Returning to SDR ignores the HDR-only reference override.
+    for (auto white : {80u, 203u, 300u, 400u, 500u}) {
+        apply(rule, ANLAND_HDR_HDR10, white);
+        assert(rule.m_enable10bit && rule.m_cmType == CM::HDR);
+        assert(rule.m_sdrMaxLuminance == int(white) && rule.m_sdrBrightness == 1);
+        assert(rule.m_minLuminance == 0 && rule.m_maxLuminance == 1000);
+        apply(rule, ANLAND_HDR_SDR, white);
+        assert(rule.m_sdrMaxLuminance == 203 && !rule.m_enable10bit && rule.m_cmType == CM::SRGB);
     }
     for (const auto* denied : {"0", "FALSE", " no ", "\tOff\n"})
         assert(anland_hdr_mode_for_hal(43, !anland_hdr_environment_disabled(denied)) == ANLAND_HDR_REJECTED);

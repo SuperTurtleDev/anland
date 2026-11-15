@@ -627,7 +627,7 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
 +	// Anland HAL43 is a PQ consumer, even when every client currently uses SDR.
 +	if ( gamescope::AnlandOutputHDRMode().value_or( false ) )
 +	{
-+		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending );
++		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending, gamescope::AnlandOutputSDRWhiteNits() );
 +	}
  
  	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(

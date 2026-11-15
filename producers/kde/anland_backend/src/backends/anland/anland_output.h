@@ -62,7 +62,10 @@ public:
     // forbid HDR; a successful buffer import commits the corresponding mode.
     bool hdrAllowed() const;
     bool hdrEnabled() const;
-    void setConsumerHdrMode(bool hdr);
+    void setConsumerHdrMode(bool hdr, unsigned int sdrWhiteNits = 203);
+    // Changes SDR reference white only; never enables HDR for an SDR session.
+    bool setHdrSdrWhiteNits(unsigned int nits);
+    unsigned int hdrSdrWhiteNits() const;
     const AnlandColorDescription &renderColorDescription() const;
     const AnlandColorDescription &wireColorDescription() const;
 
@@ -127,6 +130,7 @@ private:
     AnlandBackend *m_backend;
     const bool m_hdrAllowed;
     bool m_hdrEnabled = false;
+    unsigned int m_hdrSdrWhiteNits = 203;
     AnlandColorDescription m_wireColorDescription;
     AnlandColorDescription m_renderColorDescription;
 #ifndef ANLAND_KWIN_68

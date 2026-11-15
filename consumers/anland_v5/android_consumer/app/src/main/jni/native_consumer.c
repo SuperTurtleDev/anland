@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "anw_hidden.h"
+#include "anland_hdr.h"
 #include "camera_service.h"
 #include "display_consumer.h"
 #include "native_audio.h"
@@ -70,6 +71,7 @@ struct consumer_state {
     /* Serialises the producer input stream; tablet frames hold it across their
      * four records so the FRAME remains an atomic sample commit. */
     pthread_mutex_t input_lock;
+    bool input_hdr_enabled; /* connected stream mode, guarded by input_lock */
     ANativeWindow *window;
     display_ctx *ctx;
     pthread_t render_thread;
@@ -111,6 +113,7 @@ struct consumer_state {
     bool cfg_use_root;
     bool cfg_hdr_enabled;
     bool cfg_hdr10_supported;
+    int cfg_hdr_sdr_white_nits;
     char cfg_helper_path[512];
     char cfg_bridge_path[512];
     int  cfg_custom_width;
@@ -200,6 +203,27 @@ static int send_input_payload(struct consumer_state *s, const struct InputEvent 
     int rc = s->ctx ? push_input_event_with_length(s->ctx, event, payload, size) : 0;
     pthread_mutex_unlock(&s->input_lock);
     return rc;
+}
+
+/* Caller holds input_lock. Read the latest preference only after acquiring that
+ * lock: reconnect and live updates cannot send an older saved value last. No
+ * path holds cfg_lock while acquiring input_lock. */
+static void send_hdr_sdr_white_locked(struct consumer_state *s)
+{
+    if (!s->ctx || !s->input_hdr_enabled)
+        return;
+    pthread_mutex_lock(&s->cfg_lock);
+    int nits = s->cfg_hdr_sdr_white_nits;
+    pthread_mutex_unlock(&s->cfg_lock);
+    struct InputEvent event = {
+        .type = INPUT_TYPE_ACTION,
+        .input_action = {
+            .action = ANLAND_HDR_ACTION_SDR_WHITE,
+            .value = nits,
+        },
+    };
+    if (push_input_event(s->ctx, &event) < 0)
+        LOGE("could not send HDR SDR reference white: %d nit", nits);
 }
 
 static uint64_t monotonic_now_ns(void)
@@ -984,6 +1008,7 @@ static int do_connect(struct consumer_state *s)
          s->pixel_format, hdr_enabled);
 
     pthread_mutex_lock(&s->input_lock);
+    s->input_hdr_enabled = false;
     if (use_root) {
         int ctrl_fd = recv_fd_via_root_helper(sock, helper_path, bridge_path);
         if (ctrl_fd < 0) {
@@ -1005,6 +1030,8 @@ static int do_connect(struct consumer_state *s)
     set_screen_info(s->ctx, s->screen_w, s->screen_h,
                     s->dmabuf_infos[0].format, s->refresh_mhz);
     push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
+    s->input_hdr_enabled = hdr_enabled;
+    send_hdr_sdr_white_locked(s);
 
     /* Register the camera service only when it was initialised (i.e. the user
      * enabled it in settings and granted CAMERA). The service_info lives in this
@@ -1106,6 +1133,11 @@ static void on_exit_fallback(void *userdata)
     }
 
     send_refresh_rate(s);
+    // The display library suppresses input while waiting for a producer. Seed
+    // the preference again after every producer reconnect, including the first.
+    pthread_mutex_lock(&s->input_lock);
+    send_hdr_sdr_white_locked(s);
+    pthread_mutex_unlock(&s->input_lock);
 
     JNIEnv *env = NULL;
     if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != 0) {
@@ -1278,6 +1310,7 @@ Java_com_anland_consumer_Native_nativeCreate(JNIEnv *env, jclass clazz)
     pthread_mutex_init(&s->cfg_lock, NULL);
     pthread_mutex_init(&s->topapp_lock, NULL);
     s->cfg_topapp_mode = 1;
+    s->cfg_hdr_sdr_white_nits = (int)ANLAND_HDR_SDR_WHITE_NITS;
     for (int i = 0; i < MAX_COLLECT_BUFS; i++)
         s->dmabuf_fds[i] = -1;
     strncpy(s->cfg_socket_path, "/data/local/tmp/display_daemon.sock",
@@ -1393,6 +1426,26 @@ Java_com_anland_consumer_Native_nativeConfigure(
     LOGI("configured: socket=%s root=%d helper=%s bridge=%s topapp=%d mode=%d stops=%s",
          s->cfg_socket_path, s->cfg_use_root, s->cfg_helper_path, s->cfg_bridge_path,
          s->cfg_topapp_enable, s->cfg_topapp_mode, s->cfg_topapp_stops);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSetHdrSdrWhiteNits(
+    JNIEnv *env, jclass clazz, jlong handle, jint nits)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    if (nits < (int)ANLAND_HDR_SDR_WHITE_MIN_NITS)
+        nits = (int)ANLAND_HDR_SDR_WHITE_MIN_NITS;
+    if (nits > (int)ANLAND_HDR_SDR_WHITE_MAX_NITS)
+        nits = (int)ANLAND_HDR_SDR_WHITE_MAX_NITS;
+    pthread_mutex_lock(&s->cfg_lock);
+    s->cfg_hdr_sdr_white_nits = nits;
+    pthread_mutex_unlock(&s->cfg_lock);
+    pthread_mutex_lock(&s->input_lock);
+    send_hdr_sdr_white_locked(s);
+    pthread_mutex_unlock(&s->input_lock);
 }
 
 JNIEXPORT void JNICALL

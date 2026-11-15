@@ -576,7 +576,45 @@ index 798f31e9c..1165ebad6 100644
          if (m_pendingDpmsAnimation) {
              m_pendingDpmsAnimationCounter++;
              // we give ourselves 5 frames of a buffer. The first presentation event still doesn't usually say that we actually
-@@ -594,6 +594,7 @@
+@@ -228,6 +228,20 @@
+     });
+
+     m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
++        if (event.size == Vector2D{} && Anland::outputHdrMode(m_output).value_or(false)) {
++            // Consumer SDR-white action: update only native color state. Do not
++            // modeset or replace the fixed 10-bit targets during an input poll.
++            Anland::configureColorRule(m_output, m_activeMonitorRule);
++            m_sdrMinLuminance = m_activeMonitorRule.m_sdrMinLuminance;
++            m_sdrMaxLuminance = m_activeMonitorRule.m_sdrMaxLuminance;
++            m_sdrBrightness = m_activeMonitorRule.m_sdrBrightness;
++            m_sdrSaturation = m_activeMonitorRule.m_sdrSaturation;
++            applyCMType(m_cmType, m_sdrEotf);
++            m_blurFBDirty = true;
++            m_damage.damageEntire();
++            g_pHyprRenderer->damageMonitor(m_self.lock());
++            return;
++        }
+         if (event.size == Vector2D{}) {
+             // an indication to re-set state
+             // we can't do much for createdByUser displays I think
+@@ -584,6 +598,16 @@
+         default: UNREACHABLE();
+     }
+
++    if (Anland::outputHdrMode(m_output).value_or(false)) {
++        // Publish the selected reference to native HDR clients and the FP16
++        // work-buffer description as well as the SDR shader input range.
++        m_imageDescription = m_imageDescription->with({
++            .min = m_imageDescription->value().luminances.min,
++            .max = m_imageDescription->value().luminances.max,
++            .reference = sc<uint32_t>(m_sdrMaxLuminance),
++        });
++    }
++
+     if (oldImageDescription != m_imageDescription) {
+         if (PROTO::colorManagement)
+             PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
+@@ -594,6 +618,7 @@
  }
 
  bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
@@ -584,7 +622,7 @@ index 798f31e9c..1165ebad6 100644
      m_activeMonitorRule = std::move(pMonitorRule);
      m_reservedArea.setStatic(m_activeMonitorRule.m_reservedArea);
      m_transform         = m_activeMonitorRule.m_transform;
-@@ -661,13 +662,16 @@
+@@ -661,13 +686,16 @@
  }
 
  bool CMonitor::applyMonitorRule(Config::CMonitorRule&& pMonitorRule) {
@@ -603,7 +641,7 @@ index 798f31e9c..1165ebad6 100644
 
      const auto RULE = &pMonitorRule;
 
-@@ -802,7 +806,10 @@
+@@ -802,7 +830,10 @@
      m_customDrmMode = {};
      m_currentMode   = nullptr;
 
@@ -615,7 +653,7 @@ index 798f31e9c..1165ebad6 100644
      m_output->state->setFormat(initialFormat);
      m_prevDrmFormat = m_drmFormat;
      m_drmFormat     = initialFormat;
-@@ -924,8 +931,11 @@
+@@ -924,8 +955,11 @@
      static constexpr auto formats10bit = std::to_array<uint32_t>({DRM_FORMAT_XRGB2101010, DRM_FORMAT_XBGR2101010});
      static constexpr auto formats8bit  = std::to_array<uint32_t>({DRM_FORMAT_XRGB8888, DRM_FORMAT_XBGR8888});
 
@@ -629,7 +667,7 @@ index 798f31e9c..1165ebad6 100644
          trySetFormat(formats8bit);
 
      m_enabled10bit = set10bit;
-@@ -2455,6 +2465,10 @@
+@@ -2455,6 +2489,10 @@
 
  // TODO support more drm properties
  bool CMonitor::canNoShaderCM(bool forDSmode) {
@@ -640,7 +678,7 @@ index 798f31e9c..1165ebad6 100644
      static auto PNONSHADER = CConfigValue<Config::INTEGER>("render:non_shader_cm");
      if (*PNONSHADER == CM_NS_DISABLE)
          return false;
-@@ -2487,6 +2501,8 @@
+@@ -2487,6 +2525,8 @@
  }
 
  bool CMonitor::doesNoShaderCM() {
@@ -649,7 +687,7 @@ index 798f31e9c..1165ebad6 100644
      return m_noShaderCTM;
  }
 
-@@ -2581,6 +2597,8 @@
+@@ -2581,6 +2621,8 @@
  }
 
  void CMonitorState::ensureBufferPresent() {
@@ -658,7 +696,7 @@ index 798f31e9c..1165ebad6 100644
      const auto& STATE = m_owner->m_output->state->state();
      if (!STATE.enabled) {
          LOG(Log::TRACE, "CMonitorState::ensureBufferPresent: Ignoring, monitor is not enabled");
-@@ -2635,13 +2653,15 @@
+@@ -2635,13 +2677,15 @@
          return true;
      }
 
@@ -676,7 +714,7 @@ index 798f31e9c..1165ebad6 100644
      options.size    = MODE->pixelSize;
      return m_owner->m_output->swapchain->reconfigure(options);
  }
-@@ -2678,6 +2698,10 @@
+@@ -2678,6 +2722,10 @@
  }
 
  bool CMonitor::useFP16() {

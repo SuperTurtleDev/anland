@@ -138,7 +138,9 @@ bool CAnlandBackend::hdrEnabled() const {
     return m_allocator && !m_allocator->buffers.empty() && m_allocator->hdr;
 }
 
-float CAnlandBackend::hdrSdrWhiteNits() { return ANLAND_HDR_SDR_WHITE_NITS; }
+float CAnlandBackend::hdrSdrWhiteNits() const {
+    return hdrEnabled() && m_public ? anland_device_hdr_sdr_white_nits(anland_de_backend_device(m_public)) : ANLAND_HDR_SDR_WHITE_NITS;
+}
 float CAnlandBackend::hdrPeakNits() { return ANLAND_HDR_PEAK_NITS; }
 
 bool CAnlandBackend::effectiveMouseCapture() const {

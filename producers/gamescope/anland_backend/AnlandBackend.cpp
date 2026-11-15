@@ -226,13 +226,38 @@ namespace gamescope
             const bool hdr = mode == ANLAND_HDR_HDR10;
             const bool changed = m_HDR != hdr;
             m_HDR = hdr;
+            m_SdrWhite = hdr ? anland_device_hdr_sdr_white_nits(anland_gamescope_session_device(s_session))
+                             : uint32_t(ANLAND_HDR_SDR_WHITE_NITS);
             m_HDRInfo.bExposeHDRSupport = hdr;
             m_HDRInfo.eOutputEncodingEOTF = hdr ? EOTF_PQ : EOTF_Gamma22;
             m_ImportFailureLogged = false;
-            fprintf(stderr, "Anland: imported %u consumer buffers, %s\n", m_BufferCount,
-                hdr ? "10-bit BT.2020/PQ HDR (203-nit SDR white, 1000-nit peak)" : "8-bit SDR");
+            fprintf(stderr, "Anland: imported %u consumer buffers, %s (SDR white %u nits)\n", m_BufferCount,
+                hdr ? "10-bit BT.2020/PQ HDR, 1000-nit peak" : "8-bit SDR", m_SdrWhite);
             force_repaint();
             return changed;
+        }
+
+        float SDRWhiteNits() const
+        {
+            return float(m_SdrWhite);
+        }
+
+        void UpdateConsumerSdrWhite()
+        {
+            if (!m_HDR || !m_BufferCount || !s_session)
+                return;
+            auto *device = anland_gamescope_session_device(s_session);
+            if (!anland_device_is_connected(device))
+                return;
+            // The existing input ACTION is cached by the shared device before
+            // the input pump ignores it. No pool import or encoding change is
+            // needed: UpdateColorMgmt regenerates the native SDR LUT next frame.
+            const auto white = anland_device_hdr_sdr_white_nits(device);
+            if (white == m_SdrWhite)
+                return;
+            m_SdrWhite = white;
+            fprintf(stderr, "Anland: HDR SDR white %u nits\n", m_SdrWhite);
+            force_repaint();
         }
 
         bool ConsumerReady(const anland_gamescope_target &target) const
@@ -334,6 +359,7 @@ namespace gamescope
         }
         const bool m_AllowHDR = !anland_hdr_environment_disabled(getenv("ANLAND_HDR"));
         bool m_HDR = false;
+        uint32_t m_SdrWhite = uint32_t(ANLAND_HDR_SDR_WHITE_NITS);
         bool m_ImportFailureLogged = false;
         std::chrono::steady_clock::time_point m_NextImportRetry{};
         uint64_t m_Generation = 0;
@@ -348,6 +374,12 @@ namespace gamescope
     {
         auto *connector = dynamic_cast<CAnlandConnector *>(GetBackend()->GetCurrentConnector());
         return connector ? std::optional<bool>(connector->IsHDRActive()) : std::nullopt;
+    }
+
+    float AnlandOutputSDRWhiteNits()
+    {
+        auto *connector = dynamic_cast<CAnlandConnector *>(GetBackend()->GetCurrentConnector());
+        return connector ? connector->SDRWhiteNits() : ANLAND_HDR_SDR_WHITE_NITS;
     }
 
 	class CAnlandBackend final : public CBaseBackend
@@ -543,6 +575,8 @@ namespace gamescope
                 anland_gamescope_session_drop(s_session);
                 dirty |= DrainEvents();
             }
+            if (rc >= 0)
+                m_Connector.UpdateConsumerSdrWhite();
             wlserver_lock();
             bool capture = wlserver.GetCursorConstraint() != nullptr;
             wlserver_unlock();

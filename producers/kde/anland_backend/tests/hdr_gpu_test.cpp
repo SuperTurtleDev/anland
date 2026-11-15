@@ -184,6 +184,69 @@ static void testPremultipliedAlpha()
     check(glGetError() == GL_NO_ERROR && mathematicalError < 0.05 && genericDifference < 0.5, label);
 }
 
+static void testAdjustableReferenceWhite()
+{
+    // Exercise KWin's real surface-to-scene transform, followed by the actual
+    // optimized PQ encoder. Brightness belongs to SDR mapping into the scene;
+    // a native absolute 1000 nit HDR highlight keeps its original luminance.
+    const QSize size(4, 1);
+    const std::array<float, 16> input = {0, 0, 0, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1};
+    Texture source(GL_RGBA16F, size, input.data()), scene(GL_RGBA16F, size), output(GL_RGB10_A2, size);
+    source.texture->setContentTransform(OutputTransform::FlipY);
+    AnlandHdrEncoder encoder;
+    check(encoder.init(), "adjustable-white PQ encoder initialized once for all reference whites");
+    for (unsigned int white : {80u, 203u, 300u, 400u, 500u, 203u}) {
+        auto renderColor = std::make_shared<ColorDescription>(
+            Colorimetry::BT2020, TransferFunction(TransferFunction::gamma22, 0, 1000), white, 0, 1000, 1000);
+        // Render SDR black and white with the native default perceptual mapping.
+        GLFramebuffer::pushFramebuffer(scene.fbo.get());
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        {
+            ShaderBinder shader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
+            shader.shader()->setColorspaceUniforms(ColorDescription::sRGB, renderColor, RenderingIntent::Perceptual);
+            shader.shader()->setUniform(GLShader::IntUniform::Sampler, 0);
+            QMatrix4x4 matrix;
+            matrix.scale(1, -1);
+            matrix.ortho(QRectF(QPointF(), size));
+            shader.shader()->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, matrix);
+            source.texture->bind();
+            source.texture->render(QSizeF(size));
+            source.texture->unbind();
+        }
+        // These samples represent existing absolute 0 and 1000 nit HDR scene
+        // pixels and must remain unchanged by an SDR-reference adjustment.
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(2, 0, 1, 1);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(3, 0, 1, 1);
+        glClearColor(1, 1, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+        GLFramebuffer::popFramebuffer();
+        const bool encoded = encoder.encode(scene.texture.get(), output.fbo.get(), QRegion(QRect(QPoint(), size)));
+        GLFramebuffer::pushFramebuffer(output.fbo.get());
+        std::array<uint32_t, 4> result{};
+        glReadPixels(0, 0, size.width(), size.height(), GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, result.data());
+        GLFramebuffer::popFramebuffer();
+        const std::array<double, 4> expectedNits = {0, double(white), 0, 1000};
+        double worst = 0;
+        for (size_t pixel = 0; pixel < expectedNits.size(); ++pixel) {
+            for (size_t channel = 0; channel < 3; ++channel) {
+                worst = std::max(worst, std::abs(double((result[pixel] >> (channel * 10)) & 1023) - pq(expectedNits[pixel]) * 1023));
+            }
+        }
+        char label[180];
+        std::snprintf(label, sizeof(label),
+            "real sRGB-to-scene-to-PQ at %u nits: SDR white follows setting, black/1000-nit HDR unchanged, error %.4f codes",
+            white, worst);
+        check(encoded && glGetError() == GL_NO_ERROR && worst < 1.2, label);
+    }
+}
+
 static void testDamageMapping()
 {
     const QSize size(8, 4);
@@ -427,6 +490,7 @@ int main(int argc, char** argv)
     testLutPrecision();
     testPremultipliedAlpha();
     testDamageMapping();
+    testAdjustableReferenceWhite();
     std::printf("RESULT %s failures=%d\n", failures ? "FAIL" : "PASS", failures);
     context->doneCurrent();
     return failures ? 1 : 0;

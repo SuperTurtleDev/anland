@@ -11,6 +11,7 @@
 #include "anland_egl_backend.h"
 #include "anland_format.h"
 #include "anland_logging.h"
+#include "libdisplay_producer/anland_hdr.h"
 
 #include "core/renderbackend.h" // OutputFrame
 #include "core/renderloop.h"
@@ -22,7 +23,7 @@ namespace KWin
 
 // The legacy transport has no color negotiation. The Android app's buffer
 // request selects a fixed local color mode for each consumer session.
-static AnlandColorDescription makeColorDescription(bool hdr, bool wire)
+static AnlandColorDescription makeColorDescription(bool hdr, bool wire, unsigned int sdrWhiteNits)
 {
     if (!hdr) {
         return ColorDescription::sRGB;
@@ -37,9 +38,9 @@ static AnlandColorDescription makeColorDescription(bool hdr, bool wire)
     const auto transfer = wire ? TransferFunction(TransferFunction::PerceptualQuantizer, 0, 10000)
                               : TransferFunction(TransferFunction::gamma22, 0, 1000);
 #ifdef ANLAND_KWIN_66
-    return std::make_shared<ColorDescription>(colorimetry, transfer, 203, 0, 1000, 1000);
+    return std::make_shared<ColorDescription>(colorimetry, transfer, sdrWhiteNits, 0, 1000, 1000);
 #else
-    return ColorDescription(colorimetry, transfer, 203, 0, 1000, 1000);
+    return ColorDescription(colorimetry, transfer, sdrWhiteNits, 0, 1000, 1000);
 #endif
 }
 
@@ -91,15 +92,22 @@ bool AnlandOutput::hdrEnabled() const
     return m_hdrEnabled;
 }
 
-void AnlandOutput::setConsumerHdrMode(bool hdr)
+void AnlandOutput::setConsumerHdrMode(bool hdr, unsigned int sdrWhiteNits)
 {
     Q_ASSERT(!hdr || m_hdrAllowed);
-    if ((hdr && !m_hdrAllowed) || hdr == m_hdrEnabled) {
+    if ((hdr && !m_hdrAllowed) || sdrWhiteNits < ANLAND_HDR_SDR_WHITE_MIN_NITS
+        || sdrWhiteNits > ANLAND_HDR_SDR_WHITE_MAX_NITS) {
+        return;
+    }
+    const bool modeChanged = hdr != m_hdrEnabled;
+    const bool referenceChanged = sdrWhiteNits != m_hdrSdrWhiteNits;
+    m_hdrSdrWhiteNits = sdrWhiteNits;
+    if (!modeChanged && (!hdr || !referenceChanged)) {
         return;
     }
     m_hdrEnabled = hdr;
-    m_wireColorDescription = makeColorDescription(hdr, true);
-    m_renderColorDescription = makeColorDescription(hdr, false);
+    m_wireColorDescription = makeColorDescription(hdr, true, m_hdrSdrWhiteNits);
+    m_renderColorDescription = makeColorDescription(hdr, false, m_hdrSdrWhiteNits);
 
     Information info = m_information;
     info.capabilities = hdr ? Capability::HighDynamicRange | Capability::WideColorGamut : Capabilities{};
@@ -113,7 +121,7 @@ void AnlandOutput::setConsumerHdrMode(bool hdr)
     State next = m_state;
     next.highDynamicRange = hdr;
     next.wideColorGamut = hdr;
-    next.referenceLuminance = hdr ? 203 : 200;
+    next.referenceLuminance = hdr ? m_hdrSdrWhiteNits : 200;
     next.colorDescription = m_wireColorDescription;
 #ifdef ANLAND_KWIN_64
     next.originalColorDescription = m_wireColorDescription;
@@ -126,10 +134,33 @@ void AnlandOutput::setConsumerHdrMode(bool hdr)
     setState(next);
     // setInformation() only notifies about capability changes. Refresh the
     // brightness metadata too when the consumer's local color mode changes.
-    Q_EMIT brightnessMetadataChanged();
+    if (modeChanged) {
+        Q_EMIT brightnessMetadataChanged();
+    }
+    // ColorDescription changes invalidate the persistent scene and every encoded
+    // consumer slot through AnlandEglLayer's colorDescriptionChanged connection.
+    m_renderLoop->scheduleRepaint();
 
-    qCInfo(KWIN_ANLAND) << (hdr ? "consumer selected HDR: BT.2020/PQ, 10bit, peak 1000 nits, SDR white 203 nits"
-                              : "consumer selected SDR: sRGB, 8bit (Android app HDR is off)");
+    if (hdr) {
+        qCInfo(KWIN_ANLAND) << "consumer selected HDR: BT.2020/PQ, 10bit, peak 1000 nits, SDR white"
+                           << m_hdrSdrWhiteNits << "nits";
+    } else {
+        qCInfo(KWIN_ANLAND) << "consumer selected SDR: sRGB, 8bit (Android app HDR is off)";
+    }
+}
+
+bool AnlandOutput::setHdrSdrWhiteNits(unsigned int nits)
+{
+    if (nits < ANLAND_HDR_SDR_WHITE_MIN_NITS || nits > ANLAND_HDR_SDR_WHITE_MAX_NITS) {
+        return false;
+    }
+    setConsumerHdrMode(m_hdrEnabled, nits);
+    return true;
+}
+
+unsigned int AnlandOutput::hdrSdrWhiteNits() const
+{
+    return m_hdrSdrWhiteNits;
 }
 
 const AnlandColorDescription &AnlandOutput::renderColorDescription() const
@@ -227,7 +258,7 @@ void AnlandOutput::init(const QSize &pixelSize, int refresh, qreal scale)
     };
     state.highDynamicRange = m_hdrEnabled;
     state.wideColorGamut = m_hdrEnabled;
-    state.referenceLuminance = m_hdrEnabled ? 203 : 200;
+    state.referenceLuminance = m_hdrEnabled ? m_hdrSdrWhiteNits : 200;
     state.colorDescription = m_wireColorDescription;
 #ifdef ANLAND_KWIN_64
     state.originalColorDescription = m_wireColorDescription;
