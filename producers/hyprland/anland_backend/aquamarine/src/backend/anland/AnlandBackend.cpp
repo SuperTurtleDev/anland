@@ -3,6 +3,7 @@
 #include "AnlandInput.hpp"
 #include "anland_audio.h"
 #include "anland_camera.h"
+#include "anland_hdr.h"
 #include <fcntl.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -132,6 +133,13 @@ bool CAnlandBackend::notifyRenderImportFailure(CSharedPointer<IBuffer> buffer) {
 size_t CAnlandBackend::renderBufferCount() const {
     return m_allocator ? m_allocator->buffers.size() : 0;
 }
+
+bool CAnlandBackend::hdrEnabled() const {
+    return m_allocator && !m_allocator->buffers.empty() && m_allocator->hdr;
+}
+
+float CAnlandBackend::hdrSdrWhiteNits() { return ANLAND_HDR_SDR_WHITE_NITS; }
+float CAnlandBackend::hdrPeakNits() { return ANLAND_HDR_PEAK_NITS; }
 
 bool CAnlandBackend::effectiveMouseCapture() const {
     return m_capture && m_output && m_output->enabled && !m_lost && !m_output->hasReleaseFault();

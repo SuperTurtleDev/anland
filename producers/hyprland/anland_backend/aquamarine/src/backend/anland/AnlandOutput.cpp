@@ -1,6 +1,7 @@
 #include "AnlandOutput.hpp"
 #include "anland_de_backend.h"
 #include "anland_present.h"
+#include "anland_hdr.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -45,6 +46,29 @@ bool CAnlandOutput::resetForSession() {
         return false;
 
     swapchain = replacement;
+    // These capabilities describe the consumer contract, not a physical EDID.
+    // Replace them on every generation, including equal-size HDR/SDR reconnects.
+    parsedEDID = {};
+    hdr_output_metadata metadata = {};
+    if (owner->hdrEnabled()) {
+        parsedEDID.supportsBT2020 = true;
+        parsedEDID.hdrMetadata = SHDRMetadata{
+            .desiredContentMaxLuminance = ANLAND_HDR_PEAK_NITS,
+            .desiredMaxFrameAverageLuminance = ANLAND_HDR_PEAK_NITS,
+            .desiredContentMinLuminance = 0,
+            .supportsPQ = true,
+        };
+        parsedEDID.chromaticityCoords = SChromaticityCoords{
+            .red = {.x = 0.708, .y = 0.292}, .green = {.x = 0.170, .y = 0.797},
+            .blue = {.x = 0.131, .y = 0.046}, .white = {.x = 0.3127, .y = 0.3290},
+        };
+        metadata.hdmi_metadata_type1.eotf = 2; // ST2084/PQ, full-range RGB buffer
+        metadata.hdmi_metadata_type1.max_display_mastering_luminance = ANLAND_HDR_PEAK_NITS;
+        metadata.hdmi_metadata_type1.max_cll = ANLAND_HDR_PEAK_NITS;
+        metadata.hdmi_metadata_type1.max_fall = ANLAND_HDR_PEAK_NITS;
+    }
+    state->setHDRMetadata(metadata);
+    state->setWideColorGamut(owner->hdrEnabled());
     m_renderTarget = {};
     m_rendering = false;
     needsFrame = false;
@@ -122,6 +146,12 @@ bool CAnlandOutput::test() {
     const auto& pending = state->state();
     if (!owner) return false;
     if (pending.buffer && !dynamicPointerCast<CAnlandBuffer>(pending.buffer)) return false; // no client direct scanout
+    if (pending.buffer && (pending.hdrMetadata.hdmi_metadata_type1.eotf != (owner->hdrEnabled() ? 2 : 0) ||
+                           pending.wideColorGamut != owner->hdrEnabled())) {
+        owner->m_backend->log(AQ_LOG_ERROR, "anland: frame color mode does not match consumer; refusing mislabeled PQ/SDR pixels");
+        owner->m_lost = true;
+        return false;
+    }
     const auto fmt = pending.drmFormat;
     return fmt == DRM_FORMAT_INVALID || (!owner->m_allocator->buffers.empty() && fmt == owner->m_allocator->buffers[0]->dmabuf().format);
 }

@@ -51,6 +51,11 @@ public class MainActivity extends Activity
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
+    // Snapshotted for this window: changing the setting must never switch only
+    // the Android end while its paired KDE compositor is still running.
+    private boolean hdrEnabled;
+    private boolean displayFailed;
+    static final String KEY_EXPERIMENTAL_HDR = "experimental_hdr";
     // System-clipboard bridge; also the target for the native clipboard callbacks.
     private Clipboard clipboard;
     private static final String PREFS_NAME = "anland_settings";
@@ -292,6 +297,8 @@ public class MainActivity extends Activity
                 if (d != null && d.getDisplayId() == displayId) {
                     pushRefreshRate();
                     updateDisplayRotation();
+                    if (hdrEnabled && !supportsHdr10())
+                        onDisplayError(1);
                 }
             }
         };
@@ -369,6 +376,44 @@ public class MainActivity extends Activity
             mNative.setRefreshRate(d.getRefreshRate());
     }
 
+    @SuppressWarnings("deprecation")
+    private boolean supportsHdr10() {
+        Display display = getDisplay();
+        if (display == null)
+            return false;
+        int[] types;
+        if (Build.VERSION.SDK_INT >= 34) {
+            types = display.getMode().getSupportedHdrTypes();
+        } else {
+            Display.HdrCapabilities caps = display.getHdrCapabilities();
+            types = caps == null ? new int[0] : caps.getSupportedHdrTypes();
+        }
+        for (int type : types) {
+            if (type == Display.HdrCapabilities.HDR_TYPE_HDR10)
+                return true;
+        }
+        return false;
+    }
+
+    // Called by the native render thread. A failed HDR request is terminal for
+    // this window; falling back independently would mislabel KDE's PQ pixels.
+    public void onDisplayError(int error) {
+        lifecycleHandler.post(() -> {
+            if (displayFailed || isFinishing() || isDestroyed())
+                return;
+            displayFailed = true;
+            Log.e(TAG, "HDR display connection rejected: " + error);
+            stopNativePipeline();
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle(R.string.hdr_error_title)
+                    .setMessage(error == 1 ? R.string.hdr_error_unsupported
+                                          : R.string.hdr_error_surface)
+                    .setCancelable(false)
+                    .setPositiveButton(android.R.string.ok, (dialog, which) -> finish())
+                    .show();
+        });
+    }
+
     // Push the current connection settings (socket path / root mode) to native
     // before (re)connecting. The root helper is the executable bundled in the
     // app's native lib dir; the bridge is a unix socket in our cache dir that
@@ -386,7 +431,7 @@ public class MainActivity extends Activity
         String topAppStops = prefs.getString(KEY_TOPAPP_STOPS, "").trim();
         String topAppPath = getApplicationInfo().nativeLibraryDir + "/libsettopapp.so";
         mNative.configure(sock, useRoot, helperPath, bridgePath, topApp, topAppPath,
-                topAppMode, topAppStops);
+                topAppMode, topAppStops, hdrEnabled, supportsHdr10());
         int customW = prefs.getInt("custom_width", 0);
         int customH = prefs.getInt("custom_height", 0);
         customScreenWidth = prefs.getInt("custom_width", 0);
@@ -411,6 +456,12 @@ public class MainActivity extends Activity
     // socket is still a live socket. The daemon can go down after launch, so
     // re-check on every (re)connect; if it is gone, report it and exit the window.
     private void startNative(android.view.Surface surface) {
+        if (displayFailed)
+            return;
+        if (hdrEnabled && !supportsHdr10()) {
+            onDisplayError(1);
+            return;
+        }
         if (!isSocketFile(resolveSocketPath())) {
             android.widget.Toast.makeText(this, "Deamon Down",
                     android.widget.Toast.LENGTH_SHORT).show();
@@ -444,6 +495,8 @@ public class MainActivity extends Activity
     }
 
     private void scheduleReconnect(SurfaceHolder holder) {
+        if (displayFailed)
+            return;
         final android.view.Surface surface = holder.getSurface();
         if (surface == null || !surface.isValid())
             return;
@@ -459,7 +512,7 @@ public class MainActivity extends Activity
     }
 
     private void reconnectNow(android.view.Surface surface) {
-        if (!surfaceReady || mNative == null || surface == null || !surface.isValid())
+        if (displayFailed || !surfaceReady || mNative == null || surface == null || !surface.isValid())
             return;
         long now = android.os.SystemClock.uptimeMillis();
         if (viewWidth == connectedW && viewHeight == connectedH
@@ -681,6 +734,11 @@ public class MainActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        hdrEnabled = savedInstanceState != null
+                ? savedInstanceState.getBoolean(KEY_EXPERIMENTAL_HDR, false)
+                : getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .getBoolean(KEY_EXPERIMENTAL_HDR, false);
 
         setupMediaAudio();
         applyOrientation();
@@ -1909,6 +1967,8 @@ public class MainActivity extends Activity
         if (dm != null)
             dm.registerDisplayListener(displayListener, null);
         updateDisplayRotation();
+        if (hdrEnabled && !supportsHdr10())
+            onDisplayError(1);
         // Bring the camera service up (or confirm it disabled) BEFORE nativeStart, so
         // the render thread's do_connect() sees a settled camera_service_is_ready()
         // and registers SERVICE_TYPE_CAMERA on the very first connect rather than a
@@ -1954,6 +2014,12 @@ public class MainActivity extends Activity
 
         // The socket pref may have been edited in Settings; keep our dedup key current.
         registerWindow();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        outState.putBoolean(KEY_EXPERIMENTAL_HDR, hdrEnabled);
+        super.onSaveInstanceState(outState);
     }
 
     @Override
@@ -2171,6 +2237,8 @@ public class MainActivity extends Activity
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         updateDisplayRotation();
+        if (hdrEnabled && !supportsHdr10())
+            onDisplayError(1);
         if (mRoot != null) {
             mRoot.post(() -> {
                 WindowInsets insets = mRoot.getRootWindowInsets();

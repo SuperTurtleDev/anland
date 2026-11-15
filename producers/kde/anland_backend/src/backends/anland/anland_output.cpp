@@ -9,6 +9,7 @@
 // AnlandOutput::present() calls AnlandEglLayer::takePendingFence(), so the layer
 // type must be complete here (the header only forward-declares it).
 #include "anland_egl_backend.h"
+#include "anland_format.h"
 #include "anland_logging.h"
 
 #include "core/renderbackend.h" // OutputFrame
@@ -19,6 +20,29 @@
 namespace KWin
 {
 
+// The legacy transport has no color negotiation. The Android app's buffer
+// request selects a fixed local color mode for each consumer session.
+static AnlandColorDescription makeColorDescription(bool hdr, bool wire)
+{
+    if (!hdr) {
+        return ColorDescription::sRGB;
+    }
+#ifdef ANLAND_KWIN_64
+    const auto colorimetry = Colorimetry::BT2020;
+#else
+    const auto colorimetry = Colorimetry::fromName(NamedColorimetry::BT2020);
+#endif
+    // PQ always retains its absolute 0..10,000 nit transfer function. 1,000
+    // nits is the content/output limit, not the luminance represented by code 1.
+    const auto transfer = wire ? TransferFunction(TransferFunction::PerceptualQuantizer, 0, 10000)
+                              : TransferFunction(TransferFunction::gamma22, 0, 1000);
+#ifdef ANLAND_KWIN_66
+    return std::make_shared<ColorDescription>(colorimetry, transfer, 203, 0, 1000, 1000);
+#else
+    return ColorDescription(colorimetry, transfer, 203, 0, 1000, 1000);
+#endif
+}
+
 AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
 #ifdef ANLAND_KWIN_66
     : BackendOutput()
@@ -26,6 +50,9 @@ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
     : Output(parent)
 #endif
     , m_backend(parent)
+    , m_hdrAllowed(!anlandHdrExplicitlyDisabled(qgetenv("ANLAND_HDR")))
+    , m_wireColorDescription(ColorDescription::sRGB)
+    , m_renderColorDescription(ColorDescription::sRGB)
 #ifndef ANLAND_KWIN_68
     , m_renderLoop(std::make_unique<RenderLoop>(this))
 #endif
@@ -33,16 +60,86 @@ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
 #ifdef ANLAND_KWIN_66
     setParent(parent);
 #endif
-    setInformation(Information{
+    Information info{
         .name = name,
         .manufacturer = QStringLiteral("anland"),
         .model = QStringLiteral("anland"),
+        .capabilities = m_hdrEnabled ? Capability::HighDynamicRange | Capability::WideColorGamut : Capabilities{},
         .internal = true,
-    });
+        .maxPeakBrightness = m_hdrEnabled ? std::optional<double>(1000) : std::nullopt,
+        .maxAverageBrightness = m_hdrEnabled ? std::optional<double>(1000) : std::nullopt,
+    };
+#ifdef ANLAND_KWIN_64
+    info.bitsPerColorRange = {.min = m_hdrEnabled ? 10u : 8u, .max = m_hdrEnabled ? 10u : 8u};
+#endif
+    setInformation(info);
+    qCInfo(KWIN_ANLAND) << (m_hdrAllowed ? "output color mode follows the Android app's HDR setting"
+                                       : "HDR disabled by ANLAND_HDR; only SDR consumer buffers are accepted");
 }
 
 AnlandOutput::~AnlandOutput()
 {
+}
+
+bool AnlandOutput::hdrAllowed() const
+{
+    return m_hdrAllowed;
+}
+
+bool AnlandOutput::hdrEnabled() const
+{
+    return m_hdrEnabled;
+}
+
+void AnlandOutput::setConsumerHdrMode(bool hdr)
+{
+    Q_ASSERT(!hdr || m_hdrAllowed);
+    if ((hdr && !m_hdrAllowed) || hdr == m_hdrEnabled) {
+        return;
+    }
+    m_hdrEnabled = hdr;
+    m_wireColorDescription = makeColorDescription(hdr, true);
+    m_renderColorDescription = makeColorDescription(hdr, false);
+
+    Information info = m_information;
+    info.capabilities = hdr ? Capability::HighDynamicRange | Capability::WideColorGamut : Capabilities{};
+    info.maxPeakBrightness = hdr ? std::optional<double>(1000) : std::nullopt;
+    info.maxAverageBrightness = hdr ? std::optional<double>(1000) : std::nullopt;
+#ifdef ANLAND_KWIN_64
+    info.bitsPerColorRange = {.min = hdr ? 10u : 8u, .max = hdr ? 10u : 8u};
+#endif
+    setInformation(info);
+
+    State next = m_state;
+    next.highDynamicRange = hdr;
+    next.wideColorGamut = hdr;
+    next.referenceLuminance = hdr ? 203 : 200;
+    next.colorDescription = m_wireColorDescription;
+#ifdef ANLAND_KWIN_64
+    next.originalColorDescription = m_wireColorDescription;
+    next.maxBitsPerColor = hdr ? 10 : 8;
+#endif
+#ifdef ANLAND_KWIN_66
+    next.blendingColor = m_renderColorDescription;
+    next.layerBlendingColor = m_wireColorDescription;
+#endif
+    setState(next);
+    // setInformation() only notifies about capability changes. Refresh the
+    // brightness metadata too when the consumer's local color mode changes.
+    Q_EMIT brightnessMetadataChanged();
+
+    qCInfo(KWIN_ANLAND) << (hdr ? "consumer selected HDR: BT.2020/PQ, 10bit, peak 1000 nits, SDR white 203 nits"
+                              : "consumer selected SDR: sRGB, 8bit (Android app HDR is off)");
+}
+
+const AnlandColorDescription &AnlandOutput::renderColorDescription() const
+{
+    return m_renderColorDescription;
+}
+
+const AnlandColorDescription &AnlandOutput::wireColorDescription() const
+{
+    return m_wireColorDescription;
 }
 
 #ifndef ANLAND_KWIN_68
@@ -122,12 +219,27 @@ void AnlandOutput::init(const QSize &pixelSize, int refresh, qreal scale)
     auto mode = std::make_shared<OutputMode>(pixelSize, refresh, OutputMode::Flag::Preferred);
 #endif
 
-    setState(State{
+    State state{
         .position = QPoint(0, 0),
         .scale = scale,
         .modes = {mode},
         .currentMode = mode,
-    });
+    };
+    state.highDynamicRange = m_hdrEnabled;
+    state.wideColorGamut = m_hdrEnabled;
+    state.referenceLuminance = m_hdrEnabled ? 203 : 200;
+    state.colorDescription = m_wireColorDescription;
+#ifdef ANLAND_KWIN_64
+    state.originalColorDescription = m_wireColorDescription;
+    state.maxBitsPerColor = m_hdrEnabled ? 10 : 8;
+#endif
+#ifdef ANLAND_KWIN_66
+    state.blendingColor = m_renderColorDescription;
+    state.layerBlendingColor = m_wireColorDescription;
+#endif
+    // Base applyChanges() only changes layout on these KWin versions. Do not
+    // implement a KScreen HDR toggle: Android cannot change encoding with it.
+    setState(state);
 }
 
 void AnlandOutput::updateEnabled(bool enabled)

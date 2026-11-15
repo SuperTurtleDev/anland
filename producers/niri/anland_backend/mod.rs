@@ -62,11 +62,14 @@ const SIZE_STABILITY_DURATION: Duration = Duration::from_millis(500);
 const SIZE_ADAPT_COOLDOWN: Duration = Duration::from_millis(500);
 
 /// Converts the anland protocol pixel format into a DRM fourcc.
-fn protocol_format_to_fourcc(format: u32) -> Fourcc {
-    // Same as kwin's anland backend: 1 == DRM_FORMAT_ABGR8888, else XRGB8888.
+fn protocol_format_to_fourcc(format: u32) -> Option<Fourcc> {
+    // This renderer has no HDR content color management. Never interpret the
+    // app's RGB10/PQ buffers as an 8-bit SDR layout.
     match format {
-        1 => Fourcc::Abgr8888,
-        _ => Fourcc::Xrgb8888,
+        1 => Some(Fourcc::Abgr8888),
+        2 => Some(Fourcc::Xbgr8888),
+        5 => Some(Fourcc::Argb8888),
+        _ => None,
     }
 }
 
@@ -939,6 +942,16 @@ impl Anland {
         };
         let idx = target.index as i32;
         let info = &target;
+        let Some(format) = protocol_format_to_fourcc(info.format) else {
+            if info.format == 43 {
+                error!("anland: niri has no native HDR content pipeline; disable 10-bit HDR in the app and reopen the desktop window");
+            } else {
+                error!(format = info.format, "anland: unsupported consumer pixel format");
+            }
+            self.client.drop_session();
+            self.on_session_lost(niri);
+            return RenderResult::Skipped;
+        };
         span.emit_text(&format!(
             "buffer {idx} {}x{} stride {}",
             info.width, info.height, info.stride
@@ -987,7 +1000,7 @@ impl Anland {
                 };
                 let mut builder = Dmabuf::builder(
                     (info.width as i32, info.height as i32),
-                    protocol_format_to_fourcc(info.format),
+                    format,
                     Modifier::from(info.modifier),
                     DmabufFlags::empty(),
                 );

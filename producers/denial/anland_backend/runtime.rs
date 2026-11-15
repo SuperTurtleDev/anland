@@ -1216,7 +1216,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
             // Wayland requests, shell/lock changes and constraint removal can
             // happen without input or rendering. Synchronize every bounded loop.
             if let Some(c) = client.as_mut() {
-                let mut running = active.as_ref().is_some_and(|a| !a.driver.stopped()) && !finishing;
+                let mut running =
+                    active.as_ref().is_some_and(|a| !a.driver.stopped()) && !finishing;
                 if !c.connected() {
                     camera_requested = false;
                 } else if running && !camera_requested {
@@ -1424,7 +1425,12 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                         let prepared = if let Some(plan) = staged_plan.take() {
                             Ok((plan, staged_imports.take().unwrap()))
                         } else {
-                            prepare_output(c, &topology, scale.scale_120)
+                            prepare_output(
+                                c,
+                                &topology,
+                                scale.scale_120,
+                                &mut graphics.capture_allocator,
+                            )
                         };
                         match prepared {
                             Ok((plan, imports)) => {
@@ -1489,6 +1495,10 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                         events.flutter_reload_requested,
                                         replacing.is_some(),
                                         old.plan.pool.output == plan.pool.output
+                                            // Float root color is an engine startup
+                                            // setting; a color-mode change needs a
+                                            // fresh engine, even at the same size.
+                                            && old._imports.hdr == staged_imports.as_ref().unwrap().hdr
                                             && old.plan.pool.view == plan.pool.view
                                             && old.plan.pool.configuration
                                                 == plan.pool.configuration
@@ -1608,7 +1618,11 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     plan,
                                 });
                                 let plan = &active.as_ref().unwrap().plan;
-                                if let Some(frontend) = staged_frontend.take() {
+                                if let Some(mut frontend) = staged_frontend.take() {
+                                    // Startup constructed the frontend before the
+                                    // imported renderer activated its HDR scene.
+                                    // Publish the committed preferred description.
+                                    frontend.update_topology(&plan.snapshot)?;
                                     let lifecycle = std::mem::take(&mut events.lifecycle);
                                     #[cfg(feature = "anland-runtime-v2")]
                                     let reopen_color_tuning = events.reopen_color_tuning;

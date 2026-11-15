@@ -56,6 +56,17 @@ bool mango_private_import_buffers(struct anland_backend *backend) {
     for (uint32_t i = 0; i < count; ++i) {
         anland_device_fb_t fb = {.fd = -1};
         if (anland_device_get_drm_fb(backend->device, (int)i, &fb) < 0) goto fail;
+        /* scenefx has no input/output color transforms. A 10-bit import alone
+         * would write SDR values into the consumer's BT.2020/PQ buffer. */
+        if (fb.format == DRM_FORMAT_ABGR2101010) {
+            if (!backend->hdr_rejection_logged) {
+                wlr_log(WLR_ERROR, "Anland: Mango/scenefx cannot compose HDR content; "
+                    "rejecting the HDR10 consumer (select 8-bit SDR in the app)");
+                backend->hdr_rejection_logged = true;
+            }
+            close(fb.fd);
+            goto fail;
+        }
         if (fb.width != backend->width || fb.height != backend->height ||
             !fb.stride || (i && fb.format != format_code)) {
             close(fb.fd); goto fail;
@@ -78,6 +89,7 @@ bool mango_private_import_buffers(struct anland_backend *backend) {
     if (!backend->output.swapchain) goto fail;
     backend->output.buffer_count = count;
     backend->output.generation = target.generation;
+    backend->hdr_rejection_logged = false;
     wlr_drm_format_set_finish(&formats);
     return true;
 fail:

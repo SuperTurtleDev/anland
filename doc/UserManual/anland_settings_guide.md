@@ -11,6 +11,7 @@ Some options apply only after the desktop reconnects. Returning from Settings to
 - Input, HUD, and display layout settings take effect when you return to the desktop view.
 - Connection, audio, and output resolution settings take effect on the next connection. Returning from Settings to the desktop normally triggers one.
 - Screen orientation takes effect after you exit and reopen Anland.
+- 10-bit HDR requires closing and reopening the desktop window. Supported backends follow automatically.
 
 <a id="settings-nav"></a>
 ## 🧭 Quick navigation
@@ -19,6 +20,7 @@ Some options apply only after the desktop reconnects. Returning from Settings to
 - [🖱️ Touchpad & Mouse](#touchpad-mouse)
 - [🔌 Connection](#connection)
 - [🖥️ Display Resolution](#resolution)
+- [10-bit HDR](#hdr-output)
 - [🎮 Immersive Mode](#immersive)
 - [⚙️ General](#general)
 
@@ -363,6 +365,28 @@ The resolution is sent to Linux on the next connection.
 - **Off:** preserve the image's aspect ratio and center it with black bars. Anland maps touch and mouse coordinates automatically.
 
 Black bars normally do not appear with automatic native resolution.
+
+<a id="hdr-output"></a>
+### 10-bit HDR (experimental)
+
+Off by default. When enabled, Anland uses 10-bit RGBA buffers and displays BT.2020/PQ output from an updated KDE, GNOME, Hyprland, Gamescope, or Denial Anland backend. The current Android display must support HDR10.
+
+Update both the APK and the desktop backend. The daemon, Magisk module, and display protocol do not need an update. niri and Mango are not supported: their current renderers cannot correctly compose native HDR content, so they reject HDR buffers. Use SDR for those desktops.
+
+To change the output mode:
+
+1. Turn **10-bit HDR (experimental)** on or off under **Settings → Display Resolution**.
+2. Close the current Anland desktop window, then reopen it. Droidspaces users should continue to use the container's **Launch Anland** action.
+
+The supported backends automatically follow the buffers supplied by the app when it reconnects. Existing windows retain their mode until they are closed. With the app setting off, output stays SDR even if `ANLAND_HDR=1` is present in the desktop environment. Denial recreates its Flutter engine when the color mode changes to select the correct floating-point scene format; the desktop session remains running.
+
+`ANLAND_HDR` is optional and only provides an explicit HDR-disable policy for the supported backends. Values `0`, `false`, `no`, and `off` disable HDR, ignoring case and surrounding whitespace. All other values, including unset, empty, `1`, and `auto`, allow the backend to follow the app. If this policy disables HDR while the app requests it, the backend rejects the HDR buffers and logs the reason; the app does not display that backend rejection reason. Restart the desktop backend after changing this environment policy.
+
+This mode uses a fixed SDR reference white of 203 nits and HDR target peak of 1000 nits. Panel brightness capabilities and content metadata are not exchanged over the protocol. If HDR10 is unavailable, 10-bit buffer allocation fails, or the backend cannot import the buffers, the HDR connection fails without automatically falling back to SDR. To return to SDR, turn off the app setting and close and reopen the desktop window.
+
+Each backend uses its native HDR content color management. Denial retains its native floating-point sRGB scene; saturated wide-gamut colors can still incur quantization error in the intermediate FP16 buffers. This is not lossless PQ passthrough.
+
+A 10-bit buffer does not guarantee that the final display path preserves 10-bit precision. Vendor drivers, system composition, brightness, and power-saving settings can affect the result; validate it on the target device.
 
 <a id="general"></a>
 ## ⚙️ General

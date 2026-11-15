@@ -12,3 +12,6 @@ G_DECLARE_FINAL_TYPE (MetaBackendAnland,
 
 gboolean meta_backend_anland_setup (MetaBackendAnland  *backend,
                                     GError            **error);
+
+ClutterColorState * meta_backend_anland_create_output_color_state (MetaBackendAnland *backend);
+ClutterColorState * meta_backend_anland_create_view_color_state (MetaBackendAnland *backend);

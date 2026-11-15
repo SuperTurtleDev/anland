@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <android/log.h>
+#include <android/data_space.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <ctype.h>
@@ -31,8 +32,8 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-#define PIXEL_FORMAT_RGBA_8888 1
 #define MAX_COLLECT_BUFS 8
+#define CONNECT_DISPLAY_REJECTED -2
 #define PACING_REPORT_INTERVAL_NS (5ULL * 1000ULL * 1000ULL * 1000ULL)
 
 struct pacing_sample {
@@ -87,6 +88,8 @@ struct consumer_state {
 
     int screen_w;
     int screen_h;
+    uint32_t pixel_format;
+    bool active_hdr_enabled; /* render-thread-owned snapshot, never a live toggle */
 
     // Latest display refresh rate (milli-Hz) reported from Java. Read on
     // (re)connect to seed the producer; updated live by nativeSetRefreshRate.
@@ -106,6 +109,8 @@ struct consumer_state {
     pthread_mutex_t cfg_lock;
     char cfg_socket_path[256];
     bool cfg_use_root;
+    bool cfg_hdr_enabled;
+    bool cfg_hdr10_supported;
     char cfg_helper_path[512];
     char cfg_bridge_path[512];
     int  cfg_custom_width;
@@ -157,6 +162,28 @@ struct consumer_state {
 
 static void topapp_handle_scheduling_event(struct consumer_state *s,
                                            const struct OutputEvent *event);
+
+static void call_display_error(JNIEnv *env, jobject activity, int error)
+{
+    if (!activity)
+        return;
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID mid = (*env)->GetMethodID(env, cls, "onDisplayError", "(I)V");
+    if (mid)
+        (*env)->CallVoidMethod(env, activity, mid, (jint)error);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+static int reject_hdr_display(struct consumer_state *s, int error)
+{
+    LOGE("HDR connection rejected (error=%d); refusing SDR fallback", error);
+    JNIEnv *env = NULL;
+    if (g_jvm && (*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) == 0) {
+        call_display_error(env, s->activity_obj, error);
+        (*g_jvm)->DetachCurrentThread(g_jvm);
+    }
+    return CONNECT_DISPLAY_REJECTED;
+}
 
 static int send_input_event(struct consumer_state *s, const struct InputEvent *event)
 {
@@ -282,6 +309,12 @@ static int collect_dmabufs(struct consumer_state *s)
 
         int fd = anb->handle->data[0];   /* first fd backs the dma-buf */
         int stride = anb->stride, width = anb->width, height = anb->height;
+        if ((uint32_t)anb->format != s->pixel_format || stride <= 0) {
+            LOGE("buffer format/stride mismatch: requested=%u actual=%d stride=%d",
+                 s->pixel_format, anb->format, stride);
+            api.cancelBuffer(win, anb, -1);
+            break;
+        }
 
         /* deduplicate by ANativeWindowBuffer pointer (stable per queue slot) */
         bool dup_found = false;
@@ -293,7 +326,10 @@ static int collect_dmabufs(struct consumer_state *s)
         }
 
         /* post it back so the next dequeue rotates to another slot */
-        api.queueBuffer(win, anb, -1);
+        if (api.queueBuffer(win, anb, -1) != 0) {
+            LOGE("failed to queue buffer during collection");
+            break;
+        }
 
         if (dup_found)
             continue;
@@ -307,11 +343,11 @@ static int collect_dmabufs(struct consumer_state *s)
         s->dmabuf_infos[found].stride = stride * 4;
         s->dmabuf_infos[found].width  = width;
         s->dmabuf_infos[found].height = height;
-        s->dmabuf_infos[found].format = PIXEL_FORMAT_RGBA_8888;
+        s->dmabuf_infos[found].format = (uint32_t)anb->format;
         s->dmabuf_infos[found].modifier = 0;
         s->dmabuf_infos[found].offset = 0;
-        LOGI("  buf[%d]: anb=%p fd=%d dup=%d %dx%d stride=%d",
-             found, (void *)anb, fd, dup_fd, width, height, stride);
+        LOGI("  buf[%d]: anb=%p fd=%d dup=%d %dx%d stride=%d format=%d",
+             found, (void *)anb, fd, dup_fd, width, height, stride, anb->format);
         found++;
     }
 
@@ -321,6 +357,7 @@ static int collect_dmabufs(struct consumer_state *s)
             close(s->dmabuf_fds[i]);
             s->dmabuf_fds[i] = -1;
         }
+        s->buf_count = 0;
         return -1;
     }
 
@@ -849,6 +886,9 @@ static int do_connect(struct consumer_state *s)
     /* Snapshot the connection config for this attempt. */
     pthread_mutex_lock(&s->cfg_lock);
     bool use_root = s->cfg_use_root;
+    bool hdr_enabled = s->cfg_hdr_enabled;
+    bool hdr10_supported = s->cfg_hdr10_supported;
+    s->active_hdr_enabled = hdr_enabled;
     char sock_path[sizeof(s->cfg_socket_path)];
     char helper_path[sizeof(s->cfg_helper_path)];
     char bridge_path[sizeof(s->cfg_bridge_path)];
@@ -880,6 +920,9 @@ static int do_connect(struct consumer_state *s)
     }
     cleanup_dmabufs(s);
 
+    if (hdr_enabled && !hdr10_supported)
+        return reject_hdr_display(s, 1);
+
     ANativeWindow *win = s->window;
     pthread_mutex_lock(&s->cfg_lock);
     int cw = s->cfg_custom_width;
@@ -904,11 +947,22 @@ static int do_connect(struct consumer_state *s)
     anw_api_disconnect(win, ANW_API_CPU);
     if (anw_api_connect(win, ANW_API_CPU) != 0) {
         LOGE("api_connect(CPU) failed");
-        return -1;
+        return hdr_enabled ? reject_hdr_display(s, 2) : -1;
     }
 
-    ANativeWindow_setBuffersGeometry(win, s->screen_w, s->screen_h,
-                                     AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+    s->pixel_format = hdr_enabled ? AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM
+                                  : AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    int geometry_rc = ANativeWindow_setBuffersGeometry(win, s->screen_w, s->screen_h,
+                                                       s->pixel_format);
+    // Dataspace describes already encoded pixels. KDE follows this consumer
+    // buffer format unless HDR is explicitly disabled in its environment.
+    int dataspace_rc = ANativeWindow_setBuffersDataSpace(win,
+            hdr_enabled ? ADATASPACE_BT2020_PQ : ADATASPACE_SRGB);
+    if (geometry_rc != 0 || dataspace_rc != 0) {
+        LOGE("surface configuration failed: HDR=%d geometry=%d dataspace=%d",
+             hdr_enabled, geometry_rc, dataspace_rc);
+        return hdr_enabled ? reject_hdr_display(s, 2) : -1;
+    }
 
     int min_undequeued = 0;
     api.query(win, ANATIVEWINDOW_QUERY_MIN_UNDEQUEUED_BUFFERS, &min_undequeued);
@@ -916,14 +970,18 @@ static int do_connect(struct consumer_state *s)
     if (total > MAX_COLLECT_BUFS)
         total = MAX_COLLECT_BUFS;
 
-    api.setBufferCount(win, total);
+    if (api.setBufferCount(win, total) != 0) {
+        LOGE("setBufferCount failed");
+        return hdr_enabled ? reject_hdr_display(s, 2) : -1;
+    }
 
     s->buf_count = total;
     if (collect_dmabufs(s) < 0)
-        return -1;
+        return hdr_enabled ? reject_hdr_display(s, 2) : -1;
 
-    LOGI("connecting to %s (%dx%d, %d bufs, root=%d)", sock,
-         s->screen_w, s->screen_h, s->buf_count, use_root);
+    LOGI("connecting to %s (%dx%d, %d bufs, root=%d format=%u HDR=%d)", sock,
+         s->screen_w, s->screen_h, s->buf_count, use_root,
+         s->pixel_format, hdr_enabled);
 
     pthread_mutex_lock(&s->input_lock);
     if (use_root) {
@@ -945,7 +1003,7 @@ static int do_connect(struct consumer_state *s)
     }
 
     set_screen_info(s->ctx, s->screen_w, s->screen_h,
-                    PIXEL_FORMAT_RGBA_8888, s->refresh_mhz);
+                    s->dmabuf_infos[0].format, s->refresh_mhz);
     push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
 
     /* Register the camera service only when it was initialised (i.e. the user
@@ -1082,6 +1140,8 @@ static void *render_thread_func(void *arg)
             TracyCZoneN(zConnect, "do_connect", 1);
             int rc = do_connect(s);
             TracyCZoneEnd(zConnect);
+            if (rc == CONNECT_DISPLAY_REJECTED)
+                break;
             if (rc < 0) {
                 usleep(500000);
                 continue;
@@ -1095,8 +1155,21 @@ static void *render_thread_func(void *arg)
         TracyCZoneEnd(zDequeue);
         const uint64_t dequeued_ns = monotonic_now_ns();
         if (dq != 0 || !anb) {
+            if (acqfence >= 0)
+                close(acqfence);
+            if (s->active_hdr_enabled) {
+                reject_hdr_display(s, 2);
+                break;
+            }
             usleep(16000);
             continue;
+        }
+        if (s->active_hdr_enabled && (uint32_t)anb->format != s->pixel_format) {
+            if (acqfence >= 0)
+                close(acqfence);
+            api.cancelBuffer(s->window, anb, -1);
+            reject_hdr_display(s, 2);
+            break;
         }
         /* Emulate ANativeWindow_lock: CPU-wait the acquire fence so the buffer is
          * already safe to write (SurfaceFlinger done reading the previous frame)
@@ -1122,6 +1195,11 @@ static void *render_thread_func(void *arg)
         }
 
         if (idx < 0) {
+            if (s->active_hdr_enabled) {
+                api.cancelBuffer(s->window, anb, -1);
+                reject_hdr_display(s, 2);
+                break;
+            }
             queue_surface_buffer(s, anb, -1, -1, 0);
             usleep(16000);
             continue;
@@ -1154,7 +1232,11 @@ static void *render_thread_func(void *arg)
             s->pacing.producer_waits++;
             pacing_add(&s->pacing.producer_wait, completion_ns - wait_start_ns);
         }
-        queue_surface_buffer(s, anb, rfence, idx, completion_ns);
+        int queue_rc = queue_surface_buffer(s, anb, rfence, idx, completion_ns);
+        if (queue_rc != 0 && s->active_hdr_enabled) {
+            reject_hdr_display(s, 2);
+            break;
+        }
         TracyCFrameMark;
     }
 
@@ -1196,6 +1278,8 @@ Java_com_anland_consumer_Native_nativeCreate(JNIEnv *env, jclass clazz)
     pthread_mutex_init(&s->cfg_lock, NULL);
     pthread_mutex_init(&s->topapp_lock, NULL);
     s->cfg_topapp_mode = 1;
+    for (int i = 0; i < MAX_COLLECT_BUFS; i++)
+        s->dmabuf_fds[i] = -1;
     strncpy(s->cfg_socket_path, "/data/local/tmp/display_daemon.sock",
             sizeof(s->cfg_socket_path) - 1);
     s->audio = audio_create();
@@ -1279,7 +1363,7 @@ JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeConfigure(
     JNIEnv *env, jclass clazz, jlong handle, jstring socketPath, jboolean useRoot,
     jstring helperPath, jstring bridgePath, jboolean topappEnable, jstring topappPath,
-    jint topappMode, jstring topappStops)
+    jint topappMode, jstring topappStops, jboolean hdrEnabled, jboolean hdr10Supported)
 {
     struct consumer_state *s = STATE(handle);
     if (!s)
@@ -1290,6 +1374,8 @@ Java_com_anland_consumer_Native_nativeConfigure(
     if (tmp[0] != '\0')
         memcpy(s->cfg_socket_path, tmp, sizeof(s->cfg_socket_path));
     s->cfg_use_root = (useRoot == JNI_TRUE);
+    s->cfg_hdr_enabled = (hdrEnabled == JNI_TRUE);
+    s->cfg_hdr10_supported = (hdr10Supported == JNI_TRUE);
     copy_jstring(env, helperPath, s->cfg_helper_path, sizeof(s->cfg_helper_path));
     copy_jstring(env, bridgePath, s->cfg_bridge_path, sizeof(s->cfg_bridge_path));
     s->cfg_topapp_enable = (topappEnable == JNI_TRUE);
@@ -1346,9 +1432,15 @@ Java_com_anland_consumer_Native_nativeStart(
     if (!s)
         return;
 
+    pthread_mutex_lock(&s->cfg_lock);
+    bool hdr_enabled = s->cfg_hdr_enabled;
+    pthread_mutex_unlock(&s->cfg_lock);
+
     if (!api_loaded) {
         if (anw_api_load(&api) < 0) {
             LOGE("failed to load ANativeWindow hidden API");
+            if (hdr_enabled)
+                call_display_error(env, activityTarget, 2);
             return;
         }
         api_loaded = true;
@@ -1380,6 +1472,8 @@ Java_com_anland_consumer_Native_nativeStart(
     s->window = ANativeWindow_fromSurface(env, surface);
     if (!s->window) {
         LOGE("ANativeWindow_fromSurface failed");
+        if (hdr_enabled)
+            call_display_error(env, activityTarget, 2);
         pthread_mutex_unlock(&s->lock);
         return;
     }

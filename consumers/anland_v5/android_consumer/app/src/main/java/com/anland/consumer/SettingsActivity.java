@@ -350,6 +350,7 @@ public class SettingsActivity extends Activity {
         currentPage = Page.RESOLUTION;
         LinearLayout root = newPage(R.string.section_resolution);
         addResolutionSection(root);
+        addHdrSection(root);
         setContent(root);
     }
 
@@ -1416,6 +1417,25 @@ public class SettingsActivity extends Activity {
             hint.setPadding(0, dp(2), 0, dp(12));
             root.addView(hint);
         }
+    }
+
+    private void addHdrSection(LinearLayout root) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        Switch hdrSwitch = new Switch(this);
+        hdrSwitch.setText(R.string.hdr_switch);
+        hdrSwitch.setTextSize(14);
+        hdrSwitch.setPadding(0, dp(20), 0, 0);
+        hdrSwitch.setChecked(prefs.getBoolean(MainActivity.KEY_EXPERIMENTAL_HDR, false));
+        hdrSwitch.setOnCheckedChangeListener((view, checked) -> prefs.edit()
+                .putBoolean(MainActivity.KEY_EXPERIMENTAL_HDR, checked).apply());
+        root.addView(hdrSwitch);
+
+        TextView hint = new TextView(this);
+        hint.setText(R.string.hdr_hint);
+        hint.setTextSize(12);
+        hint.setTextColor(Color.GRAY);
+        hint.setPadding(0, dp(4), 0, dp(12));
+        root.addView(hint);
     }
 
     // Connection settings: a custom daemon socket path and a "connect with root"

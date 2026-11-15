@@ -9,6 +9,7 @@
 #include "ime.hpp"
 #include "clipboard.hpp"
 #include "touch_state.hpp"
+#include "hdr.hpp"
 #include <linux/input-event-codes.h>
 #include <mutex>
 #include <atomic>
@@ -82,6 +83,9 @@ namespace gamescope
     public:
         CAnlandConnector()
         {
+            m_HDRInfo.uMaxContentLightLevel = uint16_t(ANLAND_HDR_PEAK_NITS);
+            m_HDRInfo.uMaxFrameAverageLuminance = uint16_t(ANLAND_HDR_PEAK_NITS);
+            m_HDRInfo.uMinContentLightLevel = 0;
         }
         virtual ~CAnlandConnector()
         {
@@ -97,11 +101,11 @@ namespace gamescope
         }
         virtual bool SupportsHDR() const override
         {
-            return false;
+            return m_HDR;
         }
         virtual bool IsHDRActive() const override
         {
-            return false;
+            return m_HDR;
         }
         virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
         {
@@ -135,10 +139,113 @@ namespace gamescope
             displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
             displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
         {
-			*displayColorimetry = displaycolorimetry_709;
-			*displayEOTF = EOTF_Gamma22;
-			*outputEncodingColorimetry = displaycolorimetry_709;
-			*outputEncodingEOTF = EOTF_Gamma22;
+            AnlandNativeColorimetry(m_HDR, bHDR10, displayColorimetry, displayEOTF,
+                outputEncodingColorimetry, outputEncodingEOTF);
+        }
+
+        void DropConsumerImages()
+        {
+            m_Images = {};
+            m_Generation = 0;
+            m_BufferCount = 0;
+        }
+
+        /* Validate every actual buffer before advertising a new color mode.
+         * Imported images also avoid reallocating Vulkan resources each frame. */
+        bool PrepareConsumer()
+        {
+            anland_gamescope_target target{};
+            target.buffer.fd = -1;
+            if (!s_session || anland_gamescope_session_target(s_session, &target) != 0)
+                return false;
+            close(target.buffer.fd);
+            target.buffer.fd = -1;
+            if (ConsumerReady(target))
+                return false;
+            if (std::chrono::steady_clock::now() < m_NextImportRetry)
+                return false;
+            DropConsumerImages();
+            const auto mode = anland_hdr_mode_for_hal(target.buffer.format, m_AllowHDR);
+            if (mode == ANLAND_HDR_REJECTED || !target.selection.count ||
+                target.selection.count > ANLAND_DEVICE_MAX_BUFS) {
+                ReportImportFailure(target.buffer.format == 43 && !m_AllowHDR
+                    ? "HDR10 consumer rejected by ANLAND_HDR" : "unsupported consumer buffer pool");
+                return false;
+            }
+            std::array<OwningRc<CVulkanTexture>, ANLAND_DEVICE_MAX_BUFS> images{};
+            std::array<anland_buffer_desc_t, ANLAND_DEVICE_MAX_BUFS> layouts{};
+            for (uint32_t i = 0; i < target.selection.count; ++i) {
+                anland_device_fb_t fb{};
+                fb.fd = -1;
+                if (anland_device_get_fb(anland_gamescope_session_device(s_session), int(i), &fb) != 0) {
+                    ReportImportFailure("consumer dmabuf unavailable");
+                    return false;
+                }
+                const uint32_t format = anland_gamescope_drm_format(fb.format);
+                const bool valid = fb.fd >= 0 && fb.width == target.buffer.width &&
+                    fb.height == target.buffer.height && fb.width == uint32_t(g_nOutputWidth) &&
+                    fb.height == uint32_t(g_nOutputHeight) && fb.stride &&
+                    fb.format == target.buffer.format && format != DRM_FORMAT_INVALID;
+                if (!valid) {
+                    if (fb.fd >= 0) close(fb.fd);
+                    ReportImportFailure("inconsistent consumer buffer pool");
+                    return false;
+                }
+                wlr_dmabuf_attributes dma{};
+                dma.width = fb.width;
+                dma.height = fb.height;
+                dma.format = format;
+                dma.modifier = fb.modifier;
+                dma.n_planes = 1;
+                dma.fd[0] = fb.fd;
+                dma.stride[0] = fb.stride;
+                dma.offset[0] = fb.offset;
+                images[i] = new CVulkanTexture();
+                CVulkanTexture::createFlags flags{};
+                flags.bStorage = true;
+                flags.bOutputImage = true;
+                const bool imported = images[i]->BInit(dma.width, dma.height, 1, dma.format, flags, &dma);
+                close(fb.fd);
+                if (!imported) {
+                    ReportImportFailure("consumer Vulkan STORAGE import failed");
+                    return false;
+                }
+                layouts[i] = target.buffer;
+                layouts[i].buffer_id = uint64_t(i) + 1;
+                layouts[i].stride = fb.stride;
+                layouts[i].offset = fb.offset;
+                layouts[i].modifier = fb.modifier;
+                layouts[i].fd = -1;
+            }
+            if (anland_gamescope_session_target_current(s_session, &target) != 0)
+                return false;
+            m_Images = std::move(images);
+            m_Layouts = layouts;
+            m_Generation = target.selection.generation;
+            m_BufferCount = target.selection.count;
+            const bool hdr = mode == ANLAND_HDR_HDR10;
+            const bool changed = m_HDR != hdr;
+            m_HDR = hdr;
+            m_HDRInfo.bExposeHDRSupport = hdr;
+            m_HDRInfo.eOutputEncodingEOTF = hdr ? EOTF_PQ : EOTF_Gamma22;
+            m_ImportFailureLogged = false;
+            fprintf(stderr, "Anland: imported %u consumer buffers, %s\n", m_BufferCount,
+                hdr ? "10-bit BT.2020/PQ HDR (203-nit SDR white, 1000-nit peak)" : "8-bit SDR");
+            force_repaint();
+            return changed;
+        }
+
+        bool ConsumerReady(const anland_gamescope_target &target) const
+        {
+            if (m_Generation != target.selection.generation ||
+                m_BufferCount != target.selection.count || target.selection.index >= m_BufferCount)
+                return false;
+            const auto &layout = m_Layouts[target.selection.index];
+            const auto &buffer = target.buffer;
+            return layout.buffer_id == buffer.buffer_id && layout.frame_id == buffer.frame_id &&
+                layout.width == buffer.width && layout.height == buffer.height &&
+                layout.stride == buffer.stride && layout.offset == buffer.offset &&
+                layout.format == buffer.format && layout.modifier == buffer.modifier;
         }
 
         virtual const char *GetName() const override
@@ -165,35 +272,23 @@ namespace gamescope
             target.buffer.fd = -1;
             if (anland_gamescope_session_target(s_session, &target) != 0)
                 return retry(-EAGAIN);
-            // Device format is the legacy ABGR8888 convention, not a DRM fourcc.
-            if (target.buffer.format != 1) {
+            if (!ConsumerReady(target)) {
                 close(target.buffer.fd);
-                return retry(-EINVAL);
+                return retry(-EAGAIN);
             }
-            wlr_dmabuf_attributes dma{};
-            dma.width = target.buffer.width;
-            dma.height = target.buffer.height;
-            dma.format = DRM_FORMAT_ABGR8888;
-            dma.modifier = target.buffer.modifier;
-            dma.n_planes = 1;
-            dma.fd[0] = target.buffer.fd;
-            dma.stride[0] = target.buffer.stride;
-            dma.offset[0] = target.buffer.offset;
-            OwningRc<CVulkanTexture> image = new CVulkanTexture();
-            CVulkanTexture::createFlags flags{};
-            flags.bStorage = true;
-            flags.bOutputImage = true;
-            bool imported = image->BInit(dma.width, dma.height, 1, dma.format, flags, &dma);
             close(target.buffer.fd);
             target.buffer.fd = -1;
-            if (!imported) {
-                fprintf(stderr, "Anland: consumer STORAGE dmabuf import failed\n");
+            // Reject mismatched encodings instead of displaying the wrong colors.
+            const auto expectedEOTF = m_HDR ? EOTF_PQ : EOTF_Gamma22;
+            if ((m_HDR && !pFrameInfo->applyOutputColorMgmt) ||
+                (pFrameInfo->applyOutputColorMgmt && pFrameInfo->outputEncodingEOTF != expectedEOTF)) {
+                ReportImportFailure("frame color encoding does not match the consumer");
                 return retry(-EINVAL);
             }
             if (anland_gamescope_session_target_current(s_session, &target) != 0)
                 return retry(-EAGAIN);
             auto sequence = vulkan_composite(const_cast<FrameInfo_t *>(pFrameInfo), nullptr,
-                                             false, image, false);
+                                             false, m_Images[target.selection.index], false);
             if (!sequence)
                 return retry(-EINVAL);
             // Synchronous baseline: -1 is not an exported fence, GPU is finished.
@@ -230,9 +325,30 @@ namespace gamescope
         }
         void SetClipboard(AnlandClipboard *clipboard) { m_Clipboard = clipboard; }
     private:
+        void ReportImportFailure(const char *reason)
+        {
+            if (!m_ImportFailureLogged)
+                fprintf(stderr, "Anland: %s; presentation paused\n", reason);
+            m_ImportFailureLogged = true;
+            m_NextImportRetry = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        }
+        const bool m_AllowHDR = !anland_hdr_environment_disabled(getenv("ANLAND_HDR"));
+        bool m_HDR = false;
+        bool m_ImportFailureLogged = false;
+        std::chrono::steady_clock::time_point m_NextImportRetry{};
+        uint64_t m_Generation = 0;
+        uint32_t m_BufferCount = 0;
+        std::array<OwningRc<CVulkanTexture>, ANLAND_DEVICE_MAX_BUFS> m_Images{};
+        std::array<anland_buffer_desc_t, ANLAND_DEVICE_MAX_BUFS> m_Layouts{};
         AnlandClipboard *m_Clipboard = nullptr;
         BackendConnectorHDRInfo m_HDRInfo{};
     };
+
+    std::optional<bool> AnlandOutputHDRMode()
+    {
+        auto *connector = dynamic_cast<CAnlandConnector *>(GetBackend()->GetCurrentConnector());
+        return connector ? std::optional<bool>(connector->IsHDRActive()) : std::nullopt;
+    }
 
 	class CAnlandBackend final : public CBaseBackend
 	{
@@ -265,6 +381,7 @@ namespace gamescope
                 anland_device_scheduling(device, getpid(), ANLAND_DEVICE_SCHED_FLAG_SETTREE);
             }
             anland_gamescope_input_reset(&m_Input);
+            m_Connector.DropConsumerImages();
             anland_gamescope_session_close(s_session);
             s_session = nullptr;
             s_pending = 0;
@@ -354,7 +471,7 @@ namespace gamescope
 		}
 		virtual void GetPreferredOutputFormat( uint32_t *pPrimaryPlaneFormat, uint32_t *pOverlayPlaneFormat ) const override
 		{
-			*pPrimaryPlaneFormat = DRM_FORMAT_ABGR8888;
+			*pPrimaryPlaneFormat = m_Connector.IsHDRActive() ? DRM_FORMAT_ABGR2101010 : DRM_FORMAT_ABGR8888;
 			*pOverlayPlaneFormat = VulkanFormatToDRM( VK_FORMAT_B8G8R8A8_UNORM );
 		}
 		virtual bool ValidPhysicalDevice( VkPhysicalDevice pVkPhysicalDevice ) const override
@@ -391,6 +508,7 @@ namespace gamescope
                     anland_camera_clear();
                     anland_gamescope_input_reset(&m_Input);
                     anland_gamescope_session_drop(s_session);
+                    m_Connector.DropConsumerImages();
                     dirty |= DrainEvents();
                     m_WasConnected = false;
                 }
@@ -416,6 +534,7 @@ namespace gamescope
             }
             anland_gamescope_session_pump(s_session, 0);
             dirty |= DrainEvents();
+            dirty |= m_Connector.PrepareConsumer();
             int rc = anland_gamescope_input_pump(&m_Input, device, g_nOutputWidth,
                 g_nOutputHeight, &InputSink, this);
             if (rc < 0) {
@@ -567,7 +686,7 @@ namespace gamescope
                 anland_gamescope_session_target(s_session, &target) != 0)
                 return true;
             close(target.buffer.fd);
-            return false;
+            return !m_Connector.ConsumerReady(target);
         }
 
 		virtual bool IsVisible() const override

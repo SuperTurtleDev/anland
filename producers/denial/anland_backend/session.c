@@ -3,6 +3,7 @@
 #include "anland_tablet.h"
 #include "anland_audio.h"
 #include "anland_camera.h"
+#include "anland_hdr.h"
 #include <stdio.h>
 #include <errno.h>
 #include <limits.h>
@@ -18,6 +19,7 @@ struct ad_session {
     bool audio_started;
     int audio_fd; /* Borrowed identity only; the audio engine owns its duplicate. */
     uint64_t audio_generation;
+    bool allow_hdr;
 };
 static anland_device *device(ad_session *s) { return anland_de_backend_device(s->backend); }
 static int status(int rc) { return rc < 0 ? -EIO : rc; }
@@ -56,6 +58,7 @@ ad_session *ad_open(const char *endpoint)
 {
     ad_session *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
+    s->allow_hdr = !anland_hdr_environment_disabled(getenv("ANLAND_HDR"));
     anland_de_backend_config_t config = {
         .present = { .endpoint = endpoint, .defer_connector = true }, .name = "Denial",
     };
@@ -181,10 +184,14 @@ int ad_import(ad_session *s, uint64_t generation, uint32_t index, ad_image *out)
     anland_de_target_t t;
     if (anland_de_backend_get_target(s->backend, &t) || !valid_target(&t) ||
         t.generation != generation || index >= t.count) return -ESTALE;
+    if (anland_hdr_mode_for_hal(t.format, s->allow_hdr) == ANLAND_HDR_REJECTED) {
+        fprintf(stderr, "denial: rejecting Anland format %u (ANLAND_HDR explicitly disabled or unsupported format); reopen the app window in SDR or remove the restriction\n", t.format);
+        return -ENOTSUP;
+    }
     anland_device_fb_t fb = {.fd = -1};
     if (anland_device_get_drm_fb(device(s), (int)index, &fb)) return -ENOTSUP;
-    /* The public DRM view currently supports only the three 32-bit formats.
-     * Bounds are checked in 64 bits before Smithay/EGL's signed dimensions. */
+    /* All accepted formats occupy 32 bits, including RGB10A2. Bounds are
+     * checked in 64 bits before Smithay/EGL's signed dimensions. */
     uint64_t row = (uint64_t)fb.width * 4;
     if (fb.fd < 0 || fb.width != t.width || fb.height != t.height ||
         row > fb.stride || !fb.stride ||

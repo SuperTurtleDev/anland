@@ -521,6 +521,9 @@ int anland_device_get_drm_fb(anland_device *dev, int index, anland_device_fb_t *
     case 1: /* RGBA8888 */ fb->format = (uint32_t)'A' | ((uint32_t)'B' << 8) | tail; break;
     case 2: /* RGBX8888 */ fb->format = (uint32_t)'X' | ((uint32_t)'B' << 8) | tail; break;
     case 5: /* BGRA8888 */ fb->format = (uint32_t)'A' | ((uint32_t)'R' << 8) | tail; break;
+    case 43: /* RGBA1010102: DRM_FORMAT_ABGR2101010 (storage, not colorimetry). */
+        fb->format = (uint32_t)'A' | ((uint32_t)'B' << 8) | ((uint32_t)'3' << 16) | ((uint32_t)'0' << 24);
+        break;
     default:
         close(fb->fd);
         memset(fb, 0, sizeof(*fb));

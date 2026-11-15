@@ -76,10 +76,10 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 +-- ANLAND HYPRGRASS DEFAULTS END
 --- a/hyprpm/CMakeLists.txt
 +++ b/hyprpm/CMakeLists.txt
-@@ -11,21 +11,7 @@ set(CMAKE_CXX_STANDARD 23)
- 
+@@ -11,21 +11,7 @@
+
  pkg_check_modules(hyprpm_deps REQUIRED IMPORTED_TARGET tomlplusplus hyprutils>=0.7.0)
- 
+
 -find_package(glaze 7...<8 QUIET)
 -if (NOT glaze_FOUND)
 -    set(GLAZE_VERSION v7.2.0)
@@ -97,8 +97,8 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 -
 +find_package(glaze REQUIRED)
  add_executable(hyprpm ${SRCFILES})
- add_compile_definitions(LIBDIR="${CMAKE_INSTALL_FULL_LIBDIR}")
- 
+
+ target_link_libraries(hyprpm PUBLIC PkgConfig::hyprpm_deps glaze::glaze)
 --- a/src/Compositor.cpp
 +++ b/src/Compositor.cpp
 @@ -1,3 +1,5 @@
@@ -220,14 +220,15 @@ Subject: Anland v5 hyprland native integration (Debian 13)
  void CFocusState::rawMonitorFocus(PHLMONITOR pMonitor) {
 --- a/src/helpers/Monitor.cpp
 +++ b/src/helpers/Monitor.cpp
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
 +#include "../anland/Bridge.hpp"
++#include "../render/OpenGL.hpp"
  #include "Monitor.hpp"
  #include "MiscFunctions.hpp"
  #include "../macros.hpp"
-@@ -107,6 +108,12 @@ void CMonitor::onConnect(bool noRule) {
+@@ -107,6 +109,12 @@
      m_listeners.needsFrame = m_output->events.needsFrame.listen([this] { g_pCompositor->scheduleFrameForMonitor(m_self.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME); });
- 
+
      m_listeners.presented = m_output->events.present.listen([this](const Aquamarine::IOutput::SPresentEvent& event) {
 +        if (!event.presented) {
 +            PROTO::presentation->onDiscarded(m_self.lock());
@@ -238,22 +239,25 @@ Subject: Anland v5 hyprland native integration (Debian 13)
          if (m_pendingDpmsAnimation) {
              m_pendingDpmsAnimationCounter++;
              // we give ourselves 5 frames of a buffer. The first presentation event still doesn't usually say that we actually
-@@ -643,8 +650,10 @@ bool CMonitor::applyMonitorRule(Config::
- 
+@@ -641,10 +649,13 @@
+
+     Log::logger->log(Log::DEBUG, "Applying monitor rule for {}", m_name);
+
++    Anland::configureColorRule(m_output, pMonitorRule);
      m_activeMonitorRule = std::move(pMonitorRule);
- 
+
 -    if (m_forceSize.has_value())
 +    if (m_forceSize.has_value()) {
          m_activeMonitorRule.m_resolution = m_forceSize.value();
 +        m_forceSize.reset();
 +    }
- 
+
      const auto RULE = &m_activeMonitorRule;
- 
-@@ -830,7 +839,13 @@ bool CMonitor::applyMonitorRule(Config::
+
+@@ -829,7 +840,13 @@
      m_customDrmMode = {};
      m_currentMode   = nullptr;
- 
+
 -    const auto initialFormat = m_drmFormat != DRM_FORMAT_INVALID ? m_drmFormat : DRM_FORMAT_XRGB8888;
 +    // Fixed consumer targets cannot be reallocated in a requested native format.
 +    // Select their real fourcc before the first mode/swapchain test, including
@@ -265,25 +269,15 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      m_output->state->setFormat(initialFormat);
      m_prevDrmFormat = m_drmFormat;
      m_drmFormat     = initialFormat;
-@@ -956,18 +971,25 @@ bool CMonitor::applyMonitorRule(Config::
- 
+@@ -955,18 +972,26 @@
+
      bool set10bit = false;
- 
+
 -    for (auto const& fmt : formats[sc<int>(!RULE->m_enable10bit)]) {
 -        m_output->state->setFormat(fmt.second);
 -        m_prevDrmFormat = m_drmFormat;
 -        m_drmFormat     = fmt.second;
-+    if (fixedFormat != DRM_FORMAT_INVALID) {
-+        // Keep the already-tested imported layout. A 10-bit rule cannot turn an
-+        // 8-bit consumer image into a 10-bit one; do not lie about its format.
-+        if (!m_state.test())
-+            return false;
-+    } else {
-+        for (auto const& fmt : formats[sc<int>(!RULE->m_enable10bit)]) {
-+            m_output->state->setFormat(fmt.second);
-+            m_prevDrmFormat = m_drmFormat;
-+            m_drmFormat     = fmt.second;
- 
+-
 -        if (!m_state.test()) {
 -            Log::logger->log(Log::ERR, "output {} failed basic test on format {}", m_name, fmt.first);
 -        } else {
@@ -291,6 +285,18 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 -            if (RULE->m_enable10bit && fmt.first.contains("101010"))
 -                set10bit = true;
 -            break;
++    if (fixedFormat != DRM_FORMAT_INVALID) {
++        // Keep the already-tested imported layout. A 10-bit rule cannot turn an
++        // 8-bit consumer image into a 10-bit one; do not lie about its format.
++        if (!m_state.test())
++            return false;
++        set10bit = fixedFormat == DRM_FORMAT_ABGR2101010;
++    } else {
++        for (auto const& fmt : formats[sc<int>(!RULE->m_enable10bit)]) {
++            m_output->state->setFormat(fmt.second);
++            m_prevDrmFormat = m_drmFormat;
++            m_drmFormat     = fmt.second;
++
 +            if (!m_state.test()) {
 +                Log::logger->log(Log::ERR, "output {} failed basic test on format {}", m_name, fmt.first);
 +            } else {
@@ -301,18 +307,38 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 +            }
          }
      }
- 
-@@ -1101,6 +1123,7 @@ bool CMonitor::applyMonitorRule(Config::
+
+@@ -1100,6 +1125,7 @@
      if (m_background && (OLDPIXELSIZE != m_pixelSize || OLDTRANSFORMEDSIZE != m_transformedSize)) {
          Log::logger->log(Log::DEBUG, "{} reset BGTex: pixelSize {} -> {}, transformedSize {} -> {}", m_name, OLDPIXELSIZE, m_pixelSize, OLDTRANSFORMEDSIZE, m_transformedSize);
          m_background.reset();
 +        m_splash.reset();
      }
- 
+
      g_pCompositor->scheduleMonitorStateRecheck();
-@@ -2505,6 +2528,11 @@ CMonitorState::CMonitorState(CMonitor* o
+@@ -2401,6 +2427,10 @@
+
+ // TODO support more drm properties
+ bool CMonitor::canNoShaderCM(bool forDSmode) {
++    // Android consumes the already encoded pixels; Anland has no KMS CTM.
++    if (Anland::outputHdrMode(m_output).has_value())
++        return false;
++
+     static auto PNONSHADER = CConfigValue<Config::INTEGER>("render:non_shader_cm");
+     if (*PNONSHADER == CM_NS_DISABLE)
+         return false;
+@@ -2431,6 +2461,8 @@
  }
- 
+
+ bool CMonitor::doesNoShaderCM() {
++    if (Anland::outputHdrMode(m_output).has_value())
++        return false;
+     return m_noShaderCTM;
+ }
+
+@@ -2504,6 +2536,11 @@
+ }
+
  void CMonitorState::ensureBufferPresent() {
 +    // Anland local modesets do not need a scanout placeholder. Acquiring one
 +    // inside a frame callback would submit an unrendered consumer target.
@@ -322,16 +348,16 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      const auto& STATE = m_owner->m_output->state->state();
      if (!STATE.enabled) {
          Log::logger->log(Log::TRACE, "CMonitorState::ensureBufferPresent: Ignoring, monitor is not enabled");
-@@ -2553,13 +2581,15 @@ bool CMonitorState::updateSwapchain() {
+@@ -2552,13 +2589,15 @@
          return true;
      }
- 
+
 -    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize)
 +    const auto LENGTH = Anland::swapchainLength(m_owner->m_output, 3);
 +    if (!LENGTH) return false;
 +    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == LENGTH && OPTIONS.size == MODE->pixelSize)
          return true;
- 
+
      auto options    = OPTIONS;
      options.format  = m_owner->m_drmFormat;
      options.scanout = true;
@@ -340,6 +366,19 @@ Subject: Anland v5 hyprland native integration (Debian 13)
      options.size    = MODE->pixelSize;
      return m_owner->m_output->swapchain->reconfigure(options);
  }
+@@ -2595,6 +2634,12 @@
+ }
+
+ bool CMonitor::useFP16() {
++    // PQ output must retain linear HDR precision through the native final CM pass.
++    if (Anland::outputHdrMode(m_output).value_or(false)) {
++        const auto backend = g_pHyprRenderer->glBackend();
++        return backend && backend->fp16OutputSupported();
++    }
++
+     static const auto PFP16 = CConfigValue<Hyprlang::INT>("render:use_fp16");
+
+     auto              isSRGB = [this] {
 --- a/src/helpers/MonitorFrameScheduler.cpp
 +++ b/src/helpers/MonitorFrameScheduler.cpp
 @@ -13,6 +13,7 @@ CMonitorFrameScheduler::CMonitorFrameSch
@@ -737,15 +776,38 @@ Subject: Anland v5 hyprland native integration (Debian 13)
  #include "Renderer.hpp"
  #include "../Compositor.hpp"
  #include "../helpers/math/Math.hpp"
-@@ -1721,6 +1722,8 @@ bool IHyprRenderer::beginRender(PHLMONIT
- 
+@@ -1719,8 +1720,20 @@
+
+     initRender();
+
++    // Consumer PQ encoding requires the native CM shader and FP16 working path.
++    static const auto PCMENABLED = CConfigValue<Config::INTEGER>("render:cm_enabled");
++    const auto colorBackend = glBackend();
++    if (m_renderMode == RENDER_MODE_NORMAL && Anland::outputHdrMode(pMonitor->m_output).value_or(false) &&
++        (!*PCMENABLED || !colorBackend || !colorBackend->colorManagementSupported() || !colorBackend->fp16OutputSupported())) {
++        Log::logger->log(Log::ERR, "anland: HDR requires native color management and FP16 rendering");
++        Anland::renderImportFailed(pMonitor->m_output, m_currentBuffer);
++        return false;
++    }
++
      if (!initRenderBuffer(m_currentBuffer, pMonitor->m_output->state->state().drmFormat)) {
          Log::logger->log(Log::ERR, "failed to start a render pass for output {}, no RBO could be obtained", pMonitor->m_name);
 +        if (m_renderMode == RENDER_MODE_NORMAL)
 +            Anland::renderImportFailed(pMonitor->m_output, m_currentBuffer);
          return false;
      }
- 
+
+@@ -2267,7 +2280,9 @@
+
+     const auto  FS_WINDOW = pMonitor->getFullscreenWindow();
+
+-    if (pMonitor->supportsHDR()) {
++    // Anland already fixed the encoding when this buffer generation connected.
++    // A fullscreen surface cannot switch its Android PQ dataspace independently.
++    if (pMonitor->supportsHDR() && !Anland::outputHdrMode(pMonitor->m_output).has_value()) {
+         // HDR metadata determined by
+         // HDR scRGB - monitor settings
+         // HDR PQ surface & DS is active - surface settings
 --- a/start/CMakeLists.txt
 +++ b/start/CMakeLists.txt
 @@ -11,21 +11,8 @@ find_package(PkgConfig REQUIRED)
@@ -772,3 +834,17 @@ Subject: Anland v5 hyprland native integration (Debian 13)
  file(GLOB_RECURSE SRCFILES CONFIGURE_DEPENDS "src/*.cpp")
  
  add_executable(start-hyprland ${SRCFILES})
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -146,6 +146,11 @@
+       public:
+         CHyprOpenGLImpl();
+         ~CHyprOpenGLImpl();
++
++        bool colorManagementSupported() const { return m_cmSupported; }
++        bool fp16OutputSupported() const {
++            return m_extensions.contains("GL_EXT_color_buffer_half_float") || m_extensions.contains("GL_EXT_color_buffer_float");
++        }
+
+         struct SRectRenderData {
+             const CRegion* damage        = nullptr;

@@ -599,3 +599,103 @@ index 4dd8198..2c87887 100644
  
  		Atom gamescopeColorLut3DOverride;
  		Atom gamescopeColorShaperLutOverride;
+
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "backend.h"
++#include "anland_backend/hdr.hpp"
+ #include "gamescope_shared.h"
+ #include "xwayland_ctx.hpp"
+ #include <X11/X.h>
+@@ -358,6 +359,7 @@
+ 
+ 			tonemapping_t tonemapping{};
+ 			tonemapping.bUseShaper = true;
++			tonemapping.bNormalizeShaper = gamescope::AnlandOutputHDRMode().value_or( false );
+ 
+ 			EOTF inputEOTF = static_cast<EOTF>( nInputEOTF );
+ 			float flGain = 1.f;
+@@ -599,6 +601,12 @@
+ {
+ 	if ( !GetBackend()->GetCurrentConnector() )
+ 		return;
++
++	// Anland HAL43 is a PQ consumer, even when every client currently uses SDR.
++	if ( gamescope::AnlandOutputHDRMode().value_or( false ) )
++	{
++		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending );
++	}
+ 
+ 	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(
+ 		g_bOutputHDREnabled,
+@@ -10432,11 +10440,14 @@
+ 
+ 		// Capability is advertised to clients regardless of the live "active"
+ 		// state below, so games can request HDR while the panel is idling in SDR.
+-		const bool bOutputHDRCapable = (g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled;
++		// Consumer buffers have a fixed encoding; compositor toggles cannot change it.
++		const auto anlandHDRMode = gamescope::AnlandOutputHDRMode();
++		const bool bOutputHDRCapable = anlandHDRMode.value_or(
++			(g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled );
+ 
+ 		{
+ 			gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
+-			const bool bContentDriven = bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
++			const bool bContentDriven = !anlandHDRMode.has_value() && bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
+ 				( cv_hdr_content_driven ||
+ 				  ( pConn && pConn->GetHDRInfo().bContentDrivenHDR ) );
+ 
+
+diff --git a/src/color_helpers.h b/src/color_helpers.h
+--- a/src/color_helpers.h
++++ b/src/color_helpers.h
+@@ -283,6 +283,7 @@
+ struct tonemapping_t
+ {
+ 	bool bUseShaper = true;
++	bool bNormalizeShaper = false; // matched full-range shaper for fixed consumer output
+ 	float g22_luminance = 1.f; // what luminance should be applied for g22 EOTF conversions?
+ 	ETonemapOperator eOperator = ETonemapOperator_None;
+ 	eetf_2390_t eetf2390;
+
+diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
+--- a/src/color_helpers.cpp
++++ b/src/color_helpers.cpp
+@@ -717,6 +717,21 @@
+             pShaper->dataB[nVal] = shapedSourceColor.b;
+         }
+ 
++        // A PQ SDR white may stop between two 3D-LUT nodes. Expanding the
++        // shaper to its full domain avoids clamping the inverse at that white
++        // and interpolating it with a lower node. Generate the matched 3D LUT
++        // only after this normalization. Other backends retain their LUTs.
++        if ( tonemapping.bNormalizeShaper )
++        {
++            for ( auto *channel : { &pShaper->dataR, &pShaper->dataG, &pShaper->dataB } )
++            {
++                const float peak = channel->back();
++                if ( peak > 0.f && peak < 1.f )
++                    for ( float &value : *channel )
++                        value /= peak;
++            }
++        }
++
+         pShaper->finalize();
+     }
+ 
+@@ -726,7 +741,10 @@
+         glm::mat3 dest_from_xyz = glm::inverse( xyz_from_dest );
+ 
+         glm::mat3 xyz_from_source = normalised_primary_matrix( source.primaries, source.white, 1.f );
+-        glm::mat3 dest_from_source = dest_from_xyz * xyz_from_source; // XYZ scaling for white point adjustment
++        // Fixed PQ passthrough must not add near-black cross-talk from
++        // inverting and multiplying identical primary matrices.
++        glm::mat3 dest_from_source = tonemapping.bNormalizeShaper && source == dest
++            ? glm::mat3( 1.f ) : dest_from_xyz * xyz_from_source;
+ 
+         // Avoid roundoff when the output encoding is already native.
+         glm::mat3 dest_from_native( 1.f );

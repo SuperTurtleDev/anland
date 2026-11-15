@@ -13,18 +13,12 @@
 */
 #pragma once
 
-#ifdef ANLAND_KWIN_66
-#include "core/backendoutput.h"
-#else
-#ifdef ANLAND_KWIN_66
-#include "core/backendoutput.h"
-#else
+#include "anland_color.h"
+
 #ifdef ANLAND_KWIN_66
 #include "core/backendoutput.h"
 #else
 #include "core/output.h"
-#endif
-#endif
 #endif
 
 #include <QObject>
@@ -42,15 +36,7 @@ class RenderLoop;
 #ifdef ANLAND_KWIN_66
 class AnlandOutput : public BackendOutput
 #else
-#ifdef ANLAND_KWIN_66
-class AnlandOutput : public BackendOutput
-#else
-#ifdef ANLAND_KWIN_66
-class AnlandOutput : public BackendOutput
-#else
 class AnlandOutput : public Output
-#endif
-#endif
 #endif
 {
     Q_OBJECT
@@ -68,19 +54,17 @@ public:
     bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
     bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
 #else
-#ifdef ANLAND_KWIN_66
-    bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
-    bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
-#else
-#ifdef ANLAND_KWIN_66
-    bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
-    bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
-#else
     void present(const std::shared_ptr<OutputFrame> &frame);
 #endif
 #endif
-#endif
-#endif
+
+    // The app controls each consumer session. Environment policy may only
+    // forbid HDR; a successful buffer import commits the corresponding mode.
+    bool hdrAllowed() const;
+    bool hdrEnabled() const;
+    void setConsumerHdrMode(bool hdr);
+    const AnlandColorDescription &renderColorDescription() const;
+    const AnlandColorDescription &wireColorDescription() const;
 
     /** @p pixelSize and @p refresh (in mHz) come from the display daemon. */
     void init(const QSize &pixelSize, int refresh, qreal scale);
@@ -141,6 +125,10 @@ private:
     Q_DISABLE_COPY(AnlandOutput);
 
     AnlandBackend *m_backend;
+    const bool m_hdrAllowed;
+    bool m_hdrEnabled = false;
+    AnlandColorDescription m_wireColorDescription;
+    AnlandColorDescription m_renderColorDescription;
 #ifndef ANLAND_KWIN_68
     std::unique_ptr<RenderLoop> m_renderLoop;
 #endif

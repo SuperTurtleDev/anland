@@ -381,4 +381,11 @@
     <string name="hud_long_press_delay">長按時間（毫秒）</string>
     <string name="hud_long_press_hint">放開時送出模式下，長按觸發後不會送出主要動作；立即送出模式下，主要動作已經送出。</string>
     <string name="hud_resize_panel">拖曳以調整屬性面板大小</string>
+
+    <!-- The app selects the mode; KDE follows the reported buffer format. -->
+    <string name="hdr_switch">10bit HDR（實驗性）</string>
+    <string name="hdr_hint">僅供支援 HDR10 的螢幕及更新後的 KDE、GNOME、Hyprland、Gamescope、Denial 後端使用。後端在重新連線時自動跟隨此開關。修改後請關閉並重新開啟桌面視窗；現有視窗保持原模式。固定輸出 BT.2020/PQ，峰值 1000 nit、SDR 參考白 203 nit。不自動降級至 SDR，不協商 HDR 中繼資料。</string>
+    <string name="hdr_error_title">HDR 連線遭拒</string>
+    <string name="hdr_error_unsupported">目前顯示模式未報告 HDR10/PQ 支援。此視窗已停止連線，未降級至 SDR。使用 SDR 時，請關閉桌面視窗、關閉此選項，再重新開啟視窗；受支援的後端會自動跟隨。</string>
+    <string name="hdr_error_surface">Android 無法設定或保持 10bit BT.2020/PQ Surface。此視窗已停止連線，未降級至 SDR。請在 Anland 記錄中檢查緩衝區格式或 Surface 錯誤。使用 SDR 時，請關閉桌面視窗、關閉此選項，再重新開啟視窗；受支援的後端會自動跟隨。</string>
 </resources>

@@ -408,4 +408,11 @@
     <string name="hud_long_press_delay">Hold time (ms)</string>
     <string name="hud_long_press_hint">Send on release suppresses the main action after a long press. In immediate mode, the main action has already been sent.</string>
     <string name="hud_resize_panel">Drag to resize the properties panel</string>
+
+    <!-- The app selects the mode; KDE follows the reported buffer format. -->
+    <string name="hdr_switch">10-bit HDR (experimental)</string>
+    <string name="hdr_hint">For HDR10 displays and updated KDE, GNOME, Hyprland, Gamescope, or Denial backends. The backend follows this setting when the desktop reconnects. After changing it, close and reopen the desktop window; existing windows keep their mode. Fixed BT.2020/PQ output with a 1000-nit peak and 203-nit SDR white. No automatic SDR fallback or HDR metadata negotiation.</string>
+    <string name="hdr_error_title">HDR connection refused</string>
+    <string name="hdr_error_unsupported">The current display mode does not report HDR10/PQ support. This window has stopped without falling back to SDR. To use SDR, close the desktop window, turn off this setting, and reopen it. Supported backends follow automatically.</string>
+    <string name="hdr_error_surface">Android could not configure or retain a 10-bit BT.2020/PQ surface. This window has stopped without falling back to SDR. Check the Anland log for the buffer format or surface error. To use SDR, close the desktop window, turn off this setting, and reopen it. Supported backends follow automatically.</string>
 </resources>

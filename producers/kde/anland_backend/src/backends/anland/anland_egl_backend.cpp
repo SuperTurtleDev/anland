@@ -8,6 +8,8 @@
 #include "anland_backend.h"
 #include "anland_logging.h"
 #include "anland_output.h"
+#include "anland_format.h"
+#include "anland_damage.h"
 
 // kwin
 #include "core/graphicsbuffer.h" // DmaBufAttributes
@@ -36,22 +38,6 @@ namespace KWin
 #else
 #define ANLAND_FULL_REPAINT infiniteRegion()
 #endif
-
-/*
- * The daemon's screen_info.format / buf_info.format uses the consumer-side
- * pixel-format enum (see common/protocol.h). 1 == RGBA_8888 in Android memory
- * layout, which is ABGR8888 in DRM fourcc terms; everything else is treated as
- * XRGB8888. Mirrors protocol_format_to_drm() in weston's backend-anland.
- */
-static uint32_t protocol_format_to_drm(uint32_t fmt)
-{
-    switch (fmt) {
-    case 1:
-        return DRM_FORMAT_ABGR8888;
-    default:
-        return DRM_FORMAT_XRGB8888;
-    }
-}
 
 AnlandEglLayer::AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend)
 #ifdef ANLAND_KWIN_66
@@ -105,7 +91,49 @@ void AnlandEglLayer::releaseBuffers()
         m_accumDamage[i] = QRegion();
 #endif
     }
+    m_hdrEncoder.reset();
+    m_hdrFbo.reset();
+    m_hdrTexture.reset();
+    m_hdrSceneNeedsFullRepaint = false;
+    if (m_hdrTextureId) {
+        glDeleteTextures(1, &m_hdrTextureId);
+        m_hdrTextureId = 0;
+    }
     m_bufCount = 0;
+}
+
+bool AnlandEglLayer::createHdrRenderTarget(const QSize &size, const OutputTransform &transform)
+{
+    // GLTexture::allocate() on the GLES paths of supported KWin versions can
+    // allocate RGBA8 even when asked for RGBA16F. Allocate explicit sized storage
+    // and verify the actual attachment, rather than trusting texture metadata.
+    GLint previousTexture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    glGenTextures(1, &m_hdrTextureId);
+    glBindTexture(GL_TEXTURE_2D, m_hdrTextureId);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, size.width(), size.height(), 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+    const GLenum error = glGetError();
+    glBindTexture(GL_TEXTURE_2D, previousTexture);
+    if (!m_hdrTextureId || error != GL_NO_ERROR) {
+        qCWarning(KWIN_ANLAND) << "HDR rejected: cannot allocate a real RGBA16F scene texture, GL error" << error;
+        return false;
+    }
+    m_hdrTexture = GLTexture::createNonOwningWrapper(m_hdrTextureId, GL_RGBA16F, size);
+    m_hdrTexture->setContentTransform(transform);
+    m_hdrTexture->setFilter(GL_NEAREST);
+    m_hdrTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+    m_hdrFbo = std::make_unique<GLFramebuffer>(m_hdrTexture.get());
+    if (!m_hdrFbo->valid() || !anlandFramebufferHasColorPrecision(m_hdrFbo.get(), 16, true)) {
+        qCWarning(KWIN_ANLAND) << "HDR rejected: RGBA16F scene framebuffer is unavailable";
+        return false;
+    }
+    m_hdrEncoder = std::make_unique<AnlandHdrEncoder>();
+    if (!m_hdrEncoder->init()) {
+        qCWarning(KWIN_ANLAND) << "HDR rejected: final PQ color conversion shader is unavailable";
+        return false;
+    }
+    m_hdrSceneNeedsFullRepaint = true;
+    return true;
 }
 
 bool AnlandEglLayer::importBuffers(int count)
@@ -125,16 +153,28 @@ bool AnlandEglLayer::importBuffers(int count)
 
     releaseBuffers();
 
-    // The consumer reads this dmabuf top-down, while GL renders bottom-up, so the
-    // content transform always carries a vertical flip. On top of that we fold in
-    // the output's configured rotation, so the scene is rendered pre-rotated into
-    // the consumer's fixed-size dmabuf.
-    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
-
+    bool consumerHdr = false;
     for (int i = 0; i < count; i++) {
         anland_device_fb_t fb;
         if (anland_device_get_fb(m_device, i, &fb) < 0) {
             qCWarning(KWIN_ANLAND) << "failed to get dmabuf info for buffer" << i;
+            releaseBuffers();
+            return false;
+        }
+        const auto mode = anlandConsumerHdrMode(fb.format, m_output->hdrAllowed());
+        if (!mode) {
+            qCWarning(KWIN_ANLAND) << "consumer output rejected: unsupported HAL pixel format" << fb.format
+                                   << (fb.format == 43 ? "(HDR is explicitly disabled by ANLAND_HDR; turn off HDR in the Android app or remove the environment restriction)"
+                                                       : "(supported consumer formats: RGBA8888, RGBX8888, BGRA8888, RGBA_1010102)");
+            close(fb.fd);
+            releaseBuffers();
+            return false;
+        }
+        if (i == 0) {
+            consumerHdr = *mode;
+        } else if (*mode != consumerHdr) {
+            qCWarning(KWIN_ANLAND) << "consumer output rejected: mixed SDR and HDR buffer formats";
+            close(fb.fd);
             releaseBuffers();
             return false;
         }
@@ -162,7 +202,7 @@ bool AnlandEglLayer::importBuffers(int count)
         attrs.planeCount = 1;
         attrs.width = actual.width();
         attrs.height = actual.height();
-        attrs.format = protocol_format_to_drm(fb.format);
+        attrs.format = anlandProtocolFormatToDrm(fb.format);
         attrs.modifier = fb.modifier;
         // anland_device_get_fb() returns a caller-owned dup of the dmabuf fd;
         // DmaBufAttributes (and the EGLImage we hand the fd to) takes it over.
@@ -184,10 +224,14 @@ bool AnlandEglLayer::importBuffers(int count)
             return false;
         }
 
-        texture->setContentTransform(contentTransform);
         auto fbo = std::make_unique<GLFramebuffer>(texture.get());
         if (!fbo->valid()) {
             qCWarning(KWIN_ANLAND) << "framebuffer for dmabuf" << i << "is not complete";
+            releaseBuffers();
+            return false;
+        }
+        if (consumerHdr && !anlandFramebufferHasColorPrecision(fbo.get(), 10, false)) {
+            qCWarning(KWIN_ANLAND) << "HDR rejected: imported consumer framebuffer is not at least 10bit RGB";
             releaseBuffers();
             return false;
         }
@@ -201,7 +245,37 @@ bool AnlandEglLayer::importBuffers(int count)
         m_accumDamage[i] = ANLAND_FULL_REPAINT;
     }
 
+    // Resizing the output above can synchronously change its configured
+    // transform. Read it after import and apply the same final transform to all
+    // buffers and the scene. FlipY accounts for the top-down Android consumer.
+    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
+    for (int i = 0; i < count; i++) {
+        m_textures[i]->setContentTransform(contentTransform);
+    }
+    if (consumerHdr && !createHdrRenderTarget(m_output->modeSize(), contentTransform)) {
+        releaseBuffers();
+        return false;
+    }
+    // Only publish the new color mode after the complete buffer set and its
+    // render resources are usable. A failed reconnect keeps the last valid
+    // output state while rendering remains inhibited.
+    m_output->setConsumerHdrMode(consumerHdr);
+    // Color/capability notifications can synchronously reapply output layout.
+    // Keep the imported slots in sync even though m_bufCount is still zero and
+    // transformChanged() could not visit them during that notification.
+    const OutputTransform finalTransform = m_output->transform().combine(OutputTransform::FlipY);
+    for (int i = 0; i < count; i++) {
+        m_textures[i]->setContentTransform(finalTransform);
+    }
+    if (m_hdrTexture) {
+        m_hdrTexture->setContentTransform(finalTransform);
+    }
     m_bufCount = count;
+#ifdef ANLAND_KWIN_66
+    addDeviceRepaint(ANLAND_FULL_REPAINT);
+#else
+    addRepaint(ANLAND_FULL_REPAINT);
+#endif
     return true;
 }
 
@@ -211,6 +285,10 @@ void AnlandEglLayer::onOutputTransformChanged()
     for (int i = 0; i < m_bufCount; i++) {
         m_textures[i]->setContentTransform(contentTransform);
         m_accumDamage[i] = ANLAND_FULL_REPAINT;
+    }
+    if (m_hdrTexture) {
+        m_hdrTexture->setContentTransform(contentTransform);
+        m_hdrSceneNeedsFullRepaint = true;
     }
 #ifdef ANLAND_KWIN_66
     addDeviceRepaint(ANLAND_FULL_REPAINT);
@@ -251,9 +329,15 @@ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
     }
     m_currentIndex = index;
 
+    auto repaint = m_accumDamage[m_currentIndex];
+    if (m_hdrFbo) {
+        // Reusing a consumer slot does not age the single persistent scene.
+        // Old slot damage belongs to the final encode, not scene rendering.
+        repaint = m_hdrSceneNeedsFullRepaint ? ANLAND_FULL_REPAINT : decltype(repaint)();
+    }
     return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_fbos[m_currentIndex].get()),
-        .repaint = m_accumDamage[m_currentIndex],
+        .renderTarget = RenderTarget(m_hdrFbo ? m_hdrFbo.get() : m_fbos[m_currentIndex].get(), m_output->renderColorDescription()),
+        .repaint = repaint,
     };
 }
 
@@ -299,6 +383,19 @@ void AnlandEglLayer::scheduleBufferCatchUp(int index)
     }
 }
 
+bool AnlandEglLayer::encodeHdrFrame(const QRegion &deviceDamage)
+{
+    if (!m_hdrFbo || m_currentIndex < 0 || m_currentIndex >= m_bufCount) {
+        return false;
+    }
+    const bool encoded = m_hdrEncoder->encode(m_hdrTexture.get(), m_fbos[m_currentIndex].get(),
+                                             anlandHdrBufferDamage(deviceDamage, m_hdrFbo->size(), m_hdrTexture->contentTransform()));
+    if (!encoded) {
+        qCWarning(KWIN_ANLAND) << "HDR frame rejected: final BT.2020/PQ encoding failed";
+    }
+    return encoded;
+}
+
 #ifdef ANLAND_KWIN_68
 bool AnlandEglLayer::endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
 #elif defined(ANLAND_KWIN_66)
@@ -307,12 +404,22 @@ bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region
 bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame)
 #endif
 {
-    glFlush(); // flush pending rendering commands into the dmabuf.
-    // Every buffer owes this frame's damage; the buffer we just painted is now
-    // fully up to date, so clear its debt.
+    // Keep every consumer slot's debt, including slots not selected for several
+    // frames. HDR scene damage and this slot history have different lifetimes.
     for (int i = 0; i < m_bufCount; i++) {
         m_accumDamage[i] = m_accumDamage[i] + damagedDeviceRegion;
     }
+    if (m_output->hdrEnabled()) {
+        // Include repairs requested for the scene itself (first use/rotation),
+        // as well as everything this consumer slot missed while not selected.
+        const QRegion encodeDamage = anlandDeviceDamage(m_accumDamage[m_currentIndex] + renderedDeviceRegion);
+        m_hdrSceneNeedsFullRepaint = false;
+        if (!encodeHdrFrame(encodeDamage)) {
+            return false;
+        }
+    }
+    glFlush(); // flush pending rendering commands into the dmabuf.
+    // Clear debt only after rendering/encoding this slot succeeded.
     if (m_currentIndex < m_bufCount) {
         #ifdef ANLAND_KWIN_66
         m_accumDamage[m_currentIndex] = Region();
@@ -590,7 +697,7 @@ std::pair<std::shared_ptr<KWin::GLTexture>, ColorDescription> AnlandEglBackend::
     if (it == m_outputs.end()) {
         return {nullptr, ColorDescription::sRGB};
     }
-    return {it->second->texture(), ColorDescription::sRGB};
+    return {it->second->texture(), static_cast<AnlandOutput *>(output)->wireColorDescription()};
 }
 
 #endif

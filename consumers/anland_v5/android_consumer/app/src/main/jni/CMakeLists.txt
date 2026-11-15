@@ -44,6 +44,7 @@ target_link_options(anland_consumer PRIVATE -flto -fuse-ld=lld)
 
 target_link_libraries(anland_consumer
     android
+    nativewindow
     log
     dl
     aaudio

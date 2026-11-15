@@ -1107,10 +1107,10 @@ index 78e390d..c85e019 100644
      };
 diff --git a/compositor/src/bin/deniald/flutter_runtime/external_pool.rs b/compositor/src/bin/deniald/flutter_runtime/external_pool.rs
 new file mode 100644
-index 0000000..0d903e3
+index 0000000..d1fa495
 --- /dev/null
 +++ b/compositor/src/bin/deniald/flutter_runtime/external_pool.rs
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,13 @@
 +//! Backend-independent identity for replacing an imported Flutter output pool.
 +//! Storage ownership remains with the display backend until raster completion.
 +use denial_core::topology::{OutputId, PixelSize, RenderViewId};
@@ -1122,6 +1122,7 @@ index 0000000..0d903e3
 +    pub output: OutputId,
 +    pub view: RenderViewId,
 +    pub size: PixelSize,
++    pub color: Option<crate::output_color::OutputColor>,
 +}
 diff --git a/compositor/src/bin/deniald/flutter_runtime/input.rs b/compositor/src/bin/deniald/flutter_runtime/input.rs
 index 9185a79..1cc2c51 100644
@@ -1497,10 +1498,10 @@ index d3543ed..1017c42 100644
              assert_eq!(broker.authorize(request, now, None), Some(view.get()));
              let framebuffer = broker.acquire(view.get(), size).unwrap();
 diff --git a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
-index 7cfa290..214d59e 100644
+index 7cfa290..07fc49d 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
-@@ -211,6 +211,91 @@ impl FlutterRuntime {
+@@ -211,6 +211,94 @@ impl FlutterRuntime {
          })
      }
  
@@ -1534,6 +1535,7 @@ index 7cfa290..214d59e 100644
 +        &self,
 +        pool: ExternalPoolDescriptor,
 +        buffers: Vec<Dmabuf>,
++        scenes: Vec<Dmabuf>,
 +    ) -> Result<
 +        std::sync::mpsc::Receiver<denial_flutter_engine::RenderOperationResult>,
 +        Box<dyn Error>,
@@ -1547,6 +1549,8 @@ index 7cfa290..214d59e 100644
 +                pool.size,
 +                pool.generation,
 +                &buffers,
++                &scenes,
++                pool.color,
 +            )
 +        })
 +    }
@@ -1592,7 +1596,7 @@ index 7cfa290..214d59e 100644
      pub fn publish_output(&self, output: &ReadyOutputFrame) -> Result<(), Box<dyn Error>> {
          self.handler.publish_output(output).map_err(Into::into)
      }
-@@ -385,23 +470,42 @@ impl FlutterRuntime {
+@@ -385,23 +473,42 @@ impl FlutterRuntime {
          Ok(true)
      }
  
@@ -1639,7 +1643,7 @@ index 7cfa290..214d59e 100644
          }
          let completion_id = self
              .host
-@@ -418,7 +522,7 @@ impl FlutterRuntime {
+@@ -418,7 +525,7 @@ impl FlutterRuntime {
              completion_id,
          );
          if self.render_view_scratch.is_empty() {
@@ -1648,7 +1652,7 @@ index 7cfa290..214d59e 100644
          }
  
          let flutter_tick = flutter_output.and_then(|output_id| {
-@@ -477,7 +581,7 @@ impl FlutterRuntime {
+@@ -477,7 +584,7 @@ impl FlutterRuntime {
              let Some(baton) = baton else {
                  self.handler
                      .cancel_output_authorizations(&self.render_view_scratch);
@@ -1657,7 +1661,7 @@ index 7cfa290..214d59e 100644
              };
              Some(baton)
          } else {
-@@ -573,7 +677,10 @@ impl FlutterRuntime {
+@@ -573,7 +680,10 @@ impl FlutterRuntime {
                  .cancel_output_authorizations(&self.render_view_scratch);
              return Err(error.into());
          }
@@ -1777,8 +1781,78 @@ index 0000000..1651b9c
 +        }
 +    }
 +}
+diff --git a/compositor/src/bin/deniald/flutter_runtime/renderer/gl.rs b/compositor/src/bin/deniald/flutter_runtime/renderer/gl.rs
+index f2680eb..8f3e61f 100644
+--- a/compositor/src/bin/deniald/flutter_runtime/renderer/gl.rs
++++ b/compositor/src/bin/deniald/flutter_runtime/renderer/gl.rs
+@@ -69,6 +69,8 @@ pub(super) struct GlApi {
+     pub(super) bind_framebuffer: unsafe extern "system" fn(u32, u32),
+     pub(super) framebuffer_texture_2d: unsafe extern "system" fn(u32, u32, u32, u32, i32),
+     pub(super) check_framebuffer_status: unsafe extern "system" fn(u32) -> u32,
++    pub(super) get_framebuffer_attachment_parameter_iv:
++        unsafe extern "system" fn(u32, u32, u32, *mut i32),
+     pub(super) create_shader: unsafe extern "system" fn(u32) -> u32,
+     pub(super) shader_source: unsafe extern "system" fn(u32, i32, *const *const c_char, *const i32),
+     pub(super) compile_shader: unsafe extern "system" fn(u32),
+@@ -241,6 +243,10 @@ impl GlApi {
+                 "glDeleteRenderbuffers",
+                 unsafe extern "system" fn(i32, *const u32)
+             ),
++            get_framebuffer_attachment_parameter_iv: symbol!(
++                "glGetFramebufferAttachmentParameteriv",
++                unsafe extern "system" fn(u32, u32, u32, *mut i32)
++            ),
+             get_integer_v: symbol!("glGetIntegerv", unsafe extern "system" fn(u32, *mut i32)),
+             viewport: symbol!("glViewport", unsafe extern "system" fn(i32, i32, i32, i32)),
+             get_error: symbol!("glGetError", unsafe extern "system" fn() -> u32),
+@@ -248,6 +254,36 @@ impl GlApi {
+             finish: symbol!("glFinish", unsafe extern "system" fn()),
+         })
+     }
++    /// Inspect the actual imported attachment in the current GLES3 context.
++    pub(super) fn color_attachment_precision(self, bits: i32, component_type: Option<u32>) -> bool {
++        let mut valid = true;
++        // SAFETY: caller owns the current context with its target FBO bound.
++        unsafe {
++            let _ = (self.get_error)();
++            for parameter in [0x8212, 0x8213, 0x8214] {
++                // RED/GREEN/BLUE_SIZE
++                let mut actual = 0;
++                (self.get_framebuffer_attachment_parameter_iv)(
++                    gl::FRAMEBUFFER,
++                    gl::COLOR_ATTACHMENT0,
++                    parameter,
++                    &mut actual,
++                );
++                valid &= actual >= bits;
++            }
++            if let Some(expected) = component_type {
++                let mut actual = 0;
++                (self.get_framebuffer_attachment_parameter_iv)(
++                    gl::FRAMEBUFFER,
++                    gl::COLOR_ATTACHMENT0,
++                    0x8211,
++                    &mut actual,
++                ); // COMPONENT_TYPE
++                valid &= actual as u32 == expected;
++            }
++            valid && (self.get_error)() == gl::NO_ERROR
++        }
++    }
+ }
+ 
+ #[derive(Clone, Copy, Debug)]
+@@ -310,7 +346,7 @@ void main() {\n\
+ 
+ const SCANOUT_FRAGMENT_SHADER: &[u8] = b"#version 300 es\n\
+ precision highp float;\n\
+-uniform sampler2D source_texture;\n\
++uniform highp sampler2D source_texture;\n\
+ // 0: no alpha (a scene), 1: premultiplied after encoding, 2: premultiplied\n\
+ // before encoding, 3: straight.\n\
+ uniform int alpha_mode;\n\
 diff --git a/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs b/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
-index 5ab657d..ba2fede 100644
+index 5ab657d..0144f98 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/renderer/handler.rs
 @@ -129,7 +129,7 @@ pub(in crate::flutter_runtime) struct FlutterGlHandler {
@@ -1928,7 +2002,34 @@ index 5ab657d..ba2fede 100644
                          return Err(error);
                      }
                  };
-@@ -363,7 +457,6 @@ impl FlutterGlHandler {
+@@ -266,7 +360,13 @@ impl FlutterGlHandler {
+                         .map(|dmabuf| AllocatorBuffer::format(dmabuf).code)
+                     {
+                         Some(Fourcc::Abgr16161616f) => gl::RGBA16F,
+-                        _ if scanout_format.code == Fourcc::Xrgb2101010 => gl::RGB10_A2,
++                        _ if matches!(
++                            scanout_format.code,
++                            Fourcc::Xrgb2101010 | Fourcc::Abgr2101010
++                        ) =>
++                        {
++                            gl::RGB10_A2
++                        }
+                         _ => gl::RGBA8,
+                     },
+                     gamut: pool.color.map(|color| color.matrix),
+@@ -336,7 +436,10 @@ impl FlutterGlHandler {
+                     (gl.get_integer_v)(gl::STENCIL_BITS, &mut actual_stencil_bits);
+                     (status, attachment_error)
+                 };
+-                if target.scanout_texture == 0
++                let hdr_scanout_valid =
++                    target.pq_white <= 0.0 || gl.color_attachment_precision(10, None);
++                if !hdr_scanout_valid
++                    || target.scanout_texture == 0
+                     || target.scanout_framebuffer == 0
+                     || import_error != gl::NO_ERROR
+                     || attachment_error != gl::NO_ERROR
+@@ -363,7 +466,6 @@ impl FlutterGlHandler {
                      destroy_targets(gl, &display, &mut failed);
                      destroy_targets(gl, &display, &mut targets);
                      destroy_depth_stencils(gl, &mut depth_stencils);
@@ -1936,7 +2037,7 @@ index 5ab657d..ba2fede 100644
                      return Err(format!(
                          "Flutter output {:?} buffer {buffer_index} ({width}x{height}, {:?}) scanout framebuffer failed: status={framebuffer_status:#x}, import_error={import_error:#x}, attachment_error={attachment_error:#x}",
                          pool.output_id, scanout_dmabuf.format(),
-@@ -376,7 +469,6 @@ impl FlutterGlHandler {
+@@ -376,7 +478,6 @@ impl FlutterGlHandler {
                          destroy_targets(gl, &display, &mut failed);
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
@@ -1944,7 +2045,7 @@ index 5ab657d..ba2fede 100644
                          return Err("offscreen blit target is missing its render DMA-BUF".into());
                      };
                      // The scene matches scanout, or is half float for an HDR
-@@ -390,7 +482,6 @@ impl FlutterGlHandler {
+@@ -390,7 +491,6 @@ impl FlutterGlHandler {
                          destroy_targets(gl, &display, &mut failed);
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
@@ -1952,7 +2053,7 @@ index 5ab657d..ba2fede 100644
                          return Err(format!(
                              "offscreen Flutter render target {render_format:?} does not match {:?} scanout",
                              scanout_format.code
-@@ -406,7 +497,6 @@ impl FlutterGlHandler {
+@@ -406,7 +506,6 @@ impl FlutterGlHandler {
                              destroy_targets(gl, &display, &mut failed);
                              destroy_targets(gl, &display, &mut targets);
                              destroy_depth_stencils(gl, &mut depth_stencils);
@@ -1960,7 +2061,19 @@ index 5ab657d..ba2fede 100644
                              return Err(error);
                          }
                      };
-@@ -492,7 +582,6 @@ impl FlutterGlHandler {
+@@ -472,7 +571,10 @@ impl FlutterGlHandler {
+                     // SAFETY: querying the current context's error queue has no
+                     // additional pointer or object-lifetime requirements.
+                     let render_error = unsafe { (gl.get_error)() };
+-                    if target.render_texture == 0
++                    let hdr_scene_valid = target.pq_white <= 0.0
++                        || gl.color_attachment_precision(16, Some(gl::FLOAT));
++                    if !hdr_scene_valid
++                        || target.render_texture == 0
+                         || target.render_framebuffer == 0
+                         || render_status != gl::FRAMEBUFFER_COMPLETE
+                         || render_error != gl::NO_ERROR
+@@ -492,7 +594,6 @@ impl FlutterGlHandler {
                          destroy_targets(gl, &display, &mut failed);
                          destroy_targets(gl, &display, &mut targets);
                          destroy_depth_stencils(gl, &mut depth_stencils);
@@ -1968,7 +2081,7 @@ index 5ab657d..ba2fede 100644
                          return Err("a Flutter offscreen output framebuffer is incomplete".into());
                      }
                  } else {
-@@ -512,7 +601,7 @@ impl FlutterGlHandler {
+@@ -512,7 +613,7 @@ impl FlutterGlHandler {
                  pool.render_view_id,
                  pool.configuration_generation,
                  pool.size,
@@ -1977,7 +2090,7 @@ index 5ab657d..ba2fede 100644
                  framebuffers,
              ));
          }
-@@ -521,7 +610,6 @@ impl FlutterGlHandler {
+@@ -521,7 +622,6 @@ impl FlutterGlHandler {
              Err(error) => {
                  destroy_targets(gl, &display, &mut targets);
                  destroy_depth_stencils(gl, &mut depth_stencils);
@@ -1985,7 +2098,7 @@ index 5ab657d..ba2fede 100644
                  return Err(error);
              }
          };
-@@ -532,15 +620,11 @@ impl FlutterGlHandler {
+@@ -532,15 +632,11 @@ impl FlutterGlHandler {
              (gl.bind_texture)(gl::TEXTURE_2D, 0);
              (gl.bind_renderbuffer)(gl::RENDERBUFFER, 0);
          }
@@ -2002,7 +2115,7 @@ index 5ab657d..ba2fede 100644
              return Err("Flutter presentation needs physical output buffer pools".into());
          }
          let broker = match OutputBufferBroker::new(broker_descriptors.iter().map(
-@@ -550,7 +634,7 @@ impl FlutterGlHandler {
+@@ -550,7 +646,7 @@ impl FlutterGlHandler {
                      render_view_id: *render_view_id,
                      configuration_generation: *configuration_generation,
                      size: *size,
@@ -2011,7 +2124,7 @@ index 5ab657d..ba2fede 100644
                      framebuffers,
                  }
              },
-@@ -559,13 +643,9 @@ impl FlutterGlHandler {
+@@ -559,13 +655,9 @@ impl FlutterGlHandler {
              Err(error) => {
                  // Keep the constructor's new validation path leak-free: GL
                  // targets do not own automatic destructors.
@@ -2025,7 +2138,7 @@ index 5ab657d..ba2fede 100644
                  return Err(error.into());
              }
          };
-@@ -576,75 +656,96 @@ impl FlutterGlHandler {
+@@ -576,75 +668,105 @@ impl FlutterGlHandler {
              render_modifier = ?offscreen_blit.then_some(Modifier::Linear),
              "imported native output pools into Flutter EGL context"
          );
@@ -2058,10 +2171,15 @@ index 5ab657d..ba2fede 100644
 +        size: PixelSize,
 +        generation: u64,
 +        buffers: &[Dmabuf],
++        scenes: &[Dmabuf],
++        color: Option<crate::output_color::OutputColor>,
 +    ) -> denial_flutter_engine::RenderOperationResult {
 +        use denial_flutter_engine::RenderOperationResult::{Busy, Completed, Rejected, Uncertain};
 +        if self.shutdown_started.load(Ordering::Acquire) {
 +            return Uncertain;
++        }
++        if color.is_some_and(|color| color.pq_white > 0.0) && scenes.len() != buffers.len() {
++            return Rejected;
 +        }
 +        if !lock(&self.broker).external_pool_retired()
 +            || self.backing_store_borrows.load(Ordering::Acquire) != 0
@@ -2086,13 +2204,17 @@ index 5ab657d..ba2fede 100644
 +                render_view_id: view,
 +                configuration_generation: configuration,
 +                size,
-+                color: None,
++                color,
 +                selection: PoolSelection::External {
 +                    generation,
 +                    selected: None,
 +                },
 +                transfers: buffers.iter().map(|_| None).collect(),
-+                dmabufs: buffers.iter().map(|b| (b, None)).collect(),
++                dmabufs: buffers
++                    .iter()
++                    .enumerate()
++                    .map(|(index, b)| (b, scenes.get(index)))
++                    .collect(),
 +            }],
 +            self.gl,
 +            true,
@@ -2189,7 +2311,7 @@ index 5ab657d..ba2fede 100644
      }
  
      pub(in crate::flutter_runtime) fn take_ready_frame(
-@@ -707,6 +808,43 @@ impl FlutterGlHandler {
+@@ -707,6 +829,43 @@ impl FlutterGlHandler {
          lock(&self.broker).cancel_authorizations(render_view_ids);
      }
  
@@ -4770,7 +4892,7 @@ index 749caba..df966f4 100644
          }
      }
 diff --git a/compositor/src/bin/deniald/wayland_frontend/text_input.rs b/compositor/src/bin/deniald/wayland_frontend/text_input.rs
-index a8e10cf..efd90fc 100644
+index a8e10cf..1b17e9c 100644
 --- a/compositor/src/bin/deniald/wayland_frontend/text_input.rs
 +++ b/compositor/src/bin/deniald/wayland_frontend/text_input.rs
 @@ -1111,12 +1111,144 @@ fn parse_available_actions(bytes: &[u8]) -> Option<Vec<u32>> {
@@ -5529,7 +5651,7 @@ index c5e5619..c3270a7 100755
    printf 'Installed-Size: %s\n' "$installed_size"
    printf '%s\n' "$denial_control"
 diff --git a/tools/stage-denial-runtime b/tools/stage-denial-runtime
-index abbc992..0a2db41 100755
+index abbc992..ded8083 100755
 --- a/tools/stage-denial-runtime
 +++ b/tools/stage-denial-runtime
 @@ -4,6 +4,9 @@ export LC_ALL=C
@@ -5584,7 +5706,7 @@ index abbc992..0a2db41 100755
      )"
    else
      development_base='0.0.0'
-@@ -88,7 +105,14 @@ else
+@@ -88,9 +105,16 @@ else
    fi
    revision="$(git -C "$ROOT" rev-parse --short=8 HEAD)"
    package_version="$development_base.r$revision_count.g$revision"
@@ -5600,6 +5722,8 @@ index abbc992..0a2db41 100755
 +  # integration-patched checkout is an upstream signed release.
 +  package_version="${REQUESTED_PACKAGE_VERSION:-$package_version}"
  fi
+ 
+ [[ "$package_version" =~ ^[0-9][0-9A-Za-z.+~]*$ ]] \
 @@ -192,7 +216,7 @@ denial_root="$temporary_stage/denial"
  plugin_manager_root="$temporary_stage/denial-plugin-manager"
  install -d -m 0755 "$engine_root" "$denial_root" "$plugin_manager_root"

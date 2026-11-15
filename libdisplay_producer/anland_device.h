@@ -56,7 +56,7 @@ typedef struct anland_device_output {
     char     name[ANLAND_DEVICE_MAX_NAME];
     uint32_t width;        /* logical (consumer native) resolution */
     uint32_t height;
-    uint32_t format;       /* 1 = ABGR8888 (protocol convention) */
+    uint32_t format;       /* consumer HAL layout: 1/2/5 (8-bit), 43 (RGB10A2) */
     uint32_t refresh_mhz;  /* milli-Hz */
     bool     connected;    /* false while consumer absent (fallback) */
     bool     primary;
@@ -258,7 +258,9 @@ int anland_device_get_fb(anland_device *dev, int index, anland_device_fb_t *fb);
 
 /* Additive native-import view: format is DRM fourcc, not the legacy protocol
  * value in get_fb(). Owned fd is always CLOEXEC. Other fields/ownership match
- * get_fb(). Existing consumers retain their original format semantics. */
+ * get_fb(). Existing consumers retain their original format semantics.
+ * HAL 43 maps to ABGR2101010 storage only; a backend must separately validate
+ * its HDR policy and full color pipeline before accepting the app's PQ target. */
 int anland_device_get_drm_fb(anland_device *dev, int index, anland_device_fb_t *fb);
 
 /* Index the consumer selected for the current frame (shm page). Clamped into
