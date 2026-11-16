@@ -15,15 +15,20 @@ import java.util.Collection;
  * start reports no callbacks and needs no {@link #stop}.
  */
 interface InputGrabTransport {
+    int EVENT_STRIDE = 6;
     interface Listener {
-        /** One opened device, before {@link #onReady}. Ranges are raw ABS units. */
+        /** Opened device, initially or on hotplug/state changes. Ranges are raw ABS units. */
         void onDevice(int dev, int cls, int minX, int maxX, int minY, int maxY, int flags);
 
-        /** Device list complete; from here on only events arrive. */
+        /** Range for an advertised EV_ABS axis, following its DEVICE record. */
+        void onAxisRange(int dev, int axis, int min, int max);
+
+        /** Initial setup settled. Hotplug and device-state records may still follow. */
         void onReady(int grabbedCount);
 
         /**
-         * A batch of evdev events as flat {dev, type, code, value} quadruples.
+         * Flat {dev, type, code, value, timeLow, timeHigh} records. The last two
+         * ints contain the evdev timestamp in microseconds, low word first.
          * Batched per SYN_REPORT so a multi-touch frame is applied in one piece.
          */
         void onEvents(int[] batch, int count);

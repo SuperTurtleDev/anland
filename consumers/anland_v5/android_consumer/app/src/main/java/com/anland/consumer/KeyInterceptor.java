@@ -3,7 +3,6 @@ package com.anland.consumer;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -13,8 +12,6 @@ import android.view.accessibility.AccessibilityEvent;
 import java.util.LinkedHashSet;
 
 public class KeyInterceptor extends AccessibilityService {
-    private static final String PREFS_NAME = "anland_settings";
-    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
 
     /**
      * Keys this service consumed, keyed by device as well as key code. A plain

@@ -3,12 +3,14 @@
  *
  * Immersive mode hands the device over to the Linux desktop: the touchscreen,
  * the keyboard and any pointer stop reaching Android entirely and are streamed
- * to the app instead, which replays them onto the remote desktop.
+ * to the app instead, which replays them onto the remote desktop. Controllers
+ * retain their original evdev nodes for desktop games; a root child suppresses
+ * only Android InputReader without a kernel-wide exclusive grab.
  *
  * The app cannot read /dev/input itself (untrusted_app is denied
  * input_device:chr_file), so it launches this helper through `su -c`. The
- * helper opens and EVIOCGRABs the devices in the root context and forwards a
- * fixed-size record stream over a unix socket the app listens on -- the same
+ * helper opens devices in the root context, exclusively grabs non-controllers
+ * and forwards a fixed-size record stream over a unix socket the app listens on -- the same
  * bridge pattern fd_helper.c uses to hand back the daemon connection. It is
  * shipped inside the APK as lib*.so so Android extracts it into the app's
  * nativeLibraryDir with execute permission.
@@ -20,8 +22,10 @@
  *
  *   1. EVIOCGRAB hangs off the open file description, so the kernel drops every
  *      grab as soon as this process dies -- including on SIGKILL.
- *   2. <toggle_scancode> is mandatory and is watched on every device: pressing
- *      it ungrabs and exits, so the user gets out even if the app is wedged.
+ *   2. <toggle_scancode> is mandatory and is watched on every readable device:
+ *      pressing it ungrabs and exits, so the user gets out even if the app is wedged.
+ *      A direct controller without that key is still protected by its lease and
+ *      by the helper socket heartbeat, but is not read as an event source.
  *   3. Records are sent non-blocking and dropped under back-pressure. A stalled
  *      app can therefore never park this process inside send() and stop it from
  *      ever reaching the toggle key -- which is what actually locks a device up.
@@ -39,6 +43,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
@@ -50,6 +55,8 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -73,6 +80,11 @@
 #define MAX_DROPS 2000
 /* Poll slice; also how often the timeout above is re-checked. */
 #define POLL_SLICE_MS 250
+/* One read per device per poll turn. A noisy stick/touchscreen must not starve
+ * another device's escape key, the app heartbeat, or controller lease beats. */
+#define DEVICE_EVENT_BATCH_SIZE 64
+/* Overall ART/Binder setup deadline; lookup no longer starts input dumps. */
+#define GAMEPAD_SETUP_TIMEOUT_MS 15000
 
 #define GOLD_NAME_PREFIX "Gold Keyboardremaps"
 #define GOLD_VENDOR 0xffff
@@ -86,9 +98,48 @@ static int selected_physical_node(const char *path);
 #define TEST_BIT(bit, arr) \
     (((arr)[(bit) / BITS_PER_LONG] >> ((bit) % BITS_PER_LONG)) & 1UL)
 
+/* Android's EventHub keeps one evdev client open per node. EVIOCGRAB cannot be
+ * used to silence it here: a grab would also starve the desktop's own reader of
+ * the bind-mounted node. The kernel can filter a single client's queue instead
+ * (EVIOCSMASK), but that client lives in system_server, so pidfd_getfd() is used
+ * to obtain the same open file description and clear its filter on release. */
+#ifndef EVIOCSMASK
+struct input_mask {
+    uint32_t type;
+    uint32_t codes_size;
+    uint64_t codes_ptr;
+};
+#define EVIOCGMASK _IOR('E', 0x92, struct input_mask)
+#define EVIOCSMASK _IOW('E', 0x93, struct input_mask)
+#endif
+
+/* arm64 generic syscall numbers; the APK only ships arm64-v8a. */
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open 434
+#endif
+#ifndef __NR_pidfd_getfd
+#define __NR_pidfd_getfd 438
+#endif
+
+#define IGRAB_MASK_PATH_MAX 64
+#define IGRAB_MAX_TABLET_RANGES 10
+
+struct tablet_axis_range {
+    int axis;
+    int min;
+    int max;
+};
+
 struct dev_entry {
     int  fd;
     int  cls;        /* IGRAB_CLASS_* */
+    /* Both suppression paths have a restoration child on this heartbeat socket.
+     * Controllers stay ungrabbed so desktop games can open the original node. */
+    int  lease_fd;
+    char mask_path[IGRAB_MASK_PATH_MAX]; /* nonempty for a native mask lease */
+    int  passthrough;
+    long lease_last_beat;
+    long lease_started_at;
     int  grabbed;    /* 0 =>
                         watched only (toggle detection), events not forwarded */
     int  gold;
@@ -99,16 +150,37 @@ struct dev_entry {
     int  power;      /* advertises KEY_POWER or KEY_POWER2 */
     int  power_button; /* a separate built-in, key-only power-button node */
     unsigned int bus; /* bustype: how the device is attached, e.g. USB / Bluetooth */
+    unsigned int vendor, product; /* EVIOCGID identity passed to the Android lease */
     int  multitouch;
     int  clickpad;   /* one button under the pad: BTN_LEFT alone means "a click" */
     int  min_x, max_x, min_y, max_y;
-    char name[80];
+    int  tablet_range_count;
+    struct tablet_axis_range tablet_ranges[IGRAB_MAX_TABLET_RANGES];
+    int  toggle_capable; /* cached: the session toggle key exists on this node */
+    char name[256]; /* full identity, not the shortened discovery/display label */
 };
 
 static struct dev_entry g_devs[IGRAB_MAX_DEVICES];
 static int g_ndevs = 0;
+static int g_gamepad_setup_failed = 0;
+/* Escape-only readers do not consume controlled-device slots or wire records. */
+struct toggle_watch {
+    int fd;
+    char name[80];
+};
+static struct toggle_watch g_toggle_watches[IGRAB_MAX_DEVICES];
+static int g_ntoggle_watches = 0;
 static int g_has_power_button = 0;
 static volatile sig_atomic_t g_quit = 0;
+static const char *g_apk;
+/* Set by main() before device inspection for the live session. */
+static int g_session_toggle = -1;
+static int start_gamepad_lease(struct dev_entry *entry, const char *path);
+static int stop_gamepad_lease(struct dev_entry *entry);
+static int update_gamepad_leases(void);
+static int apply_android_mask(struct dev_entry *entry, const char *path);
+static void stop_android_suppression(struct dev_entry *entry);
+static int revalidate_android_masks(void);
 
 static void on_signal(int sig)
 {
@@ -154,20 +226,487 @@ static int connect_abstract(const char *name)
     return fd;
 }
 
-/* Release every grab and close. Called on every exit path; the kernel would do
- * it anyway when the process dies, but doing it explicitly keeps the window
- * where Android sees no input as short as possible. */
+/* Release grabs and suppression leases before announcing the end. Kernel grabs
+ * disappear on death; shared-client masks instead need their restoration child. */
 static void release_all(void)
 {
     for (int i = 0; i < g_ndevs; i++) {
         if (g_devs[i].fd < 0)
             continue;
+        stop_android_suppression(&g_devs[i]);
         if (g_devs[i].grabbed)
             ioctl(g_devs[i].fd, EVIOCGRAB, 0);
         close(g_devs[i].fd);
         g_devs[i].fd = -1;
     }
     g_ndevs = 0;
+    for (int i = 0; i < g_ntoggle_watches; i++) {
+        if (g_toggle_watches[i].fd >= 0)
+            close(g_toggle_watches[i].fd);
+    }
+    g_ntoggle_watches = 0;
+}
+
+/* Controller passthrough does not use EVIOCGRAB: that ioctl would also
+ * silence every desktop reader of a bind-mounted /dev/input. Each child owns
+ * an Android-only suppression lease and restores it on EOF or missed beats.
+ * There is deliberately no SIGKILL backstop for these restoration workers. */
+static int start_gamepad_lease(struct dev_entry *entry, const char *path)
+{
+    if (!g_apk || g_apk[0] != '/') {
+        LOGE("controller passthrough needs the APK classpath");
+        return -1;
+    }
+    if (!entry->name[0] || entry->vendor > 0xffff || entry->product > 0xffff)
+        return -1;
+    char vendor[5], product[5];
+    snprintf(vendor, sizeof(vendor), "%04x", entry->vendor);
+    snprintf(product, sizeof(product), "%04x", entry->product);
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) < 0)
+        return -1;
+    pid_t child = fork();
+    if (child == 0) {
+        close(pair[0]);
+        if (dup2(pair[1], STDIN_FILENO) < 0 || dup2(pair[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        if (pair[1] > STDERR_FILENO)
+            close(pair[1]);
+        /* Re-read CLOEXEC explicitly: the ordinary helper socket is created
+         * without it and must not survive in the ART child after helper death. */
+        DIR *fds = opendir("/proc/self/fd");
+        if (!fds)
+            _exit(127);
+        struct dirent *ent;
+        while ((ent = readdir(fds)) != NULL) {
+            int inherited = atoi(ent->d_name);
+            if (inherited > STDERR_FILENO)
+                fcntl(inherited, F_SETFD, FD_CLOEXEC);
+        }
+        closedir(fds);
+        if (setenv("CLASSPATH", g_apk, 1) < 0)
+            _exit(127);
+        /* Pass the name as one argv element, never as shell command text. */
+        execl("/system/bin/app_process", "app_process", "/system/bin",
+              "com.anland.consumer.GamepadInputLease", path, entry->name,
+              vendor, product, (char *)NULL);
+        _exit(127);
+    }
+    close(pair[1]);
+    if (child < 0) {
+        close(pair[0]);
+        return -1;
+    }
+    entry->lease_fd = pair[0];
+    entry->lease_last_beat = entry->lease_started_at = now_ms();
+    return 0; // Asynchronous: the main loop still watches escape and heartbeats.
+}
+
+/* Native restorers acknowledge only after restoring the saved masks. Waiting
+ * here also prevents an old restorer from racing a replacement lease on reopen. */
+static int stop_gamepad_lease(struct dev_entry *entry)
+{
+    if (entry->lease_fd < 0)
+        return 0;
+    int fd = entry->lease_fd;
+    int restored = entry->mask_path[0] == '\0';
+    char release = 'R';
+    send(fd, &release, 1, MSG_DONTWAIT | MSG_NOSIGNAL);
+    shutdown(fd, SHUT_WR); // EOF is also a release if the byte could not be sent.
+    long deadline = now_ms() + 1000;
+    while (!restored) {
+        long remaining = deadline - now_ms();
+        if (remaining <= 0)
+            break;
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int ready = poll(&pfd, 1, (int)remaining);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0)
+            break;
+        unsigned char status[16];
+        ssize_t n = recv(fd, status, sizeof(status), MSG_DONTWAIT);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+            continue;
+        if (n <= 0)
+            break;
+        for (ssize_t i = 0; i < n; i++)
+            if (status[i] == 2 || status[i] == 0)
+                restored = 1;
+    }
+    close(fd);
+    entry->lease_fd = -1;
+    entry->mask_path[0] = '\0';
+    entry->passthrough = 0;
+    return restored ? 0 : -1;
+}
+
+static const unsigned int android_mask_types[] = { EV_KEY, EV_ABS, EV_REL, EV_MSC };
+#define ANDROID_MASK_COUNT (sizeof(android_mask_types) / sizeof(android_mask_types[0]))
+struct android_masks {
+    unsigned long codes[ANDROID_MASK_COUNT][NBITS(KEY_CNT)];
+};
+
+static size_t android_mask_bytes(unsigned int type)
+{
+    size_t count;
+    switch (type) {
+    case EV_KEY: count = KEY_CNT; break;
+    case EV_ABS: count = ABS_CNT; break;
+    case EV_REL: count = REL_CNT; break;
+    case EV_MSC: count = MSC_CNT; break;
+    default: return 0;
+    }
+    return sizeof(unsigned long) * ((count + BITS_PER_LONG - 1) / BITS_PER_LONG);
+}
+
+static int android_mask_ioctl(int fd, unsigned long request, size_t index,
+                              unsigned long *codes)
+{
+    struct input_mask mask = {
+        .type = android_mask_types[index],
+        .codes_size = (uint32_t)android_mask_bytes(android_mask_types[index]),
+        .codes_ptr = (uint64_t)(uintptr_t)codes,
+    };
+    int result;
+    do {
+        result = ioctl(fd, request, &mask);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+/* Query the CURRENT Android client. A same-number reopen has the same symlink
+ * but a new, unfiltered client. */
+static int android_client_masked(int fd)
+{
+    unsigned long codes[NBITS(KEY_CNT)];
+    for (size_t i = 0; i < ANDROID_MASK_COUNT; i++) {
+        memset(codes, 0, sizeof(codes));
+        if (android_mask_ioctl(fd, EVIOCGMASK, i, codes) < 0)
+            return -1;
+        size_t words = android_mask_bytes(android_mask_types[i]) / sizeof(codes[0]);
+        for (size_t word = 0; word < words; word++)
+            if (codes[word] != 0)
+                return 0;
+    }
+    return 1;
+}
+
+/* Exec strips the session's igrabtoken from argv, so emergency pkill targets
+ * only the main helper. This child saves all masks BEFORE changing anything,
+ * then restores on release, EOF, missed beats or SIGTERM. */
+static int run_android_mask_lease(int fd)
+{
+    struct android_masks saved;
+    memset(&saved, 0, sizeof(saved));
+    size_t changed = 0;
+    int active = 0;
+    for (size_t i = 0; i < ANDROID_MASK_COUNT; i++) {
+        if (android_mask_ioctl(fd, EVIOCGMASK, i, saved.codes[i]) < 0)
+            goto restore;
+    }
+    for (size_t i = 0; i < ANDROID_MASK_COUNT; i++) {
+        unsigned long empty[NBITS(KEY_CNT)] = {0};
+        if (g_quit || android_mask_ioctl(fd, EVIOCSMASK, i, empty) < 0)
+            goto restore;
+        changed = i + 1; // evdev replaces each mask atomically; roll back successful writes.
+    }
+    unsigned char status = 1;
+    if (send(STDIN_FILENO, &status, 1, MSG_NOSIGNAL) != 1)
+        goto restore;
+    active = 1;
+    long last_beat = now_ms();
+    while (!g_quit && now_ms() - last_beat < HEARTBEAT_TIMEOUT_MS) {
+        struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+        int ready = poll(&pfd, 1, POLL_SLICE_MS);
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+            break;
+        if (!(pfd.revents & POLLIN))
+            continue;
+        char beats[64];
+        ssize_t n = recv(STDIN_FILENO, beats, sizeof(beats), MSG_DONTWAIT);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+            continue;
+        if (n <= 0)
+            break;
+        last_beat = now_ms();
+        if (memchr(beats, 'R', (size_t)n))
+            break;
+    }
+
+restore:
+    /* Restore every changed type, including after a setup failure. Keep this
+     * backstop alive on transient errors rather than discard the only snapshot. */
+    for (size_t i = 0; i < changed; i++) {
+        while (android_mask_ioctl(fd, EVIOCSMASK, i, saved.codes[i]) < 0) {
+            if (errno == ENODEV)
+                break;
+            LOGE("Android mask restore type=%u failed: %s; retrying",
+                 android_mask_types[i], strerror(errno));
+            poll(NULL, 0, POLL_SLICE_MS);
+        }
+    }
+    unsigned char restored = active ? 2 : 0;
+    send(STDIN_FILENO, &restored, 1, MSG_NOSIGNAL);
+    close(fd);
+    return active ? 0 : 1;
+}
+
+static pid_t find_system_server(void)
+{
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        return -1;
+    pid_t found = -1;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+            continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", ent->d_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        char cmd[32];
+        ssize_t n = read(fd, cmd, sizeof(cmd) - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        cmd[n] = '\0';
+        if (strncmp(cmd, "system_server", sizeof("system_server") - 1) == 0) {
+            found = (pid_t)atoi(ent->d_name);
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
+/* Duplicate system_server's evdev client for @path: a second descriptor on the
+ * very same open file description, without attaching to the process. */
+static int duplicate_android_client(pid_t pid, const char *path)
+{
+    char dirpath[64];
+    snprintf(dirpath, sizeof(dirpath), "/proc/%d/fd", pid);
+    DIR *dir = opendir(dirpath);
+    if (!dir)
+        return -1;
+    int pidfd = (int)syscall(__NR_pidfd_open, pid, 0);
+    if (pidfd < 0) {
+        closedir(dir);
+        return -1;
+    }
+    int duplicate = -1;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+            continue;
+        char link[64];
+        snprintf(link, sizeof(link), "%s/%s", dirpath, ent->d_name);
+        char target[PATH_MAX];
+        ssize_t n = readlink(link, target, sizeof(target) - 1);
+        if (n <= 0)
+            continue;
+        target[n] = '\0';
+        if (strcmp(target, path) != 0)
+            continue;
+        int duplicate_fd = (int)syscall(__NR_pidfd_getfd, pidfd, atoi(ent->d_name), 0);
+        if (duplicate_fd < 0)
+            continue;
+        duplicate = duplicate_fd;
+        break;
+    }
+    closedir(dir);
+    close(pidfd);
+    return duplicate;
+}
+
+static int apply_android_mask(struct dev_entry *entry, const char *path)
+{
+    pid_t pid = find_system_server();
+    int fd = pid > 0 ? duplicate_android_client(pid, path) : -1;
+    if (fd < 0) {
+        LOGE("controller '%s': no Android evdev client for %s", entry->name, path);
+        return -1;
+    }
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) < 0) {
+        close(fd);
+        return -1;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        close(pair[0]);
+        if (dup2(pair[1], STDIN_FILENO) < 0)
+            _exit(127);
+        if (pair[1] != STDIN_FILENO)
+            close(pair[1]);
+        DIR *fds = opendir("/proc/self/fd");
+        if (!fds)
+            _exit(127);
+        struct dirent *ent;
+        while ((ent = readdir(fds)) != NULL) {
+            int inherited = atoi(ent->d_name);
+            if (inherited > STDERR_FILENO && inherited != fd
+                    && fcntl(inherited, F_SETFD, FD_CLOEXEC) < 0)
+                _exit(127);
+        }
+        closedir(fds);
+        if (fcntl(fd, F_SETFD, 0) < 0 || fcntl(STDIN_FILENO, F_SETFD, 0) < 0)
+            _exit(127);
+        char fdarg[16];
+        snprintf(fdarg, sizeof(fdarg), "%d", fd);
+        execl("/proc/self/exe", "inputgrab-mask-lease", "--android-mask-lease",
+              fdarg, (char *)NULL);
+        _exit(127);
+    }
+    close(fd);
+    close(pair[1]);
+    if (child < 0) {
+        close(pair[0]);
+        return -1;
+    }
+    entry->lease_fd = pair[0];
+    entry->lease_last_beat = entry->lease_started_at = now_ms();
+    snprintf(entry->mask_path, sizeof(entry->mask_path), "%s", path);
+    return 0; // The restorer confirms only after all masks were installed.
+}
+
+static void stop_android_suppression(struct dev_entry *entry)
+{
+    if (stop_gamepad_lease(entry) < 0)
+        LOGE("controller '%s': mask restoration still pending in child", entry->name);
+}
+
+/* Re-duplicate and inspect the current client, even if its fd number and node
+ * path have not changed. Stop the old restorer before acquiring a new lease. */
+static int revalidate_android_masks(void)
+{
+    for (int i = 0; i < g_ndevs; i++) {
+        struct dev_entry *entry = &g_devs[i];
+        if (entry->fd < 0 || entry->lease_fd < 0 || !entry->passthrough
+                || !entry->mask_path[0])
+            continue;
+        pid_t pid = find_system_server();
+        int fd = pid > 0 ? duplicate_android_client(pid, entry->mask_path) : -1;
+        if (fd < 0)
+            return -1;
+        int masked = android_client_masked(fd);
+        close(fd);
+        if (masked < 0) {
+            LOGE("controller '%s': cannot verify the current Android mask", entry->name);
+            return -1;
+        }
+        if (masked == 1)
+            continue;
+        LOGI("controller '%s': Android client changed; renewing suppression", entry->name);
+        char path[IGRAB_MASK_PATH_MAX];
+        snprintf(path, sizeof(path), "%s", entry->mask_path);
+        if (stop_gamepad_lease(entry) < 0)
+            return -1;
+        if (apply_android_mask(entry, path) < 0 && start_gamepad_lease(entry, path) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* A selected controller must acquire AND retain Android suppression. Neither
+ * setup failure nor lease loss may degrade into a supposedly immersive session
+ * that only owns the touchscreen while Android still receives controller Home. */
+static int update_gamepad_leases(void)
+{
+    int lost = 0;
+    for (int i = 0; i < g_ndevs; i++) {
+        struct dev_entry *entry = &g_devs[i];
+        if (entry->fd < 0 || entry->lease_fd < 0)
+            continue;
+        char status[16];
+        ssize_t count = recv(entry->lease_fd, status, sizeof(status), MSG_DONTWAIT);
+        int failed = count == 0 || (count < 0 && errno != EAGAIN
+                && errno != EWOULDBLOCK && errno != EINTR);
+        int mask_failed = count == 1 && status[0] == 0 && entry->mask_path[0]
+                && !entry->passthrough;
+        if (count > 0) {
+            for (ssize_t n = 0; n < count; n++) {
+                if (status[n] != 1 && !(mask_failed && n == 0))
+                    failed = 1;
+            }
+        }
+        if (!failed && mask_failed) {
+            // The native child confirms failure only AFTER complete rollback.
+            char path[IGRAB_MASK_PATH_MAX];
+            snprintf(path, sizeof(path), "%s", entry->mask_path);
+            close(entry->lease_fd);
+            entry->lease_fd = -1;
+            entry->mask_path[0] = 0;
+            if (start_gamepad_lease(entry, path) == 0)
+                continue;
+            failed = 1;
+        }
+        if (!failed && count > 0 && !entry->passthrough) {
+            entry->passthrough = 1;
+            entry->announced = 0;
+            LOGI("controller '%s': Android suppressed (%s), desktop evdev direct",
+                 entry->name, entry->mask_path[0] ? "evdev mask" : "InputReader lease");
+        }
+        if (!failed && now_ms() - entry->lease_last_beat >= 1000) {
+            char beat = 'H';
+            ssize_t sent = send(entry->lease_fd, &beat, 1, MSG_DONTWAIT | MSG_NOSIGNAL);
+            if (sent == 1)
+                entry->lease_last_beat = now_ms();
+            else if (sent == 0 || (sent < 0 && errno != EAGAIN
+                    && errno != EWOULDBLOCK && errno != EINTR))
+                failed = 1;
+        }
+        if (!entry->passthrough && now_ms() - entry->lease_started_at > GAMEPAD_SETUP_TIMEOUT_MS)
+            failed = 1;
+        if (failed) {
+            if (entry->passthrough) {
+                LOGE("controller '%s': suppression lease lost; ending immersive session",
+                     entry->name);
+            } else {
+                LOGE("controller '%s': Android suppression unavailable during setup; ending immersive session",
+                     entry->name);
+                g_gamepad_setup_failed = 1;
+            }
+            lost = 1;
+            stop_android_suppression(entry);
+            entry->watch_only = 1;
+            entry->announced = 0;
+        }
+    }
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        // Reap only finished lease children; never wait on the escape-key path.
+    }
+    return lost ? -1 : 0;
+}
+
+static int pending_gamepad_leases(void)
+{
+    for (int i = 0; i < g_ndevs; i++)
+        if (g_devs[i].fd >= 0 && g_devs[i].lease_fd >= 0 && !g_devs[i].passthrough)
+            return 1;
+    return 0;
+}
+
+static int device_is_live(const struct dev_entry *entry)
+{
+    return entry->fd >= 0
+            && (entry->grabbed || entry->passthrough || entry->lease_fd >= 0);
+}
+
+static int controlled_device_count(void)
+{
+    int count = 0;
+    for (int i = 0; i < g_ndevs; i++)
+        if (g_devs[i].fd >= 0 && (g_devs[i].grabbed || g_devs[i].passthrough))
+            count++;
+    return count;
 }
 
 static int pending_gold(void)
@@ -176,6 +715,11 @@ static int pending_gold(void)
         if (g_devs[i].fd >= 0 && g_devs[i].waiting_idle)
             return 1;
     return 0;
+}
+
+static int pending_setup(void)
+{
+    return pending_gamepad_leases() || pending_gold();
 }
 
 static int has_gold_output(void)
@@ -337,6 +881,18 @@ static int any_key_bit(const unsigned long *key)
     return 0;
 }
 
+/* Buttons, not ABS_X/Y, distinguish controllers from touch and sensors. */
+static int has_gamepad_keys(const unsigned long *key)
+{
+    for (int code = BTN_JOYSTICK; code < BTN_DIGI; code++)
+        if (TEST_BIT(code, key))
+            return 1;
+    for (int code = BTN_DPAD_UP; code <= BTN_DPAD_RIGHT; code++)
+        if (TEST_BIT(code, key))
+            return 1;
+    return 0;
+}
+
 /* Full keyboards may advertise KEY_POWER alongside their ordinary keys. */
 static int has_alpha_keys(const unsigned long *key)
 {
@@ -427,6 +983,23 @@ static void read_abs_range(int fd, const char *path, int axis, int *min, int *ma
     *max = info.maximum;
 }
 
+static void read_tablet_axis_range(int fd, unsigned long *abs, int axis,
+                                   struct dev_entry *entry)
+{
+    if (entry->tablet_range_count >= IGRAB_MAX_TABLET_RANGES
+            || !TEST_BIT(axis, abs))
+        return;
+    struct input_absinfo info;
+    if (query_input(fd, EVIOCGABS(axis), &info) < 0
+            || info.maximum <= info.minimum)
+        return;
+    struct tablet_axis_range *range =
+            &entry->tablet_ranges[entry->tablet_range_count++];
+    range->axis = axis;
+    range->min = info.minimum;
+    range->max = info.maximum;
+}
+
 static int is_builtin_bus(unsigned int bus)
 {
     return bus == 0 || bus == BUS_HOST || bus == BUS_I8042
@@ -490,7 +1063,11 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
 
     memset(out, 0, sizeof(*out));
     out->fd = fd;
-    if (query_input(fd, EVIOCGNAME(sizeof(out->name)), out->name) < 0)
+    out->lease_fd = -1;
+    int name_result = query_input(fd, EVIOCGNAME(sizeof(out->name)), out->name);
+    int have_name = name_result >= 0 && out->name[0]
+            && name_result < (int)sizeof(out->name);
+    if (name_result < 0)
         out->name[0] = '\0';
     out->name[sizeof(out->name) - 1] = '\0';
 
@@ -505,6 +1082,7 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
             || TEST_BIT(BTN_TOOL_RUBBER, key);
     int finger  = TEST_BIT(BTN_TOOL_FINGER, key);
     int alpha   = has_alpha_keys(key);
+    int gamepad = has_gamepad_keys(key);
     int power   = has_power_key(key);
     out->alpha = alpha;
     out->power = power;
@@ -514,8 +1092,11 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
      * one they are actually typing on. */
     struct input_id id;
     int have_id = query_input(fd, EVIOCGID, &id) == 0;
-    if (have_id)
+    if (have_id) {
         out->bus = id.bustype;
+        out->vendor = id.vendor;
+        out->product = id.product;
+    }
     out->gold = have_id && id.vendor == GOLD_VENDOR && id.product == GOLD_PRODUCT &&
             strncmp(out->name, GOLD_NAME_PREFIX, sizeof(GOLD_NAME_PREFIX) - 1) == 0;
     if (out->gold && g_source == SOURCE_PHYSICAL) {
@@ -528,7 +1109,7 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
 
     /* Skip a pen-only digitizer, but keep nodes that also carry finger contacts.
      * Shared pen/touch nodes are decoded by tool type on the app side. */
-    if (pen && !mt && !finger) {
+    if (pen && !mt && !finger && !gamepad) {
         close(fd);
         return -1;
     }
@@ -537,7 +1118,9 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
      * must not be mistaken for a finger. */
     int contacts = mt || (abs_xy && (direct || pointer || touch || finger));
 
-    if (contacts) {
+    if (gamepad) {
+        out->cls = IGRAB_CLASS_GAMEPAD;
+    } else if (contacts) {
         /* The property bits say it outright when they are set. Panels that set
          * neither are told apart by the clickpad button: a touchscreen has no
          * BTN_LEFT, an integrated pad almost always does. */
@@ -556,7 +1139,15 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
         return -1;
     }
 
+    if (rel_xy) {
+        int clock_id = CLOCK_MONOTONIC;
+        if (query_input(fd, EVIOCSCLOCKID, &clock_id) < 0)
+            LOGE("%s: monotonic mouse timestamps unavailable: %s; using device clock",
+                 path, strerror(errno));
+    }
     out->multitouch = mt;
+    out->toggle_capable = g_session_toggle > 0 && g_session_toggle <= KEY_MAX
+            && TEST_BIT(g_session_toggle, key);
     /* A clickpad has one button under the whole surface, so every press comes in
      * as BTN_LEFT and the app has to work out left vs right from where the
      * finger is. INPUT_PROP_BUTTONPAD is the authoritative bit; a pad that
@@ -579,6 +1170,16 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
             close(fd);
             return -1;
         }
+        read_tablet_axis_range(fd, abs, ABS_PRESSURE, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_PRESSURE, out);
+        read_tablet_axis_range(fd, abs, ABS_TILT_X, out);
+        read_tablet_axis_range(fd, abs, ABS_TILT_Y, out);
+        read_tablet_axis_range(fd, abs, ABS_DISTANCE, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_DISTANCE, out);
+        read_tablet_axis_range(fd, abs, ABS_X, out);
+        read_tablet_axis_range(fd, abs, ABS_Y, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_POSITION_X, out);
+        read_tablet_axis_range(fd, abs, ABS_MT_POSITION_Y, out);
     }
 
     /* Some panels advertise KEY_POWER for screen-off gestures. That does not
@@ -601,6 +1202,26 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
         /* Enumeration or a protected node. The caller owns this fd, but Android
          * keeps receiving its events. */
         out->grabbed = 0;
+        return 0;
+    }
+
+    if (out->cls == IGRAB_CLASS_GAMEPAD) {
+        if (!have_id || !have_name) {
+            LOGE("controller %s: missing/truncated evdev identity; ending immersive session", path);
+            g_gamepad_setup_failed = 1;
+            close(fd);
+            return -1;
+        }
+        /* Never EVIOCGRAB a node shared directly with desktop games. A masked
+         * Android client keeps the raw node readable for the desktop; the
+         * disable-only lease remains the fallback for kernels without masks. */
+        if (apply_android_mask(out, path) < 0 && start_gamepad_lease(out, path) < 0) {
+            LOGE("controller '%s': could not suppress Android; ending immersive session",
+                 out->name);
+            g_gamepad_setup_failed = 1;
+            close(fd);
+            return -1;
+        }
         return 0;
     }
 
@@ -742,7 +1363,8 @@ static void refresh_power_button(void)
 /*
  * Whether a node belongs in the session. Excluded nodes are never opened or
  * inspected, including by the power-button probe. Unselected nodes may be
- * probed but are never grabbed, announced or assigned a device slot.
+ * probed but are never grabbed, announced or assigned a controlled-device slot.
+ * A separate read-only escape watcher may retain a non-excluded unselected node.
  *
  * An empty selection means "auto" -- take whatever is capable, as before.
  */
@@ -796,6 +1418,7 @@ static void drop_inspected(struct dev_entry *entry)
 {
     if (entry->fd < 0)
         return;
+    stop_android_suppression(entry);
     if (entry->grabbed)
         ioctl(entry->fd, EVIOCGRAB, 0);
     close(entry->fd);
@@ -883,13 +1506,14 @@ static int scan_devices(void)
             continue;
         }
         LOGI("%s '%s' class=%d %s", path, g_devs[g_ndevs].name,
-             g_devs[g_ndevs].cls, g_devs[g_ndevs].grabbed ? "GRABBED" : "watch-only");
-        if (g_devs[g_ndevs].grabbed)
+             g_devs[g_ndevs].cls, g_devs[g_ndevs].grabbed ? "GRABBED" :
+             (g_devs[g_ndevs].lease_fd >= 0 ? "controller suppression pending" : "watch-only"));
+        if (device_is_live(&g_devs[g_ndevs]))
             grabbed++;
         g_ndevs++;
     }
     closedir(dir);
-    return grabbed;
+    return g_gamepad_setup_failed ? -1 : grabbed;
 }
 
 /* ---------------- mid-session device hotplug ---------------- */
@@ -931,8 +1555,46 @@ static void fill_device_record(struct igrab_rec *rec, int idx)
     rec->aux[IGRAB_AUX_MAX_Y] = de->max_y;
     rec->aux[IGRAB_AUX_FLAGS] =
         (de->grabbed ? IGRAB_DEV_GRABBED : 0) |
+        (de->passthrough ? IGRAB_DEV_PASSTHROUGH : 0) |
         (de->multitouch ? IGRAB_DEV_MULTITOUCH : 0) |
         (de->clickpad ? IGRAB_DEV_CLICKPAD : 0);
+}
+
+static void fill_axis_range_record(struct igrab_rec *rec, int idx,
+                                   const struct tablet_axis_range *range)
+{
+    memset(rec, 0, sizeof(*rec));
+    rec->rtype = IGRAB_REC_AXIS_RANGE;
+    rec->dev = (uint16_t)idx;
+    rec->code = (uint16_t)range->axis;
+    rec->value = range->min;
+    rec->aux[0] = range->max;
+}
+
+static int send_axis_ranges(int sock, int idx)
+{
+    const struct dev_entry *de = &g_devs[idx];
+    for (int i = 0; i < de->tablet_range_count; i++) {
+        struct igrab_rec rec;
+        fill_axis_range_record(&rec, idx, &de->tablet_ranges[i]);
+        if (send_rec(sock, &rec) < 0)
+            return -1;
+        if (g_pending_len != 0 || g_need_resync)
+            return 0;
+    }
+    return 1;
+}
+
+static int send_axis_ranges_blocking(int sock, int idx)
+{
+    const struct dev_entry *de = &g_devs[idx];
+    for (int i = 0; i < de->tablet_range_count; i++) {
+        struct igrab_rec rec;
+        fill_axis_range_record(&rec, idx, &de->tablet_ranges[i]);
+        if (send_all(sock, &rec, sizeof(rec)) < 0)
+            return -1;
+    }
+    return 0;
 }
 
 /* Reuse a detached device id before growing the table. The Java side only sees
@@ -967,6 +1629,9 @@ static int announce_pending_devices(int sock)
             return -1;
         if (g_pending_len != 0 || g_need_resync)
             return 0;
+        int ranges = send_axis_ranges(sock, i);
+        if (ranges <= 0)
+            return ranges;
         g_devs[i].announced = 1;
         LOGI("announced device %d '%s'", i, g_devs[i].name);
     }
@@ -1038,14 +1703,103 @@ static int scan_new_devices(void)
         if (idx == g_ndevs)
             g_ndevs++;
         LOGI("new device %s '%s' class=%d %s", path, de.name, de.cls,
-             de.grabbed ? "GRABBED (awaiting DEVICE)" : "watch-only (awaiting DEVICE)");
+             de.grabbed ? "GRABBED (awaiting DEVICE)" :
+             (de.lease_fd >= 0 ? "controller suppression pending" : "watch-only (awaiting DEVICE)"));
     }
     closedir(dir);
+    return g_gamepad_setup_failed ? -1 : 0;
+}
+/* A bound system/volume key can live on a node deliberately omitted from the
+ * capture selection. Watch just that key without grabbing, suppressing Android,
+ * forwarding events, or expanding the selected-device protocol table. Excluded
+ * Gold nodes are never opened. This applies to initial setup and hotplug alike. */
+static int already_toggle_watched(int rdev)
+{
+    for (int i = 0; i < g_ntoggle_watches; i++) {
+        struct stat st;
+        if (g_toggle_watches[i].fd >= 0 &&
+                fstat(g_toggle_watches[i].fd, &st) == 0 && (int)st.st_rdev == rdev)
+            return 1;
+    }
     return 0;
 }
-
+static void drop_toggle_watch(int idx)
+{
+    if (g_toggle_watches[idx].fd >= 0) {
+        close(g_toggle_watches[idx].fd);
+        g_toggle_watches[idx].fd = -1;
+    }
+}
+static void scan_toggle_devices(int toggle)
+{
+    if (toggle <= 0 || toggle > KEY_MAX)
+        return; /* Gold may run without a binding. Never watch arbitrary keys. */
+    for (int i = 0; i < g_ntoggle_watches; i++) {
+        struct stat st;
+        int fd = g_toggle_watches[i].fd;
+        if (fd >= 0 && (fstat(fd, &st) < 0 || already_tracked((int)st.st_rdev)))
+            drop_toggle_watch(i);
+    }
+    DIR *dir = opendir("/dev/input");
+    if (!dir)
+        return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (!valid_node_name(ent->d_name, 0) ||
+                node_list_contains(&g_excluded, ent->d_name))
+            continue;
+        char path[300];
+        snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+        int rdev = node_identity(path);
+        if (rdev < 0 || already_tracked(rdev) || already_toggle_watched(rdev))
+            continue;
+        int idx = 0;
+        while (idx < g_ntoggle_watches && g_toggle_watches[idx].fd >= 0)
+            idx++;
+        if (idx == IGRAB_MAX_DEVICES)
+            break;
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        unsigned long keys[NBITS(KEY_MAX + 1)] = {0};
+        if (query_input(fd, EVIOCGBIT(EV_KEY, sizeof(keys)), keys) < 0 ||
+                !TEST_BIT(toggle, keys)) {
+            close(fd);
+            continue;
+        }
+        struct toggle_watch *watch = &g_toggle_watches[idx];
+        watch->fd = fd;
+        if (query_input(fd, EVIOCGNAME(sizeof(watch->name)), watch->name) < 0)
+            watch->name[0] = '\0';
+        watch->name[sizeof(watch->name) - 1] = '\0';
+        if (idx == g_ntoggle_watches)
+            g_ntoggle_watches++;
+        LOGI("exit-key watch %s '%s' scancode=%d (read-only)", path, watch->name, toggle);
+    }
+    closedir(dir);
+}
+static int pump_toggle_watch(int idx, int toggle)
+{
+    struct input_event evs[DEVICE_EVENT_BATCH_SIZE];
+    ssize_t n = read(g_toggle_watches[idx].fd, evs, sizeof(evs));
+    if (n < 0)
+        return errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK ? 1 : -2;
+    if (n == 0)
+        return -2;
+    int count = (int)(n / (ssize_t)sizeof(struct input_event));
+    for (int i = 0; i < count; i++) {
+        if (evs[i].type == EV_KEY && evs[i].code == toggle && evs[i].value == 1) {
+            LOGI("immersive exit key: read-only '%s' scancode=%d",
+                 g_toggle_watches[idx].name, toggle);
+            return 0;
+        }
+    }
+    return 1;
+}
 static int send_device_list(int sock, int grabbed)
 {
+    if (g_gamepad_setup_failed)
+        return -1; /* Never send READY after a synchronous controller failure. */
     struct igrab_rec rec;
 
     memset(&rec, 0, sizeof(rec));
@@ -1060,104 +1814,131 @@ static int send_device_list(int sock, int grabbed)
         fill_device_record(&rec, i);
         if (send_all(sock, &rec, sizeof(rec)) < 0)
             return -1;
+        if (send_axis_ranges_blocking(sock, i) < 0)
+            return -1;
         g_devs[i].announced = 1;
     }
 
+    if (pending_setup())
+        return 0; // READY requires Android suppression and the Gold output grab.
     memset(&rec, 0, sizeof(rec));
     rec.rtype = IGRAB_REC_READY;
-    rec.aux[0] = grabbed;
+    rec.aux[0] = controlled_device_count();
     return send_all(sock, &rec, sizeof(rec));
 }
 
 /* ---------------- main loop ---------------- */
 
 /*
- * Drain one device. Returns 1 to keep going, 0 when the toggle key was pressed
- * and the session must end, -1 when the socket died.
+ * Read at most one batch from a device so continuous input cannot monopolize
+ * the helper. Returns 1 to keep going, 0 for the toggle key, -1 for socket loss,
+ * -2 for a detached node, and -3 when the app is not reading.
  */
 static int pump_device(int sock, int idx, int toggle)
 {
-    struct input_event evs[64];
-    for (;;) {
-        ssize_t n = read(g_devs[idx].fd, evs, sizeof(evs));
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return 1;   /* drained */
-            return -2;      /* ENODEV: the device was unplugged */
+    if (g_devs[idx].cls == IGRAB_CLASS_GAMEPAD && !g_devs[idx].toggle_capable)
+        return 1; /* The main poll still watches this fd for detach errors. */
+
+    struct input_event evs[DEVICE_EVENT_BATCH_SIZE];
+    ssize_t n = read(g_devs[idx].fd, evs, sizeof(evs));
+    if (n < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            return 1;   /* interrupted or drained; let the main loop run */
+        return -2;      /* ENODEV: the device was unplugged */
+    }
+    if (n == 0)
+        return -2;      /* would otherwise spin: poll keeps reporting POLLIN */
+
+    if (g_devs[idx].waiting_idle) {
+        int ready = grab_idle_gold(&g_devs[idx]);
+        if (ready < 0)
+            return -2;
+        if (ready > 0)
+            g_devs[idx].announced = 0;
+        return 1; /* this batch belonged to Android before the grab */
+    }
+
+    int count = (int)(n / (ssize_t)sizeof(struct input_event));
+    for (int i = 0; i < count; i++) {
+        struct input_event *e = &evs[i];
+
+        if (e->type == EV_KEY && e->code == toggle) {
+            /* Check before forwarding or the grabbed test: watched controllers
+             * must also exit without Android KeyEvents. Forwarded devices swallow
+             * this key; a direct desktop evdev reader still sees its own copy. */
+            if (e->value == 1) {
+                LOGI("immersive exit key: device=%d scancode=%d", idx, toggle);
+                return 0;
+            }
+            continue;
         }
-        if (n == 0)
-            return -2;      /* would otherwise spin: poll keeps reporting POLLIN */
 
-        if (g_devs[idx].waiting_idle) {
-            int ready = grab_idle_gold(&g_devs[idx]);
-            if (ready < 0)
-                return -2;
-            if (ready > 0)
-                g_devs[idx].announced = 0;
-            return 1; /* this batch belonged to Android before the grab */
+        if (!g_devs[idx].grabbed)
+            continue;   /* Desktop reads controllers directly; watch-only stays on Android. */
+
+        /* A hotplugged node stays silent until the Java side has its DEVICE
+         * descriptor. Discarding a transition here requires a global reset:
+         * otherwise its first delivered record could be a KEY_UP for a key
+         * the desktop never saw go down. */
+        if (!g_devs[idx].announced) {
+            g_need_resync = 1;
+            continue;
         }
 
-        int count = (int)(n / (ssize_t)sizeof(struct input_event));
-        for (int i = 0; i < count; i++) {
-            struct input_event *e = &evs[i];
-
-            if (e->type == EV_KEY && e->code == toggle) {
-                /* Press ends the session; the release and any auto-repeat are
-                 * swallowed so the key never reaches the desktop. Checked before
-                 * the grabbed test so a watch-only node can still trigger it. */
-                if (e->value == 1)
-                    return 0;
-                continue;
-            }
-
-            if (!g_devs[idx].grabbed)
-                continue;   /* Android still owns it; forwarding would duplicate */
-
-            /* A hotplugged node stays silent until the Java side has its DEVICE
-             * descriptor. Discarding a transition here requires a global reset:
-             * otherwise its first delivered record could be a KEY_UP for a key
-             * the desktop never saw go down. */
-            if (!g_devs[idx].announced) {
-                g_need_resync = 1;
-                continue;
-            }
-
-            int ready = recover_output(sock);
-            if (ready < 0)
-                return -1;
-            if (ready == 0) {
-                g_drops++;
-                g_need_resync = 1;
-                if (g_drops > MAX_DROPS) {
-                    LOGE("app is not reading (%d dropped records); giving input back",
-                         g_drops);
-                    return -3;
-                }
-                continue;
-            }
-
-            struct igrab_rec rec;
-            memset(&rec, 0, sizeof(rec));
-            rec.rtype = IGRAB_REC_EVENT;
-            rec.dev   = (uint16_t)idx;
-            rec.etype = e->type;
-            rec.code  = e->code;
-            rec.value = e->value;
-            if (send_rec(sock, &rec) < 0)
-                return -1;
+        int ready = recover_output(sock);
+        if (ready < 0)
+            return -1;
+        if (ready == 0) {
+            g_drops++;
+            g_need_resync = 1;
             if (g_drops > MAX_DROPS) {
                 LOGE("app is not reading (%d dropped records); giving input back",
                      g_drops);
                 return -3;
             }
+            continue;
+        }
+
+        struct igrab_rec rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.rtype = IGRAB_REC_EVENT;
+        rec.dev   = (uint16_t)idx;
+        rec.etype = e->type;
+        rec.code  = e->code;
+        rec.value = e->value;
+        uint64_t event_us = (uint64_t)e->time.tv_sec * 1000000ULL + e->time.tv_usec;
+        rec.aux[IGRAB_EVENT_TIME_LO] = (int32_t)(uint32_t)event_us;
+        rec.aux[IGRAB_EVENT_TIME_HI] = (int32_t)(event_us >> 32);
+        if (send_rec(sock, &rec) < 0)
+            return -1;
+        if (g_drops > MAX_DROPS) {
+            LOGE("app is not reading (%d dropped records); giving input back",
+                 g_drops);
+            return -3;
         }
     }
+    return 1; /* More queued input is handled on the next poll turn. */
+}
+
+static int should_poll_device_events(const struct dev_entry *entry)
+{
+    return entry->cls != IGRAB_CLASS_GAMEPAD || entry->toggle_capable;
 }
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "--android-mask-lease") == 0) {
+        char *end;
+        long fd = strtol(argv[2], &end, 10);
+        if (!argv[2][0] || *end || fd <= STDERR_FILENO || fd > INT_MAX)
+            return 2;
+        signal(SIGPIPE, SIG_IGN);
+        signal(SIGTERM, on_signal);
+        signal(SIGINT, on_signal);
+        signal(SIGHUP, on_signal);
+        return run_android_mask_lease((int)fd);
+    }
+
     /* Enumeration mode: no socket, no toggle, and nothing grabbed. Used by
      * Settings, which has to list every node without disturbing a session. */
     if (argc >= 2 && strcmp(argv[1], "--list") == 0)
@@ -1187,6 +1968,8 @@ int main(int argc, char **argv)
                 LOGE("refusing invalid exclude argument: %s", argv[i] + 8);
                 return 2;
             }
+        } else if (strncmp(argv[i], "apk=", 4) == 0) {
+            g_apk = argv[i] + 4;
         } else if (strncmp(argv[i], "source=", 7) == 0) {
             if (strcmp(argv[i] + 7, "gold") == 0)
                 g_source = SOURCE_GOLD;
@@ -1206,6 +1989,7 @@ int main(int argc, char **argv)
         LOGE("refusing invalid toggle scancode (%d)", toggle);
         return 2;
     }
+    g_session_toggle = toggle;
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, on_signal);
@@ -1227,28 +2011,36 @@ int main(int argc, char **argv)
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     int grabbed = scan_devices();
+    if (g_gamepad_setup_failed) {
+        release_all();
+        send_bye(sock, IGRAB_BYE_CONTROLLER);
+        close(sock);
+        return 4;
+    }
     if ((grabbed <= 0 && !pending_gold()) ||
             (g_source != SOURCE_PHYSICAL && !has_gold_output())) {
         LOGE("no grabbable input devices");
-        send_bye(sock, IGRAB_BYE_ERROR);
         release_all();
+        send_bye(sock, IGRAB_BYE_ERROR);
         close(sock);
         return 4;
     }
 
+    scan_toggle_devices(toggle);
     if (send_device_list(sock, grabbed) < 0) {
         LOGE("handshake failed: %s", strerror(errno));
         release_all();
         close(sock);
         return 5;
     }
-    LOGI("immersive session started: %d grabbed device(s), toggle=%d",
+    LOGI("immersive helper started: %d controlled/pending device(s), toggle=%d",
          grabbed, toggle);
 
-    struct pollfd pfds[IGRAB_MAX_DEVICES + 1];
+    struct pollfd pfds[3 * IGRAB_MAX_DEVICES + 1];
     long last_beat = now_ms();
     long last_scan = now_ms();
     int reason = IGRAB_BYE_PEER_GONE;
+    int ready_sent = !pending_setup();
 
     for (;;) {
         if (g_quit) {
@@ -1269,11 +2061,27 @@ int main(int argc, char **argv)
             if (g_devs[i].fd < 0)
                 continue;
             pfds[nfds].fd = g_devs[i].fd;
+            /* Without an exit key on this controller, only detach errors matter.
+             * Its lease socket below remains polled for setup, heartbeat, and loss. */
+            pfds[nfds].events = should_poll_device_events(&g_devs[i]) ? POLLIN : 0;
+            pfds[nfds].revents = 0;
+            nfds++;
+            if (g_devs[i].lease_fd >= 0) {
+                pfds[nfds].fd = g_devs[i].lease_fd;
+                pfds[nfds].events = POLLIN;
+                pfds[nfds].revents = 0;
+                nfds++;
+            }
+        }
+
+        for (int i = 0; i < g_ntoggle_watches; i++) {
+            if (g_toggle_watches[i].fd < 0)
+                continue;
+            pfds[nfds].fd = g_toggle_watches[i].fd;
             pfds[nfds].events = POLLIN;
             pfds[nfds].revents = 0;
             nfds++;
         }
-
         int ret = poll(pfds, (nfds_t)nfds, POLL_SLICE_MS);
         if (ret < 0) {
             if (errno == EINTR)
@@ -1314,28 +2122,33 @@ int main(int argc, char **argv)
             break;
         }
 
-        /* Bluetooth devices wake and reconnect as new nodes. A device is held
-         * locally until announce_pending_devices() has put its DEVICE record on
-         * the stream, so Android and the desktop can never both own it. */
-        if (now_ms() - last_scan > RESCAN_INTERVAL_MS) {
-            if (scan_new_devices() < 0) {
-                reason = IGRAB_BYE_ERROR;
-                break;
-            }
-            last_scan = now_ms();
-        }
-
         if (output_ready > 0) {
             int announced = announce_pending_devices(sock);
             if (announced < 0) {
                 reason = IGRAB_BYE_PEER_GONE;
                 break;
             }
+            if (!ready_sent && !pending_setup() && announced > 0) {
+                int controlled = controlled_device_count();
+                if (controlled == 0 && !pending_gold()) {
+                    reason = IGRAB_BYE_ERROR;
+                    break;
+                }
+                struct igrab_rec ready = { .rtype = IGRAB_REC_READY };
+                ready.aux[0] = controlled;
+                if (send_rec(sock, &ready) < 0) {
+                    reason = IGRAB_BYE_PEER_GONE;
+                    break;
+                }
+                if (!g_need_resync)
+                    ready_sent = 1; // A queued partial record is completed before any other record.
+            }
         }
 
+        /* One batch per device: escape and heartbeats cannot be starved by a flood. */
         int stop = 0;
         for (int p = 1; p < nfds && !stop; p++) {
-            if (!(pfds[p].revents & (POLLIN | POLLHUP | POLLERR)))
+            if (!(pfds[p].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
                 continue;
             int idx = -1;
             for (int i = 0; i < g_ndevs; i++) {
@@ -1344,10 +2157,30 @@ int main(int argc, char **argv)
                     break;
                 }
             }
-            if (idx < 0)
+            if (idx < 0) {
+                for (int i = 0; i < g_ntoggle_watches; i++) {
+                    if (g_toggle_watches[i].fd != pfds[p].fd)
+                        continue;
+                    int r = pump_toggle_watch(i, toggle);
+                    if (r == 0) {
+                        reason = IGRAB_BYE_TOGGLE;
+                        stop = 1;
+                    } else if (r == -2) {
+                        drop_toggle_watch(i);
+                    }
+                    break;
+                }
                 continue;
-
-            int r = pump_device(sock, idx, toggle);
+            }
+            int r;
+            if (!should_poll_device_events(&g_devs[idx])) {
+                if (pfds[p].revents & (POLLHUP | POLLERR | POLLNVAL))
+                    r = -2;
+                else
+                    continue;
+            } else {
+                r = pump_device(sock, idx, toggle);
+            }
             if (r == 0) {
                 reason = IGRAB_BYE_TOGGLE;
                 stop = 1;
@@ -1363,6 +2196,7 @@ int main(int argc, char **argv)
                  * remote state first; otherwise a key/button held at unplug stays
                  * pressed until the whole immersive session ends. */
                 LOGI("device '%s' went away", g_devs[idx].name);
+                stop_android_suppression(&g_devs[idx]);
                 if (g_devs[idx].grabbed && g_devs[idx].announced)
                     g_need_resync = 1;
                 if (g_devs[idx].grabbed)
@@ -1375,12 +2209,34 @@ int main(int argc, char **argv)
         if (stop)
             break;
 
+        /* Handle evdev detach above before classifying a closed child socket:
+         * unplug is normal hotplug, but losing suppression on a live node is not. */
+        if (update_gamepad_leases() < 0) {
+            reason = IGRAB_BYE_CONTROLLER;
+            break;
+        }
+
+        /* Poll existing inputs before probing hotplugged nodes. New devices
+         * get their DEVICE record on the next turn before any event forwarding. */
+        if (now_ms() - last_scan > RESCAN_INTERVAL_MS) {
+            if (scan_new_devices() < 0) {
+                reason = g_gamepad_setup_failed ? IGRAB_BYE_CONTROLLER : IGRAB_BYE_ERROR;
+                break;
+            }
+            if (revalidate_android_masks() < 0) {
+                reason = IGRAB_BYE_CONTROLLER;
+                break;
+            }
+            scan_toggle_devices(toggle);
+            last_scan = now_ms();
+        }
+
         /* Every grabbed device is gone (dock unplugged mid-session). There is
          * nothing left to hold, and staying alive would only keep the app
          * believing it is still immersive. */
         int alive = 0;
         for (int i = 0; i < g_ndevs; i++) {
-            if (g_devs[i].fd >= 0 && g_devs[i].grabbed)
+            if (device_is_live(&g_devs[i]))
                 alive++;
         }
         if (alive == 0 && !pending_gold() && g_source != SOURCE_GOLD) {

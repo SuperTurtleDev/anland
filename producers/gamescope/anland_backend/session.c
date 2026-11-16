@@ -15,7 +15,11 @@ anland_device *anland_gamescope_session_device(anland_gamescope_session *s)
 
 anland_gamescope_session *anland_gamescope_session_open(const char *endpoint)
 {
-    const anland_present_config_t present = { .endpoint = endpoint };
+    const anland_present_config_t present = {
+        .endpoint = endpoint,
+        .defer_connector = true,
+    };
+
     anland_gamescope_session *s = calloc(1, sizeof(*s));
     if (!s)
         return NULL;
@@ -67,7 +71,7 @@ int anland_gamescope_session_target(anland_gamescope_session *s,
         return -1;
     memset(target, 0, sizeof(*target));
     target->buffer.fd = -1;
-    if (!s || anland_de_backend_get_target(s->backend, &target->selection) != 0)
+    if (!s || anland_de_backend_get_writable_target(s->backend, &target->selection) != 0)
         return -1;
     /* Consumer framebuffers are device resources exposed by the shared device
      * API, not remote window submissions or a second presentation protocol. */
@@ -101,7 +105,7 @@ int anland_gamescope_session_target_current(anland_gamescope_session *s,
 {
     anland_de_target_t current;
     if (!s || !target ||
-        anland_de_backend_get_target(s->backend, &current) != 0 ||
+        anland_de_backend_get_writable_target(s->backend, &current) != 0 ||
         current.generation != target->selection.generation ||
         current.index != target->selection.index ||
         current.count != target->selection.count ||

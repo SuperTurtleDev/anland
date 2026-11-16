@@ -17,11 +17,15 @@ typedef struct anland_gamescope_input_event {
 typedef void (*anland_gamescope_input_sink)(void *, const anland_gamescope_input_event *);
 typedef struct anland_gamescope_input {
     uint32_t pending_type, pending_size;
+    uint64_t pending_text_identity, header_text_identity;
+    bool header_identity_valid;
     void *payload;
     uint32_t pending_service;
     bool (*resources)(void *, uint32_t, int *, int);
     void *resources_userdata;
-    void (*text)(void *, uint32_t, const char *, size_t);
+    uint64_t (*text_identity)(void *);
+    void *text_identity_userdata;
+    void (*text)(void *, uint32_t, const char *, size_t, uint64_t);
     void *text_userdata;
 } anland_gamescope_input;
 void anland_gamescope_input_reset(anland_gamescope_input *input);

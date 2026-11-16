@@ -34,6 +34,7 @@ mutter_sources += [
   'backends/anland/common/socket_utils.c',
   'backends/anland/libdisplay_producer/anland_scene.c',
   'backends/anland/libdisplay_producer/anland_scene_legacy.c',
+  'backends/anland/libdisplay_producer/anland_pacing.c',
   'backends/anland/libdisplay_producer/anland_present.c',
   # One scene/device presentation path; no extra presentation service.
   'backends/anland/libdisplay_producer/anland_buffer_registry.c',

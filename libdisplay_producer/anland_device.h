@@ -91,6 +91,10 @@ enum {
     /* Consumer reports the requested service's fds were unusable. Same layout
      * as RESOURCE (type + fdnum) — matches protocol.h INPUT_TYPE_RESOURCE_INVALID. */
     ANLAND_DEVICE_IN_RESOURCE_INVALID = 12,
+    ANLAND_DEVICE_IN_TABLET_TOOL     = 13,
+    ANLAND_DEVICE_IN_TABLET_POSITION = 14,
+    ANLAND_DEVICE_IN_TABLET_TILT     = 15,
+    ANLAND_DEVICE_IN_TABLET_FRAME    = 16,
 };
 
 /* Touch/button action codes carried by ANLAND_DEVICE_IN_TOUCH /
@@ -132,6 +136,10 @@ typedef struct anland_device_input {
         struct { uint32_t size; } text_input;  /* payload via anland_device_read_input */
         struct { uint32_t action; int32_t value; } input_action;
         struct { uint32_t type; uint32_t fdnum; } resource; /* fds via anland_device_read_fds */
+        struct { uint32_t tool_id, tool_type, capabilities, device_id; } tablet_tool;
+        struct { uint32_t tool_id; float x, y, pressure; } tablet_position;
+        struct { uint32_t tool_id; float tilt_x, tilt_y, distance; } tablet_tilt;
+        struct { uint32_t tool_id, flags, buttons, time_msec; } tablet_frame;
         struct { uint32_t padding[4]; };
     };
 } anland_device_input_t;
@@ -158,6 +166,8 @@ typedef void (*anland_device_pre_release_cb)(void *userdata);
  * A non-empty path is tried first and only then falls back to those. Returns NULL
  * when no candidate answered. */
 anland_device *anland_device_open(const char *socket_path);
+/* Connector may be absent; geometry remains unknown until connect succeeds. */
+anland_device *anland_device_open_deferred(const char *socket_path);
 
 /* The daemon socket the device actually connected to ("" when unknown). Callers
  * that pass a hint should log this instead of the path they requested. */
@@ -167,6 +177,10 @@ void anland_device_close(anland_device *dev);
 
 /* True once a consumer session is up (not in fallback). */
 bool anland_device_is_connected(const anland_device *dev);
+/* Poll target-ready and peer hangups together without consuming any bytes.
+ * 1 ready / 0 pending / -1 lost (fallback callback run); timeout is per-call.
+ * Detects closure before the first target as well as during normal ACK waits. */
+int anland_device_poll_buffer_ready(anland_device *dev, int timeout_ms);
 
 /* One attempt to leave fallback (pickup fds + receive dmabufs). Returns 0
  * when connected, -1 when the consumer is not (yet) available — safe to
@@ -242,6 +256,11 @@ int anland_device_fb_count(anland_device *dev);
  * fd; caller owns and must close it). Returns 0 / -1. */
 int anland_device_get_fb(anland_device *dev, int index, anland_device_fb_t *fb);
 
+/* Additive native-import view: format is DRM fourcc, not the legacy protocol
+ * value in get_fb(). Owned fd is always CLOEXEC. Other fields/ownership match
+ * get_fb(). Existing consumers retain their original format semantics. */
+int anland_device_get_drm_fb(anland_device *dev, int index, anland_device_fb_t *fb);
+
 /* Index the consumer selected for the current frame (shm page). Clamped into
  * [0, fb_count) so a backend can index its framebuffer array directly. */
 int anland_device_current_fb(anland_device *dev);
@@ -287,6 +306,13 @@ bool anland_device_notify_frame_done(anland_device *dev);
 int anland_device_poll_input(anland_device *dev, anland_device_input_t *ev,
                              int timeout_ms);
 
+/* True if poll_input() has consumed part of an event header but has not yet
+ * returned the event. False for idle reads, completed headers and fallback;
+ * callers track any announced payload/fds separately. Use this to retain the
+ * input target captured before the first read across partial header reads.
+ * Read-only; serialize with input reads and session changes. */
+bool anland_device_input_header_pending(const anland_device *dev);
+
 /* Read a variable-length payload (clipboard / text input) announced by the
  * previous poll_input() event. Returns 1 / 0 / -1. */
 int anland_device_read_input(anland_device *dev, void *buf, size_t size,
@@ -311,6 +337,15 @@ int anland_device_set_consumer_var(anland_device *dev, uint32_t var,
                                    uint32_t value);
 /* Foreground-scheduling switch (SCHEDULING_FLAG_*). */
 int anland_device_scheduling(anland_device *dev, pid_t pid, uint8_t flags);
+/* Additive, non-blocking clipboard enqueue. 0 = accepted (NOT delivered), -1
+ * rejected (ENOBUFS is recoverable and leaves the queue/session unchanged).
+ * Copies <= ANLAND_DEVICE_MAX_PAYLOAD_SIZE; total queue bound is 2MiB.
+ * Drive flush_output while pending: 0 drained, 1 pending, -1 session lost.
+ * data_fd is borrowed for event readiness only, never independent writes. */
+int anland_device_queue_clipboard(anland_device *dev, const void *text, size_t size);
+int anland_device_flush_output(anland_device *dev);
+size_t anland_device_pending_output(const anland_device *dev);
+
 /* Push clipboard text (raw UTF-8) to the consumer. */
 int anland_device_set_clipboard(anland_device *dev, const void *text,
                                 size_t size);

@@ -1,0 +1,972 @@
+--- a/meson.build
++++ b/meson.build
+@@ -41,7 +41,7 @@
+   dependency('wayland-server'),
+   dependency('xkbcommon'),
+   dependency('libdrm'),
+-  dependency('lua')
++  dependency('lua5.4')
+ ]
+ 
+ subdir('src')
+--- a/src/EmulateTouchpadGesture.hpp
++++ b/src/EmulateTouchpadGesture.hpp
+@@ -15,7 +15,7 @@
+ 
+     void begin(const STrackpadGestureBegin& e) override {
+         if (ShimTrackpadGestures::isPinch(this->direction) != ShimTrackpadGestures::isPinch(e.direction)) {
+-            LOG(Log::ERR, "[hyprgrass] emulate_touchpad: inconsistent gesture isPinch values");
++            Log::logger->log(Log::ERR, "[hyprgrass] emulate_touchpad: inconsistent gesture isPinch values");
+             return;
+         }
+ 
+@@ -37,7 +37,7 @@
+ 
+     void update(const STrackpadGestureUpdate& e) override {
+         if (ShimTrackpadGestures::isPinch(this->direction) != ShimTrackpadGestures::isPinch(e.direction)) {
+-            LOG(Log::ERR, "[hyprgrass] emulate_touchpad: inconsistent gesture isPinch values");
++            Log::logger->log(Log::ERR, "[hyprgrass] emulate_touchpad: inconsistent gesture isPinch values");
+             return;
+         }
+ 
+@@ -59,7 +59,7 @@
+     }
+     void end(const STrackpadGestureEnd& e) override {
+         if (ShimTrackpadGestures::isPinch(this->direction) != ShimTrackpadGestures::isPinch(e.direction)) {
+-            LOG(Log::ERR, "[hyprgrass] emulate_touchpad: inconsistent gesture isPinch values");
++            Log::logger->log(Log::ERR, "[hyprgrass] emulate_touchpad: inconsistent gesture isPinch values");
+             return;
+         }
+ 
+--- a/src/GestureManager.cpp
++++ b/src/GestureManager.cpp
+@@ -11,18 +11,19 @@
+ #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
+ #include <hyprland/src/config/supplementary/propRefresher/PropRefresher.hpp>
+ #include <hyprland/src/desktop/state/FocusState.hpp>
+-#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
++
+ #include <hyprland/src/managers/SeatManager.hpp>
+-#include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+-#include <hyprland/src/keybinds/Manager.hpp>
++
++#include <hyprland/src/managers/KeybindManager.hpp>
+ #include <hyprland/src/layout/LayoutManager.hpp>
+ #include <hyprland/src/managers/input/InputManager.hpp>
+ #include <hyprland/src/managers/input/UnifiedWorkspaceSwipeGesture.hpp>
+-#include <hyprland/src/output/Monitor.hpp>
++#include <hyprland/src/helpers/Monitor.hpp>
+ #include <hyprland/src/plugins/PluginSystem.hpp>
+-#include <hyprland/src/pointer/PointerController.hpp>
++#include <hyprland/src/managers/PointerManager.hpp>
+ #include <hyprland/src/protocols/core/Compositor.hpp>
+-#include <hyprland/src/state/MonitorState.hpp>
++#include <hyprland/src/protocols/ShortcutsInhibit.hpp>
++
+ #undef private
+ 
+ #include <hyprutils/string/Numeric.hpp>
+@@ -81,7 +82,7 @@
+ 
+     const auto it = luaMgr->m_configValues.find("general.gaps_in");
+     if (it == luaMgr->m_configValues.end()) {
+-        LOG(Log::ERR, "[hyprgrass] lua config 'general.gaps_in' not found");
++        Log::logger->log(Log::ERR, "[hyprgrass] lua config 'general.gaps_in' not found");
+         return;
+     }
+ 
+@@ -132,7 +133,7 @@
+     static auto PBORDERGRABEXTEND = CConfigValue<Config::INTEGER>("general:extend_border_grab_area");
+     static auto PGAPSINDATA       = CConfigValue<Config::IComplexConfigValue>("general:gaps_in");
+ 
+-    LOG(Log::DEBUG, "[hyprgrass] Drag gesture begin: {}", gev.to_string());
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Drag gesture begin: {}", gev.to_string());
+ 
+     auto const workspace_swipe_edge_str = WORKSPACE_SWIPE_EDGE->value();
+ 
+@@ -185,9 +186,9 @@
+                 const Vector2D touchPos =
+                     pixelPositionToPercentagePosition(this->m_sGestureState.get_center().current) *
+                     this->m_lastTouchedMonitor->m_size;
+-                if (w && !Fullscreen::controller()->isFullscreen(w)) {
+-                    const Vector2D realPos  = w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+-                    const Vector2D realSize = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++                if (w && !w->isFullscreen()) {
++                    const Vector2D realPos  = w->m_realPosition->value();
++                    const Vector2D realSize = w->m_realSize->value();
+                     const CBox real         = {realPos.x, realPos.y, realSize.x, realSize.y};
+                     const CBox grab         = {
+                         real.x - BORDER_GRAB_AREA, real.y - BORDER_GRAB_AREA, real.width + 2 * BORDER_GRAB_AREA,
+@@ -195,8 +196,8 @@
+                     };
+ 
+                     bool notInRealWindow =
+-                        !real.containsPoint(touchPos) || w->presentation().isInCurvedCorner(touchPos.x, touchPos.y);
+-                    bool onTiledGap = !w->isFloating() && !Fullscreen::controller()->isFullscreen(w) && notInRealWindow;
++                        !real.containsPoint(touchPos) || w->isInCurvedCorner(touchPos.x, touchPos.y);
++                    bool onTiledGap = !w->m_isFloating && !w->isFullscreen() && notInRealWindow;
+                     bool inGrabArea = notInRealWindow && grab.containsPoint(touchPos);
+ 
+                     if ((onTiledGap || inGrabArea) && !w->hasPopupAt(touchPos)) {
+@@ -240,24 +241,10 @@
+ }
+ 
+ // Adapt new hyprland keybind type back to the old one (hacky compat for now)
+-static std::vector<SP<SKeybind>> keybindsToSKeybinds() {
+-    std::vector<SP<SKeybind>> binds;
+-    for (const auto& k : Keybinds::mgr()->registry().binds())
+-        binds.emplace_back(makeShared<SKeybind>(SKeybind{
+-            .key          = k->metadata().displayKey,
+-            .handler      = k->metadata().handler,
+-            .arg          = k->metadata().argument,
+-            .displayKey   = k->metadata().displayKey,
+-            .mouse        = k->hasFlag(Keybinds::BIND_FLAG_MOUSE),
+-            .locked       = k->hasFlag(Keybinds::BIND_FLAG_LOCKED),
+-            .nonConsuming = k->hasFlag(Keybinds::BIND_FLAG_NON_CONSUMING),
+-            .modmask      = static_cast<uint32_t>(k->modifierMask()),
+-        }));
+-    return binds;
+-}
++static std::vector<SP<SKeybind>> keybindsToSKeybinds() { return g_pKeybindManager->m_keybinds; }
+ 
+ FindGestureResult GestureManager::findGestureBind(std::string bind, GestureEventType type) const {
+-    LOG(Log::DEBUG, "[hyprgrass] Looking for binds matching: {}", bind);
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Looking for binds matching: {}", bind);
+ 
+     auto result = FindGestureResult::NONE;
+ 
+@@ -291,7 +278,7 @@
+ // pressed only matters for mouse binds: only start of drag gestures should set it to true
+ FindGestureResult GestureManager::handleGestureBind(std::string bind, GestureEventType type) {
+     auto found = FindGestureResult::NONE;
+-    LOG(Log::DEBUG, "[hyprgrass] Looking for binds matching: {}", bind);
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Looking for binds matching: {}", bind);
+ 
+     auto allBinds   = std::ranges::views::join(std::array{keybindsToSKeybinds(), this->internalBinds});
+     const auto MODS = static_cast<uint32_t>(g_pInputManager->getModsFromAllKBs());
+@@ -312,7 +299,7 @@
+         // Should never happen, as we check in the ConfigManager, but oh well
+         const auto ref = Hyprutils::String::strToNumber<int>(k->arg);
+         if (k->handler != "__lua" || !ref) {
+-            LOG(Log::ERR, "Invalid handler in a keybind! (handler {} is not a lua function)", k->handler);
++            Log::logger->log(Log::ERR, "Invalid handler in a keybind! (handler {} is not a lua function)", k->handler);
+             continue;
+         }
+ 
+@@ -322,7 +309,7 @@
+             case GestureEventType::COMPLETED:
+                 // mouse dispatchers only trigger on drag begin/end
+                 if (!k->mouse) {
+-                    LOG(Log::DEBUG, "[hyprgrass] calling dispatcher ({})", bind);
++                    Log::logger->log(Log::DEBUG, "[hyprgrass] calling dispatcher ({})", bind);
+                     luaMgr->callLuaFn(*ref);
+                     found =
+                         std::max(found, k->nonConsuming ? FindGestureResult::NON_CONSUMING : FindGestureResult::FOUND);
+@@ -355,7 +342,15 @@
+ void GestureManager::handleCancelledGesture() {}
+ 
+ void GestureManager::dragGestureUpdate(const wf::touch::gesture_event_t& ev) {
+-    if (!this->getActiveDragGesture().has_value()) {
++    if (!this->getActiveDragGesture().has_value() || g_pSessionLockManager->isSessionLocked()) {
++        return;
++    }
++
++    if (ev.type == wf::touch::EVENT_TYPE_TOUCH_UP) {
++        // Removing a contact shifts the centroid, but is not finger motion.
++        // The generic manager calls us only while contacts and a drag remain.
++        if (this->activeTrackpadGesture)
++            this->emulatedSwipePoint = this->m_sGestureState.get_center().current;
+         return;
+     }
+ 
+@@ -373,7 +368,7 @@
+ 
+         case GestureType::LONG_PRESS: {
+             const auto pos = this->m_sGestureState.get_center().current;
+-            Pointer::pointerController()->warpTo(Vector2D(pos.x, pos.y));
++            g_pPointerManager->warpTo(Vector2D(pos.x, pos.y));
+             g_pInputManager->simulateMouseMovement();
+             return;
+         }
+@@ -390,17 +385,19 @@
+ }
+ 
+ void GestureManager::handleDragGestureEnd(const DragGestureEvent& gev) {
+-    if (g_pSessionLockManager->isSessionLocked()) {
++    // Preserve lock-screen binds, but a lock acquired mid-drag must not
++    // skip native gesture/resource cleanup.
++    if (g_pSessionLockManager->isSessionLocked() && !this->activeTrackpadGesture &&
++        !this->workspaceSwipeActive && !this->resizeOnBorderInfo.active && !this->mouseBindActive) {
+         this->handleGestureBind(gev.to_string(), GestureEventType::DRAG_END);
+         return;
+     }
+-
+     if (this->activeTrackpadGesture) {
+         this->trackpadGestureEnd(gev.time);
+         return;
+     }
+ 
+-    LOG(Log::DEBUG, "[hyprgrass] Drag gesture ended: {}", gev.to_string());
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Drag gesture ended: {}", gev.to_string());
+     switch (gev.type) {
+         case GestureType::SWIPE:
+             if (this->workspaceSwipeActive) {
+@@ -425,6 +422,7 @@
+         case GestureType::EDGE_SWIPE:
+             if (this->workspaceSwipeActive) {
+                 g_pUnifiedWorkspaceSwipe->end();
++                this->workspaceSwipeActive = false;
+             }
+             break;
+         case GestureType::PINCH:
+@@ -471,24 +469,32 @@
+ bool GestureManager::trackpadGestureBegin(const DragGestureEvent& gev) {
+     Vector2D delta = this->pixelToTrackpadDistance(this->m_sGestureState.get_center().delta());
+ 
+-    // longpress events do not trigger a handler->m_activeGesture at the beginning,
+-    // we look it up ourselves beforehand
+-    bool foundLongPress = false;
+-    // hyprland has an arbitrary threshold of 5 pixels
+-    if (gev.type == GestureType::LONG_PRESS && std::abs(delta.x) < 5 && std::abs(delta.y) < 5) {
+-        const auto MODS = g_pInputManager->getModsFromAllKBs();
+-        for (const auto& g : g_pShimTrackpadGestures->longPress()->m_gestures) {
+-            if (g->fingerCount == gev.finger_count && g->modMask == MODS) {
+-                foundLongPress = true;
+-                break;
+-            }
+-        }
+-    }
+-    uint32_t fingers = gev.type == GestureType::EDGE_SWIPE
+-                           ? (gev.edge_origin << MOD_MASK_SHIFT) | (gev.finger_count & FINGERS_MASK)
+-                           : gev.finger_count;
+-
++    const uint32_t fingers = gev.type == GestureType::EDGE_SWIPE
++                                 ? (gev.edge_origin << MOD_MASK_SHIFT) | (gev.finger_count & FINGERS_MASK)
++                                 : gev.finger_count;
+     CTrackpadGestures* handler = g_pShimTrackpadGestures->get(gev.type);
++    if (!handler)
++        return false;
++
++    // Native handlers defer matching until 5 delta units (or 0.1 pinch scale).
++    // Retain only a configured, eligible candidate while they are waiting.
++    const auto MODS = g_pInputManager->getModsFromAllKBs();
++    static auto PDISABLEINHIBIT = CConfigValue<Config::INTEGER>("binds:disable_keybind_grabbing");
++    bool hasCandidate = false;
++    for (const auto& g : handler->m_gestures) {
++        if (g->fingerCount != fingers || g->modMask != MODS)
++            continue;
++        if (PROTO::shortcutsInhibit->isInhibited() && !*PDISABLEINHIBIT && !g->disableInhibit)
++            continue;
++        if (gev.type != GestureType::LONG_PRESS &&
++            !(toHyprgrassDirection(g->direction) & gev.direction))
++            continue;
++
++        hasCandidate = true;
++        break;
++    }
++    if (!hasCandidate)
++        return false;
+     if (gev.type == GestureType::PINCH) {
+         IPointer::SPinchBeginEvent pinchBegin = {
+             .timeMs  = gev.time,
+@@ -515,13 +521,15 @@
+             .delta   = delta,
+         };
+ 
+-        CTrackpadGestures* handler = g_pShimTrackpadGestures->get(gev.type);
+         handler->gestureBegin(swipeBegin);
+         handler->gestureUpdate(swipe);
+     }
+     this->emulatedSwipePoint = this->m_sGestureState.get_center().current;
+ 
+-    this->activeTrackpadGesture = foundLongPress || handler->m_activeGesture ? handler : nullptr;
++    this->activeTrackpadGesture = !handler->m_gestureFindFailed ? handler : nullptr;
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Trackpad bridge {}: {}, delta {}x{}",
++                     this->activeTrackpadGesture ? (handler->m_activeGesture ? "active" : "waiting") : "unmatched",
++                     gev.to_string(), delta.x, delta.y);
+     return this->activeTrackpadGesture;
+ }
+ 
+@@ -539,6 +547,7 @@
+                                       : activeDrag.finger_count;
+ 
+     this->emulatedSwipePoint = currentPoint;
++    const bool wasActive = bool(this->activeTrackpadGesture->m_activeGesture);
+ 
+     if (activeDrag.type == GestureType::PINCH) {
+         IPointer::SPinchUpdateEvent pinch = {
+@@ -560,20 +569,24 @@
+ 
+         this->activeTrackpadGesture->gestureUpdate(swipe);
+     }
++    if (!wasActive && this->activeTrackpadGesture->m_activeGesture)
++        Log::logger->log(Log::DEBUG, "[hyprgrass] Trackpad bridge became active: {}", activeDrag.to_string());
+ }
+ 
+ void GestureManager::trackpadGestureEnd(uint32_t time) {
+     DragGestureEvent activeDrag = this->getActiveDragGesture().value();
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Trackpad bridge ended ({}): {}",
++                     this->activeTrackpadGesture->m_activeGesture ? "active" : "never started", activeDrag.to_string());
+     if (activeDrag.type == GestureType::PINCH) {
+         IPointer::SPinchEndEvent swipe = {
+             .timeMs    = time,
+-            .cancelled = false,
++            .cancelled = g_pSessionLockManager->isSessionLocked(),
+         };
+         this->activeTrackpadGesture->gestureEnd(swipe);
+     } else {
+         IPointer::SSwipeEndEvent swipe = {
+             .timeMs    = time,
+-            .cancelled = false,
++            .cancelled = g_pSessionLockManager->isSessionLocked(),
+         };
+         this->activeTrackpadGesture->gestureEnd(swipe);
+     }
+@@ -609,11 +622,11 @@
+     static auto const SEND_CANCEL = g_config->sendCancel;
+ 
+     auto monitor =
+-        State::monitorState()->query().name(!ev.device->m_boundOutput.empty() ? ev.device->m_boundOutput : "").run();
++        g_pCompositor->getMonitorFromString(ev.device->m_boundOutput);
+     monitor = monitor ? monitor : Desktop::focusState()->monitor();
+ 
+     if (!monitor) {
+-        LOG(Log::ERR, "[hyprgrass] onTouchDown: could not find a monitor???");
++        Log::logger->log(Log::ERR, "[hyprgrass] onTouchDown: could not find a monitor???");
+         return false;
+     }
+ 
+@@ -623,7 +636,7 @@
+     const auto& monitorSize = this->m_lastTouchedMonitor->m_size;
+     this->m_monitorArea     = SMonitorArea{monitorPos.x, monitorPos.y, monitorSize.x, monitorSize.y};
+ 
+-    Pointer::pointerController()->warpTo(
++    g_pPointerManager->warpTo(
+         Vector2D{
+             monitorPos.x + ev.pos.x * monitorSize.x,
+             monitorPos.y + ev.pos.y * monitorSize.y,
+@@ -666,7 +679,13 @@
+         .pos    = pos,
+     };
+ 
+-    return IGestureManager::onTouchDown(gesture_event);
++    const bool block = IGestureManager::onTouchDown(gesture_event);
++    if (this->activeTrackpadGesture) {
++        // Adding a finger is not motion: rebase the emulated centroid so the
++        // next update cannot jump merely because the contact count changed.
++        this->emulatedSwipePoint = this->m_sGestureState.get_center().current;
++    }
++    return block;
+ }
+ 
+ bool GestureManager::onTouchUp(ITouch::SUpEvent ev) {
+@@ -718,7 +737,7 @@
+ 
+ bool GestureManager::onTouchMove(ITouch::SMotionEvent ev) {
+     if (!this->m_lastTouchedMonitor) {
+-        LOG(Log::ERR, "[hyprgrass] onTouchMove: where the fuck is my monitor");
++        Log::logger->log(Log::ERR, "[hyprgrass] onTouchMove: where the fuck is my monitor");
+         return false;
+     }
+ 
+@@ -778,7 +797,7 @@
+ void GestureManager::touchBindDispatcher(std::string args) {
+     auto argsSplit = splitString(args, ',', 4);
+     if (argsSplit.size() < 4) {
+-        LOG(Log::ERR, "touchBind called with not enough args: {}", args);
++        Log::logger->log(Log::ERR, "touchBind called with not enough args: {}", args);
+         return;
+     }
+     const auto _modifier      = trim(argsSplit[0]);
+@@ -796,9 +815,9 @@
+ }
+ 
+ void GestureManager::debugLog(const std::string& msg) {
+-    LOG(Log::DEBUG, "[hyprgrass] " + msg);
++    Log::logger->log(Log::DEBUG, "[hyprgrass] " + msg);
+ }
+ 
+ void hyprgrass_debug(const std::string& s) {
+-    LOG(Log::DEBUG, "[hyprgrass] [debug] {}", s);
+-}
++    Log::logger->log(Log::DEBUG, "[hyprgrass] [debug] {}", s);
++}
+\ No newline at end of file
+--- a/src/GestureManager.hpp
++++ b/src/GestureManager.hpp
+@@ -13,7 +13,7 @@
+ #include <hyprland/src/config/values/types/IntValue.hpp>
+ #include <hyprland/src/config/values/types/StringValue.hpp>
+ #include <hyprland/src/devices/ITouch.hpp>
+-#include <hyprland/src/keybinds/Manager.hpp>
++#include <hyprland/src/managers/KeybindManager.hpp>
+ #include <hyprland/src/managers/input/trackpad/TrackpadGestures.hpp>
+ #include <hyprland/src/protocols/core/Seat.hpp>
+ #undef private
+@@ -22,18 +22,6 @@
+     DRAG_BEGIN,
+     DRAG_END,
+     COMPLETED, // CompletedGestureEvent
+-};
+-
+-// compat adapter
+-struct SKeybind {
+-    std::string key;
+-    std::string handler;
+-    std::string arg;
+-    std::string displayKey;
+-    bool mouse        = false;
+-    bool locked       = false;
+-    bool nonConsuming = false;
+-    uint32_t modmask  = 0;
+ };
+ 
+ struct Cfg {
+--- a/src/HyprLogger.hpp
++++ b/src/HyprLogger.hpp
+@@ -4,6 +4,6 @@
+ class HyprLogger : public Logger {
+   public:
+     void debug(std::string s) {
+-        LOG(Log::INFO, "[hyprgrass] {}", s);
++        Log::logger->log(Log::INFO, "[hyprgrass] {}", s);
+     }
+ };
+--- a/src/LuaTouchpadGesture.cpp
++++ b/src/LuaTouchpadGesture.cpp
+@@ -84,7 +84,7 @@
+         1, 0, 0, Config::Lua::CConfigManager::LUA_TIMEOUT_EVENT_CALLBACK_MS, "hyprgrass.gesture: start()"
+     );
+     if (result != LUA_OK) {
+-        LOG(Log::ERR, "[hyprgrass] start function failed: {}", lua_tostring(L, -1));
++        Log::logger->log(Log::ERR, "[hyprgrass] start function failed: {}", lua_tostring(L, -1));
+     }
+ }
+ 
+@@ -107,7 +107,7 @@
+         1, 0, 0, Config::Lua::CConfigManager::LUA_TIMEOUT_EVENT_CALLBACK_MS, "hyprgrass.gesture: update()"
+     );
+     if (result != LUA_OK) {
+-        LOG(Log::ERR, "[hyprgrass] update function failed: {}", lua_tostring(L, -1));
++        Log::logger->log(Log::ERR, "[hyprgrass] update function failed: {}", lua_tostring(L, -1));
+     }
+ }
+ 
+@@ -143,6 +143,6 @@
+         1, 0, 0, Config::Lua::CConfigManager::LUA_TIMEOUT_EVENT_CALLBACK_MS, "hyprgrass.gesture: finish()"
+     );
+     if (result != LUA_OK) {
+-        LOG(Log::ERR, "[hyprgrass] finish function failed: {}", lua_tostring(L, -1));
++        Log::logger->log(Log::ERR, "[hyprgrass] finish function failed: {}", lua_tostring(L, -1));
+     }
+ }
+--- a/src/ShimTrackpadGestures.cpp
++++ b/src/ShimTrackpadGestures.cpp
+@@ -225,38 +225,38 @@
+     switch (type) {
+         case GestureType::SWIPE: {
+             std::string direction = stringifyDirection(toHyprgrassDirection(gesture.direction));
+-            LOG(Log::DEBUG, "| kind: swipe, fingers: {}, direction: {}", gesture.fingerCount, direction);
++            Log::logger->log(Log::DEBUG, "| kind: swipe, fingers: {}, direction: {}", gesture.fingerCount, direction);
+             break;
+         }
+         case GestureType::LONG_PRESS:
+-            LOG(Log::DEBUG, "| kind: long_press, fingers: {}", gesture.fingerCount);
++            Log::logger->log(Log::DEBUG, "| kind: long_press, fingers: {}", gesture.fingerCount);
+             break;
+         case GestureType::EDGE_SWIPE: {
+             std::string origin    = stringifyDirection(gesture.fingerCount >> MOD_MASK_SHIFT);
+             uint32_t fingers      = gesture.fingerCount & FINGERS_MASK;
+             std::string direction = stringifyDirection(toHyprgrassDirection(gesture.direction));
+-            LOG(
++            Log::logger->log(
+                 Log::DEBUG, "| kind: edge, origin: {}, fingers: {}, direction: {}", origin, fingers, direction
+             );
+             break;
+         }
+         case GestureType::PINCH:
+-            LOG(Log::DEBUG, "| kind: long_press, fingers: {}", gesture.fingerCount);
++            Log::logger->log(Log::DEBUG, "| kind: long_press, fingers: {}", gesture.fingerCount);
+             break;
+         case GestureType::TAP:
+-            LOG(Log::DEBUG, "| kind: tap, fingers: {}", gesture.fingerCount);
++            Log::logger->log(Log::DEBUG, "| kind: tap, fingers: {}", gesture.fingerCount);
+             break;
+     }
+ 
+     // TODO: pretty print this
+-    LOG(Log::DEBUG, "| mod mask: {}", static_cast<uint32_t>(gesture.modMask));
+-    LOG(Log::DEBUG, "| scale: {}", gesture.deltaScale);
+-    LOG(Log::DEBUG, "| disable inhibit: {}", gesture.disableInhibit);
+-    LOG(Log::DEBUG, "|");
++    Log::logger->log(Log::DEBUG, "| mod mask: {}", static_cast<uint32_t>(gesture.modMask));
++    Log::logger->log(Log::DEBUG, "| scale: {}", gesture.deltaScale);
++    Log::logger->log(Log::DEBUG, "| disable inhibit: {}", gesture.disableInhibit);
++    Log::logger->log(Log::DEBUG, "|");
+ }
+ 
+ void ShimTrackpadGestures::listGestures() {
+-    LOG(Log::DEBUG, "[hyprgrass] listing gestures:");
++    Log::logger->log(Log::DEBUG, "[hyprgrass] listing gestures:");
+ 
+     const auto types = std::array{
+         GestureType::SWIPE,
+--- a/src/gestures/Actions.cpp
++++ b/src/gestures/Actions.cpp
+@@ -12,21 +12,37 @@
+     }
+ 
+     if (event.type == wf::touch::EVENT_TYPE_TOUCH_UP) {
+-        return wf::touch::ACTION_STATUS_CANCELLED;
++        // A quick swipe can finish inside the contact-settling window. Let
++        // wf-touch replay this UP to LiftoffAction without losing the gesture.
++        return settle_contacts && ready_on_release ? wf::touch::ACTION_STATUS_ALREADY_COMPLETED
++                                                   : wf::touch::ACTION_STATUS_CANCELLED;
+     }
+ 
+     const double finger_slip = base_finger_slip / *sensitivity;
+     const double threshold   = base_threshold / *sensitivity;
+     if (event.type == wf::touch::EVENT_TYPE_TOUCH_DOWN) {
+-        // cancel if previous fingers moved too much
+         this->finger_count = state.fingers.size();
+-        for (auto& finger : state.fingers) {
+-            if (glm::length(finger.second.delta()) > finger_slip) {
++        // Placement drift must not shrink with recognition sensitivity: a high
++        // sensitivity should start sooner, not require perfectly simultaneous fingers.
++        const double placement_slip = settle_contacts ? base_finger_slip : finger_slip;
++        for (const auto& finger : state.fingers) {
++            if (glm::length(finger.second.delta()) > placement_slip) {
+                 return wf::touch::ACTION_STATUS_CANCELLED;
+             }
+         }
+-
+-        return wf::touch::ACTION_STATUS_RUNNING;
++        if (settle_contacts) {
++            // Restart the deadline for the new contact set. Edge gestures keep
++            // their original deadline and stricter placement tolerance.
++            gesture_action_t::reset(event.time);
++            this->target_direction = 0;
++            this->ready_on_release = false;
++        }
++
++        return wf::touch::ACTION_STATUS_RUNNING;
++    }
++
++    if (state.fingers.empty()) {
++        return wf::touch::ACTION_STATUS_CANCELLED;
+     }
+ 
+     if (glm::length(state.get_center().delta()) >= threshold && this->target_direction == 0) {
+@@ -34,19 +50,22 @@
+     }
+ 
+     if (this->target_direction == 0) {
+-        return wf::touch::ACTION_STATUS_RUNNING;
+-    }
+-
+-    for (auto& finger : state.fingers) {
++        this->ready_on_release = false;
++        return wf::touch::ACTION_STATUS_RUNNING;
++    }
++
++    for (const auto& finger : state.fingers) {
+         if (finger.second.get_incorrect_drag_distance(this->target_direction) > finger_slip) {
+             return wf::touch::ACTION_STATUS_CANCELLED;
+         }
+     }
+ 
+-    if (state.get_center().get_drag_distance(target_direction) >= threshold) {
+-        return wf::touch::ACTION_STATUS_COMPLETED;
+-    }
+-    return wf::touch::ACTION_STATUS_RUNNING;
++    this->ready_on_release = state.get_center().get_drag_distance(target_direction) >= threshold;
++    if (settle_contacts && event.time - this->start_time < SWIPE_CONTACT_SETTLE_MS) {
++        return wf::touch::ACTION_STATUS_RUNNING;
++    }
++
++    return ready_on_release ? wf::touch::ACTION_STATUS_COMPLETED : wf::touch::ACTION_STATUS_RUNNING;
+ }
+ 
+ wf::touch::action_status_t
+@@ -110,7 +129,7 @@
+         return wf::touch::ACTION_STATUS_COMPLETED;
+     }
+ 
+-    if (event.type == wf::touch::EVENT_TYPE_TOUCH_DOWN) {
++    if (event.type == wf::touch::EVENT_TYPE_TOUCH_DOWN && !allow_additional_contacts) {
+         return wf::touch::ACTION_STATUS_CANCELLED;
+     }
+ 
+@@ -146,8 +165,23 @@
+ OnCompleteAction::update_state(const wf::touch::gesture_state_t& state, const wf::touch::gesture_event_t& event) {
+     auto status = this->action->update_state(state, event);
+ 
+-    if (status == wf::touch::ACTION_STATUS_COMPLETED || status == wf::touch::ACTION_STATUS_CANCELLED) {
+-        this->callback(event.time, status == wf::touch::ACTION_STATUS_CANCELLED);
++    if (event.type == wf::touch::EVENT_TYPE_TOUCH_DOWN)
++        this->waiting_for_contacts = false;
++
++    if (status == wf::touch::ACTION_STATUS_COMPLETED || status == wf::touch::ACTION_STATUS_ALREADY_COMPLETED ||
++        status == wf::touch::ACTION_STATUS_CANCELLED) {
++        // Retry only when the contact set changes, rather than logging and
++        // scanning unbound gestures on every motion sample.
++        if (!this->waiting_for_contacts || status == wf::touch::ACTION_STATUS_CANCELLED)
++            this->callback(event.time, status == wf::touch::ACTION_STATUS_CANCELLED);
++        // An unbound swipe must not consume its recognition stage: another
++        // contact may still land and turn it into a configured gesture.
++        if ((status == wf::touch::ACTION_STATUS_COMPLETED || status == wf::touch::ACTION_STATUS_ALREADY_COMPLETED) &&
++            retry && retry()) {
++            this->waiting_for_contacts = true;
++            return event.type == wf::touch::EVENT_TYPE_TOUCH_UP ? wf::touch::ACTION_STATUS_CANCELLED
++                                                              : wf::touch::ACTION_STATUS_RUNNING;
++        }
+     }
+ 
+     return status;
+--- a/src/gestures/Actions.hpp
++++ b/src/gestures/Actions.hpp
+@@ -15,14 +15,17 @@
+     double base_finger_slip;
+     const float* sensitivity;
+     const int64_t* timeout;
++    const bool settle_contacts;
++    bool ready_on_release = false;
+ 
+   public:
+     //   threshold = base_threshold / sensitivity
+     // if the threshold needs to be adjusted dynamically, the sensitivity
+     // pointer is used
+-    CMultiAction(double base_threshold, double base_finger_slip, const float* sensitivity, const int64_t* timeout)
++    CMultiAction(double base_threshold, double base_finger_slip, const float* sensitivity, const int64_t* timeout,
++                 bool settle_contacts = false)
+         : base_threshold(base_threshold), base_finger_slip(base_finger_slip), sensitivity(sensitivity),
+-          timeout(timeout) {};
++          timeout(timeout), settle_contacts(settle_contacts) {};
+ 
+     GestureDirection target_direction = 0;
+     int finger_count                  = 0;
+@@ -38,6 +41,8 @@
+     void reset(uint32_t time) override {
+         gesture_action_t::reset(time);
+         target_direction = 0;
++        finger_count = 0;
++        ready_on_release = false;
+     };
+ };
+ 
+@@ -75,9 +80,15 @@
+     update_state(const wf::touch::gesture_state_t& state, const wf::touch::gesture_event_t& event) override;
+ };
+ 
+-// Completes upon receiving a touch up event and cancels upon receiving a touch
+-// down event.
++// Completes on touch up; ordinary swipes may keep ownership when a contact is added.
++// Pinch candidates retain the original cancel-on-down behaviour.
+ class LiftoffAction : public wf::touch::gesture_action_t {
++    const bool allow_additional_contacts;
++
++  public:
++    explicit LiftoffAction(bool allow_additional_contacts = false)
++        : allow_additional_contacts(allow_additional_contacts) {}
++
+     wf::touch::action_status_t
+     update_state(const wf::touch::gesture_state_t& state, const wf::touch::gesture_event_t& event) override;
+ };
+@@ -97,13 +108,17 @@
+ // This action is used to call a function right after another action is completed
+ class OnCompleteAction : public wf::touch::gesture_action_t {
+     using Callback = std::function<void(uint32_t time, bool cancelled)>;
++    using Retry = std::function<bool()>;
+ 
+   private:
+     std::unique_ptr<wf::touch::gesture_action_t> action;
+     const Callback callback;
++    const Retry retry;
++    bool waiting_for_contacts = false;
+ 
+   public:
+-    OnCompleteAction(std::unique_ptr<wf::touch::gesture_action_t> action, Callback callback) : callback(callback) {
++    OnCompleteAction(std::unique_ptr<wf::touch::gesture_action_t> action, Callback callback, Retry retry = {})
++        : callback(callback), retry(retry) {
+         this->action = std::move(action);
+     }
+ 
+@@ -112,6 +127,7 @@
+ 
+     void reset(uint32_t time) override {
+         this->action->reset(time);
++        this->waiting_for_contacts = false;
+     }
+ };
+ 
+--- a/src/gestures/Gestures.cpp
++++ b/src/gestures/Gestures.cpp
+@@ -93,25 +93,28 @@
+ 
+ // @return whether or not to inhibit further actions
+ bool IGestureManager::onTouchDown(const wf::touch::gesture_event_t& ev) {
+-    // NOTE @m_sGestureState is used in gesture-completed callbacks
+-    // during touch down it must be updated before updating the gestures
+-    // in touch up and motion, it must be updated AFTER updating the
+-    // gestures
++    // DOWN/MOTION callbacks need the new coordinates. UP callbacks must still
++    // see the releasing contact; remove it only after finishing the gesture.
+     this->m_sGestureState.update(ev);
+     this->updateGestures(ev);
+ 
+-    if (this->activeDragGesture.has_value()) {
+-        this->dragGestureUpdate(ev);
+-    }
+-
++    // A new contact changes the centroid, but is not movement of an owned drag.
+     return this->eventForwardingInhibited();
+ }
+ 
+ bool IGestureManager::onTouchUp(const wf::touch::gesture_event_t& ev) {
++    if (!this->m_sGestureState.fingers.contains(ev.finger))
++        return this->eventForwardingInhibited();
++
+     this->updateGestures(ev);
+     this->m_sGestureState.update(ev);
+ 
+-    if (this->activeDragGesture.has_value()) {
++    // Long-press drags end on the last UP; no callback may outlive all contacts.
++    if (this->m_sGestureState.fingers.empty() && this->activeDragGesture) {
++        auto ending = this->activeDragGesture.value();
++        ending.time = ev.time;
++        this->emitDragGestureEnd(ending);
++    } else if (this->activeDragGesture.has_value()) {
+         this->dragGestureUpdate(ev);
+     }
+ 
+@@ -119,8 +122,11 @@
+ }
+ 
+ FindGestureResult IGestureManager::onTouchMove(const wf::touch::gesture_event_t& ev) {
++    if (!this->m_sGestureState.fingers.contains(ev.finger))
++        return this->eventForwardingInhibited() ? FindGestureResult::FOUND : FindGestureResult::NONE;
++
++    this->m_sGestureState.update(ev);
+     this->updateGestures(ev);
+-    this->m_sGestureState.update(ev);
+ 
+     if (this->activeDragGesture.has_value()) {
+         this->dragGestureUpdate(ev);
+@@ -160,7 +166,7 @@
+ void IGestureManager::addMultiFingerGesture(
+     double base_threshold, double base_finger_slip, const float* sensitivity, const int64_t* timeout
+ ) {
+-    auto swipe = std::make_unique<CMultiAction>(base_threshold, base_finger_slip, sensitivity, timeout);
++    auto swipe = std::make_unique<CMultiAction>(base_threshold, base_finger_slip, sensitivity, timeout, true);
+ 
+     auto swipe_ptr = swipe.get();
+ 
+@@ -192,11 +198,14 @@
+             if (this->emitDragGesture(gesture)) {
+                 this->cancelTouchEventsOnAllWindows();
+             }
+-        });
+-
+-    auto swipe_liftoff = std::make_unique<LiftoffAction>();
++        }, [this]() { return !this->activeDragGesture.has_value() && !this->promisedCompletedGesture.has_value(); });
++
++    auto swipe_liftoff = std::make_unique<LiftoffAction>(true);
+     auto liftoff_and_ack =
+-        std::make_unique<OnCompleteAction>(std::move(swipe_liftoff), [=, this](uint32_t time, bool _) {
++        std::make_unique<OnCompleteAction>(std::move(swipe_liftoff), [=, this](uint32_t time, bool cancelled) {
++            if (cancelled)
++                return;
++
+             const auto drag = DragGestureEvent{
+                 .time         = time,
+                 .type         = GestureType::SWIPE,
+--- a/src/gestures/Gestures.hpp
++++ b/src/gestures/Gestures.hpp
+@@ -98,8 +98,8 @@
+ 
+   private:
+     std::unique_ptr<Logger> logger;
+-    bool inhibitTouchEvents;
+-    bool gestureTriggered; // A drag/completed gesture is triggered
++    bool inhibitTouchEvents = false;
++    bool gestureTriggered = false; // A drag/completed gesture is triggered
+     std::optional<DragGestureEvent> activeDragGesture;
+     std::optional<CompletedGestureEvent> promisedCompletedGesture;
+ 
+--- a/src/gestures/Shared.hpp
++++ b/src/gestures/Shared.hpp
+@@ -5,6 +5,8 @@
+ // Swipe params
+ constexpr static double SWIPE_INCORRECT_DRAG_TOLERANCE = 100;
+ constexpr static double SWIPE_THRESHOLD                = 150;
++// Let adjacent touchscreen contacts land before committing their finger count.
++constexpr static uint32_t SWIPE_CONTACT_SETTLE_MS       = 50;
+ 
+ // Pinch params
+ constexpr static double PINCH_THRESHOLD = 150;
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -10,12 +10,15 @@
+ #define private public
+ #include <hyprland/src/Compositor.hpp>
+ #include <hyprland/src/SharedDefs.hpp>
++#include <hyprland/src/desktop/view/Window.hpp>
++#include <hyprland/src/render/Renderer.hpp>
+ #include <hyprland/src/config/ConfigManager.hpp>
++#include <hyprland/src/config/ConfigValue.hpp>
+ #include <hyprland/src/config/lua/bindings/LuaBindingsInternal.hpp>
+ #include <hyprland/src/debug/log/Logger.hpp>
+ #include <hyprland/src/event/EventBus.hpp>
+-#include <hyprland/src/keybinds/Manager.hpp>
+-#include <hyprland/src/keybinds/Resolver.hpp>
++#include <hyprland/src/managers/KeybindManager.hpp>
++
+ #include <hyprland/src/managers/input/InputManager.hpp>
+ #include <hyprland/src/managers/input/trackpad/GestureTypes.hpp>
+ #include <hyprland/src/managers/input/trackpad/TrackpadGestures.hpp>
+@@ -39,6 +42,7 @@
+ #include <hyprutils/utils/ScopeGuard.hpp>
+ #undef private
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <expected>
+ #include <format>
+@@ -55,6 +59,53 @@
+ const CHyprColor s_pluginColor = {0x61 / 255.0f, 0xAF / 255.0f, 0xEF / 255.0f, 1.0f};
+ const CHyprColor error_color   = {204. / 255.0, 2. / 255.0, 2. / 255.0, 1.0};
+ 
++// The bridge uses workspace-normalized units for native gesture matching.
++// Window movement needs logical screen pixels instead: otherwise a full-width
++// touch drag moves a floating window by only workspace_swipe_distance pixels.
++// Keep the shared bridge and native touchpad actions unchanged; undo that
++// conversion only for Hyprgrass's built-in move action, after matching.
++class CTouchMoveTrackpadGesture final : public CMoveTrackpadGesture {
++  public:
++    void end(const STrackpadGestureEnd& e) override {
++        if ((e.swipe && e.swipe->cancelled) || (e.pinch && e.pinch->cancelled)) {
++            if (m_window) {
++                m_window->m_floatingOffset = {};
++                g_pHyprRenderer->damageWindow(m_window.lock());
++            }
++            m_lastDelta = {};
++            m_window.reset();
++            return; // Lock interruption must not dispatch a tiled-window move.
++        }
++        CMoveTrackpadGesture::end(e);
++    }
++
++    void update(const STrackpadGestureUpdate& e) override {
++        if (!g_pGestureManager)
++            return;
++
++        static auto const PSWIPEDIST = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_distance");
++        const auto distance = std::clamp(*PSWIPEDIST, (int64_t)1LL, (int64_t)UINT32_MAX);
++        const auto area = g_pGestureManager->getMonitorArea();
++        const auto toPixels = [&](const Vector2D& delta) {
++            return Vector2D{delta.x * area.w / distance * m_scale, delta.y * area.h / distance * m_scale};
++        };
++
++        if (e.swipe) {
++            auto swipe = *e.swipe;
++            swipe.delta = toPixels(swipe.delta);
++            auto update = e;
++            update.swipe = &swipe;
++            CMoveTrackpadGesture::update(update);
++        } else if (e.pinch) {
++            auto pinch = *e.pinch;
++            pinch.delta = toPixels(pinch.delta);
++            auto update = e;
++            update.pinch = &pinch;
++            CMoveTrackpadGesture::update(update);
++        }
++    }
++};
++
+ static std::vector<int> heldLuaRefs{};
+ static bool g_unloading = false;
+ 
+@@ -164,7 +215,7 @@
+                 return Config::Lua::Bindings::Internal::configError(L, "hyprgrass.bind: mod must be a string");
+ 
+             const char* modStr = lua_tostring(L, -1);
+-            bind.modmask       = static_cast<uint32_t>(Keybinds::modMaskFromString(modStr));
++            bind.modmask       = static_cast<uint32_t>(g_pKeybindManager->stringToModMask(modStr));
+         }
+     }
+ 
+@@ -381,8 +432,8 @@
+     }
+ 
+     auto maybeMod = modResult.value();
+-    Input::ModifierMask modMask =
+-        maybeMod ? Keybinds::modMaskFromString(std::string{maybeMod.value()}) : Input::ModifierMask(0u);
++    uint32_t modMask =
++        maybeMod ? g_pKeybindManager->stringToModMask(std::string{maybeMod.value()}) : uint32_t(0u);
+ 
+     auto maybeScaleResult = luaTableMaybeGetFloat(L, 1, "scale");
+     if (!maybeScaleResult) {
+@@ -501,7 +552,7 @@
+             );
+         } else if (action == "move") {
+             result = handler->addGesture(
+-                makeUnique<CMoveTrackpadGesture>(), gesture.fingers(), gesture.direction, modMask, deltaScale,
++                makeUnique<CTouchMoveTrackpadGesture>(), gesture.fingers(), gesture.direction, modMask, deltaScale,
+                 disableInhibit
+             );
+         } else if (action == "special") {
+@@ -570,14 +621,14 @@
+         GestureType::LONG_PRESS,
+         GestureType::EDGE_SWIPE,
+     };
+-    LOG(Log::DEBUG, "[hyprgrass] Listing internal binds:");
++    Log::logger->log(Log::DEBUG, "[hyprgrass] Listing internal binds:");
+     for (const auto& bind : g_pGestureManager->internalBinds) {
+-        LOG(Log::DEBUG, "[hyprgrass] | gesture: {}", bind->key);
+-        LOG(Log::DEBUG, "[hyprgrass] |     dispatcher: {}", bind->handler);
+-        LOG(Log::DEBUG, "[hyprgrass] |     arg: {}", bind->arg);
+-        LOG(Log::DEBUG, "[hyprgrass] |     mouse: {}", bind->mouse);
+-        LOG(Log::DEBUG, "[hyprgrass] |     locked: {}", bind->locked);
+-        LOG(Log::DEBUG, "[hyprgrass] |");
++        Log::logger->log(Log::DEBUG, "[hyprgrass] | gesture: {}", bind->key);
++        Log::logger->log(Log::DEBUG, "[hyprgrass] |     dispatcher: {}", bind->handler);
++        Log::logger->log(Log::DEBUG, "[hyprgrass] |     arg: {}", bind->arg);
++        Log::logger->log(Log::DEBUG, "[hyprgrass] |     mouse: {}", bind->mouse);
++        Log::logger->log(Log::DEBUG, "[hyprgrass] |     locked: {}", bind->locked);
++        Log::logger->log(Log::DEBUG, "[hyprgrass] |");
+     }
+ 
+     for (const auto& type : dragGestureTypes) {
+@@ -590,9 +641,9 @@
+                 .finger_count = static_cast<uint32_t>(g->fingerCount),
+                 .edge_origin  = static_cast<uint32_t>(g->fingerCount),
+             };
+-            LOG(Log::DEBUG, "[hyprgrass] | gesture: {}", gev.to_string());
+-            LOG(Log::DEBUG, "[hyprgrass] |     modifiers: {}", static_cast<uint32_t>(g->modMask));
+-            LOG(Log::DEBUG, "[hyprgrass] |     scaling: {}", g->deltaScale);
++            Log::logger->log(Log::DEBUG, "[hyprgrass] | gesture: {}", gev.to_string());
++            Log::logger->log(Log::DEBUG, "[hyprgrass] |     modifiers: {}", static_cast<uint32_t>(g->modMask));
++            Log::logger->log(Log::DEBUG, "[hyprgrass] |     scaling: {}", g->deltaScale);
+         }
+     }
+     return SDispatchResult{.success = true};
+@@ -650,9 +701,9 @@
+         HyprlandAPI::addNotification(
+             PHANDLE, "Mismatched Hyprland version! check logs for details", CHyprColor(0.8, 0.7, 0.26, 1.0), 5000
+         );
+-        LOG(Log::ERR, "[hyprgrass] version mismatch!");
+-        LOG(Log::ERR, "[hyprgrass] | hyprgrass was built against: {}", hlTargetVersion);
+-        LOG(Log::ERR, "[hyprgrass] | actual hyprland version: {}", hlVersion);
++        Log::logger->log(Log::ERR, "[hyprgrass] version mismatch!");
++        Log::logger->log(Log::ERR, "[hyprgrass] | hyprgrass was built against: {}", hlTargetVersion);
++        Log::logger->log(Log::ERR, "[hyprgrass] | actual hyprland version: {}", hlVersion);
+     }
+ 
+     static auto P1 = Event::bus()->m_events.input.touch.down.listen(hkOnTouchDown);
+@@ -670,4 +721,4 @@
+ APICALL EXPORT void PLUGIN_EXIT() {
+     g_unloading = true;
+     clearHeldLuaRefs();
+-}
++}
+\ No newline at end of file

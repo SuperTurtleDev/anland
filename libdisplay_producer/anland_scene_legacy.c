@@ -28,6 +28,7 @@
 #define _GNU_SOURCE /* for dup()/eventfd(); KWin's build already defines it */
 #endif
 #include "anland_scene_legacy.h"
+#include "anland_pacing.h"
 
 #include <poll.h>
 #include <stdlib.h>
@@ -74,6 +75,7 @@ struct anland_scene_legacy {
     /* True between a successful connect and the next session teardown. Keeps
      * drop_session() from invalidating an already-dead session over and over. */
     bool session_valid;
+    bool target_selected; /* set only by a real buffer-ready notification */
     /* Old identities/events must retire before a handshake can reuse buffer ids. */
     bool retirement_pending;
     /* eventfd ACK was consumed, but slot release/publication may need a retry. */
@@ -86,6 +88,9 @@ struct anland_scene_legacy {
     uint64_t frames_flipped;
     uint64_t frames_acked;
     uint64_t reconnects;
+    uint64_t submitted_at;
+    uint64_t flipped_at;
+    anland_pacing pacing;
 };
 
 /* ---- scene backend ops (called with the scene lock held) ---- */
@@ -96,7 +101,7 @@ static int legacy_submit(void *ud, const anland_scene_snapshot_t *snap)
 
     /* No consumer: there is nobody to present to. Rejecting here is what turns
      * into COMMIT_DROPPED(BACKEND_ERROR) for the DE. */
-    if (!b->session_valid || b->ready_pending || b->retirement_pending ||
+    if (!b->session_valid || !b->target_selected || b->ready_pending || b->retirement_pending ||
         !anland_device_is_connected(b->dev))
         return -1;
 
@@ -145,6 +150,8 @@ static int legacy_submit(void *ud, const anland_scene_snapshot_t *snap)
     b->pending_commit = snap->commit_id;
     b->pending_buffer_count = buffer_count;
     b->pending_fence = fence;
+    b->submitted_at = anland_pacing_now_ns();
+    anland_pacing_note_submitted(&b->pacing);
     return 0;
 }
 
@@ -174,6 +181,7 @@ static bool refresh_output(struct anland_scene_legacy *b)
 
     b->output = out;
     b->have_output = true;
+    anland_pacing_note_interval(&b->pacing, out.refresh_mhz);
 
     if (changed)
         anland_scene_backend_output_changed(b->scene, out.width, out.height,
@@ -184,7 +192,7 @@ static bool refresh_output(struct anland_scene_legacy *b)
 /* Publish the buffer slot the consumer wants the producer to render into next.
  *
  * This is the RENDER TARGET signal, and it is what a DE's frame loop waits for:
- * the handshake publishes a selection before any frame has been flipped, so the
+ * a real buffer-ready notification publishes the selection before the first flip, so the
  * first publication starts rendering without ever claiming a presentation.
  *
  * An index outside the consumer's own buffer set means the session is corrupt;
@@ -232,12 +240,16 @@ static void drain_buffer_ready(struct anland_scene_legacy *b)
  * leak, and let the scene report the drop + release the buffers. */
 static void drop_pending(struct anland_scene_legacy *b)
 {
+    const bool had_pending = b->pending_commit != 0;
     if (b->pending_fence >= 0) {
         close(b->pending_fence);
         b->pending_fence = -1;
     }
     b->pending_commit = 0;
     b->pending_buffer_count = 0;
+    if (had_pending)
+        anland_pacing_note_dropped(&b->pacing);
+    b->submitted_at = 0;
 }
 
 /* Remove all aliases only after a release was queued successfully (or the
@@ -289,9 +301,13 @@ static void drop_session(struct anland_scene_legacy *b)
          * handed-off commits. It must run only once, not once per retry. */
         anland_scene_invalidate(b->scene);
         drop_pending(b);
+        if (b->inflight_commit)
+            anland_pacing_note_dropped(&b->pacing);
         b->inflight_commit = 0;
         b->inflight_buffer_count = 0;
+        b->flipped_at = 0;
         b->session_valid = false;
+        b->target_selected = false;
         b->retirement_pending = true;
         b->ready_pending = false;
         b->have_output = false;
@@ -303,7 +319,7 @@ static void drop_session(struct anland_scene_legacy *b)
 
 /* ---- lifecycle ---- */
 
-anland_scene_legacy *anland_scene_legacy_create(const char *socket_path)
+static anland_scene_legacy *legacy_create(const char *socket_path, bool deferred)
 {
     struct anland_scene_legacy *b = calloc(1, sizeof(*b));
     if (!b)
@@ -313,7 +329,7 @@ anland_scene_legacy *anland_scene_legacy_create(const char *socket_path)
      * this adapter must start as -1 or a drop path would close someone else's fd. */
     b->pending_fence = -1;
 
-    b->dev = anland_device_open(socket_path);
+    b->dev = deferred ? anland_device_open_deferred(socket_path) : anland_device_open(socket_path);
     if (!b->dev) {
         free(b);
         return NULL;
@@ -331,6 +347,9 @@ anland_scene_legacy *anland_scene_legacy_create(const char *socket_path)
     }
     return b;
 }
+
+anland_scene_legacy *anland_scene_legacy_create(const char *path) { return legacy_create(path, false); }
+anland_scene_legacy *anland_scene_legacy_create_deferred(const char *path) { return legacy_create(path, true); }
 
 void anland_scene_legacy_destroy(anland_scene_legacy *b)
 {
@@ -361,8 +380,17 @@ bool anland_scene_legacy_connected(anland_scene_legacy *b)
 
 bool anland_scene_legacy_target_available(anland_scene_legacy *b)
 {
-    return b && b->session_valid && !b->ready_pending &&
+    return b && b->session_valid && b->target_selected && !b->ready_pending &&
            !b->retirement_pending && anland_device_is_connected(b->dev);
+}
+
+bool anland_scene_legacy_renderable(anland_scene_legacy *b)
+{
+    if (!anland_scene_legacy_target_available(b) ||
+        b->pending_commit || b->inflight_commit) return false;
+    const int slot = anland_device_current_fb_raw(b->dev);
+    return slot >= 0 && slot < anland_device_fb_count(b->dev) &&
+           slot < ANLAND_DEVICE_MAX_BUFS && b->retained_count[slot] == 0;
 }
 
 int anland_scene_legacy_reconnect(anland_scene_legacy *b)
@@ -395,6 +423,7 @@ int anland_scene_legacy_reconnect(anland_scene_legacy *b)
      * publication from a session that has already ended is refused by the scene. */
     b->session_generation = anland_scene_generation(b->scene);
     b->session_valid = true;
+    b->target_selected = false;
 
     if (!refresh_output(b)) {
         drop_session(b);
@@ -402,17 +431,9 @@ int anland_scene_legacy_reconnect(anland_scene_legacy *b)
         return -1;
     }
 
-    /* The handshake already published which buffer the consumer wants first, so
-     * announce the render target now: this is what lets a DE start (or resume)
-     * its frame loop. It is not a presentation — nothing has been flipped yet. */
-    if (publish_target_ready(b) != 0) {
-        /* An unusable selection is not a usable session: detach so the caller's
-         * next reconnect() runs a fresh handshake instead of rendering blind. */
-        drop_session(b);
-        anland_device_force_fallback(b->dev);
-        return -1;
-    }
-    return 0;
+    /* Pool metadata is not a slot selection. Consume an already pending real
+     * signal, otherwise keep the session and let the event loop pump it later. */
+    return anland_scene_legacy_pump(b, 0);
 }
 
 int anland_scene_legacy_reopen(anland_scene_legacy *b, const char *socket_path)
@@ -453,7 +474,7 @@ int anland_scene_legacy_present(anland_scene_legacy *b)
         return -1;
     if (b->pending_commit == 0)
         return -1; /* nothing accepted, or already flipped */
-    if (!b->session_valid || b->ready_pending ||
+    if (!b->session_valid || !b->target_selected || b->ready_pending ||
         !anland_device_is_connected(b->dev))
         return -1;
 
@@ -501,6 +522,8 @@ int anland_scene_legacy_present(anland_scene_legacy *b)
     b->pending_commit = 0;
     b->pending_buffer_count = 0;
     b->frames_flipped++;
+    b->flipped_at = anland_pacing_now_ns();
+    anland_pacing_note_flip(&b->pacing, b->submitted_at, b->flipped_at);
     return 0;
 }
 
@@ -519,12 +542,20 @@ int anland_scene_legacy_pump(anland_scene_legacy *b, int timeout_ms)
         return 0;
     }
 
+    /* Watch peer closure in the same poll as target/ACK readiness, without
+     * an extra hot-path syscall or reading application input. An eventfd
+     * cannot tell us that the consumer died before selecting its first slot. */
+    const int ready = anland_device_poll_buffer_ready(b->dev, b->ready_pending ? 0 : timeout_ms);
+    if (ready < 0) {
+        drop_session(b);
+        return 0;
+    }
+    /* A live consumer can take any time to select its first slot. No fake slot
+     * zero and no wall-clock arrival deadline; only proven loss retires it. */
     if (!b->ready_pending) {
+        if (!ready) return 0;
         const int fd = anland_device_buffer_ready_fd(b->dev);
         if (fd < 0)
-            return 0;
-        struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
-        if (poll(&p, 1, timeout_ms) <= 0 || !(p.revents & POLLIN))
             return 0;
         eventfd_t v;
         if (eventfd_read(fd, &v) != 0)
@@ -538,8 +569,15 @@ int anland_scene_legacy_pump(anland_scene_legacy *b, int timeout_ms)
             const uint64_t done = b->inflight_commit;
             b->inflight_commit = 0;
             b->inflight_buffer_count = 0;
-            if (anland_scene_backend_presented(b->scene, done, 0) == 0)
+            if (anland_scene_backend_presented(b->scene, done, 0) == 0) {
                 b->frames_acked++;
+                anland_pacing_note_ack(&b->pacing, b->submitted_at, b->flipped_at,
+                                       anland_pacing_now_ns());
+            } else {
+                anland_pacing_note_dropped(&b->pacing);
+            }
+            b->submitted_at = 0;
+            b->flipped_at = 0;
         }
     }
     const int slot = b->ready_slot;
@@ -561,6 +599,7 @@ int anland_scene_legacy_pump(anland_scene_legacy *b, int timeout_ms)
         anland_device_force_fallback(b->dev);
         return -1;
     }
+    b->target_selected = true;
     b->ready_pending = false;
     return 0;
 }
@@ -588,6 +627,23 @@ uint64_t anland_scene_legacy_frames_flipped(const anland_scene_legacy *b)
 uint64_t anland_scene_legacy_frames_acked(const anland_scene_legacy *b)
 {
     return b ? b->frames_acked : 0;
+}
+
+void anland_scene_legacy_pacing(const anland_scene_legacy *b, anland_pacing *out)
+{
+    if (!out)
+        return;
+    if (!b) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = b->pacing;
+}
+
+void anland_scene_legacy_note_refresh(anland_scene_legacy *b, uint64_t refresh_mhz)
+{
+    if (b)
+        anland_pacing_note_interval(&b->pacing, refresh_mhz);
 }
 
 uint64_t anland_scene_legacy_reconnects(const anland_scene_legacy *b)

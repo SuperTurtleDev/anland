@@ -1,6 +1,7 @@
 #include "anland_present.h"
 #include "anland_scene_legacy.h"
 #include <stdlib.h>
+#include <string.h>
 
 /* One presentation path. The scene backend retains submission, generation,
  * backpressure, fence ownership and acknowledgement/release accounting. */
@@ -15,7 +16,9 @@ anland_present *anland_present_create(const anland_present_config_t *config)
     anland_present *present = calloc(1, sizeof(*present));
     if (!present)
         return NULL;
-    present->transport = anland_scene_legacy_create(config->endpoint);
+    present->transport = config->defer_connector
+        ? anland_scene_legacy_create_deferred(config->endpoint)
+        : anland_scene_legacy_create(config->endpoint);
     if (!present->transport) {
         free(present);
         return NULL;
@@ -75,4 +78,25 @@ int anland_present_present(anland_present *present)
 int anland_present_pump(anland_present *present, int timeout_ms)
 {
     return present ? anland_scene_legacy_pump(present->transport, timeout_ms) : -1;
+}
+bool anland_present_renderable(const anland_present *present)
+{
+    return present && anland_scene_legacy_renderable(present->transport);
+}
+
+void anland_present_pacing(const anland_present *present, anland_pacing *out)
+{
+    if (!out)
+        return;
+    if (!present) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    anland_scene_legacy_pacing(present->transport, out);
+}
+
+void anland_present_note_refresh(anland_present *present, uint64_t refresh_mhz)
+{
+    if (present)
+        anland_scene_legacy_note_refresh(present->transport, refresh_mhz);
 }

@@ -9,6 +9,8 @@ void anland_gamescope_input_reset(anland_gamescope_input *input)
     free(input->payload);
     input->payload = NULL;
     input->pending_type = input->pending_size = input->pending_service = 0;
+    input->pending_text_identity = input->header_text_identity = 0;
+    input->header_identity_valid = false;
 }
 
 static int consume_pending(anland_gamescope_input *input, anland_device *device)
@@ -30,7 +32,8 @@ static int consume_pending(anland_gamescope_input *input, anland_device *device)
         if (rc > 0 && input->text) {
             ((char *)input->payload)[input->pending_size] = 0;
             input->text(input->text_userdata, input->pending_type,
-                        input->payload, input->pending_size);
+                        input->payload, input->pending_size,
+                        input->pending_text_identity);
         }
     }
     if (rc != 0)
@@ -48,10 +51,23 @@ int anland_gamescope_input_pump(anland_gamescope_input *input, anland_device *de
             if (rc < 0) return -1;
             if (!rc) break;
         }
+        const uint64_t observed_identity = input->text_identity ?
+            input->text_identity(input->text_identity_userdata) : 0;
+        if (!input->header_identity_valid)
+            input->header_text_identity = observed_identity;
         anland_device_input_t raw;
         int rc = anland_device_poll_input(device, &raw, 0);
         if (rc < 0) return -1;
-        if (!rc) break;
+        if (!rc) {
+            input->header_identity_valid =
+                anland_device_input_header_pending(device);
+            if (!input->header_identity_valid)
+                input->header_text_identity = 0;
+            break;
+        }
+        const uint64_t event_identity = input->header_identity_valid ?
+            input->header_text_identity : observed_identity;
+        input->header_identity_valid = false;
         if (raw.type == ANLAND_DEVICE_IN_CLIPBOARD ||
             raw.type == ANLAND_DEVICE_IN_TEXT_INPUT ||
             raw.type == ANLAND_DEVICE_IN_RESOURCE) {
@@ -60,15 +76,28 @@ int anland_gamescope_input_pump(anland_gamescope_input *input, anland_device *de
             if (size > (raw.type == ANLAND_DEVICE_IN_RESOURCE ? 64u : ANLAND_DEVICE_MAX_PAYLOAD_SIZE))
                 return -1;
             // A zero-resource response carries no following SCM_RIGHTS message.
-            if (!size && raw.type == ANLAND_DEVICE_IN_RESOURCE) continue;
+            if (!size && raw.type == ANLAND_DEVICE_IN_RESOURCE) {
+                anland_gamescope_input_event event = {0};
+                event.kind = AG_RESOURCE_INVALID;
+                event.code = (int32_t)raw.resource.type;
+                sink(userdata, &event);
+                ++emitted;
+                continue;
+            }
             if (!size && raw.type != ANLAND_DEVICE_IN_RESOURCE) {
                 if (input->text)
-                    input->text(input->text_userdata, raw.type, "", 0);
+                    input->text(input->text_userdata, raw.type, "", 0, event_identity);
                 continue;
             }
             input->pending_type = raw.type;
             input->pending_size = size;
             input->pending_service = raw.type == ANLAND_DEVICE_IN_RESOURCE ? raw.resource.type : 0;
+            if (raw.type == ANLAND_DEVICE_IN_TEXT_INPUT) {
+                input->pending_text_identity = event_identity;
+            } else {
+                input->pending_text_identity = 0;
+                input->header_identity_valid = false;
+            }
             if (raw.type != ANLAND_DEVICE_IN_RESOURCE) {
                 input->payload = calloc((size_t)size + 4, 1);
                 if (!input->payload) return -1;

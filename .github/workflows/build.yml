@@ -53,11 +53,11 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug, O=Android, C=US" -noprompt
 
-      - name: Test input handling
-        if: matrix.name == 'anland-v5'
+      - name: Run Android unit tests
+        if: matrix.task == 'assemblePlainRelease'
         working-directory: consumers/anland_v5/android_consumer
         run: |
-          sh app/src/test/native/run_input_grab_tests.sh
+          chmod +x gradlew
           ./gradlew testPlainDebugUnitTest
 
       - name: Build APK

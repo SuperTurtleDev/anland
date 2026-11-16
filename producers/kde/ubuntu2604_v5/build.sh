@@ -105,11 +105,11 @@ build_pkg() {
     log "Applying patch: $patch -> $tree"
     if [ "$src" = kwin ] && [ -n "${KWIN_SOURCE_TREE:-}" ]; then
         # Validate every hunk without changing the prepared source.
-        ( cd "$tree" && patch --batch --force --dry-run -R -p1 < "$patch" ) \
+        ( cd "$tree" && patch --batch --fuzz=2 --no-backup-if-mismatch --force --dry-run -R -p1 < "$patch" ) \
             || die "prepared KWin source does not contain the complete kwin.patch"
         log "Prepared source already contains kwin.patch"
     else
-        ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
+        ( cd "$tree" && patch --batch --fuzz=2 --no-backup-if-mismatch -p1 --forward --reject-file=- < "$patch" ) \
             || die "patch did not apply cleanly for $src"
     fi
 

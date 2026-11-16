@@ -1,11 +1,11 @@
 diff --git a/clutter/clutter/clutter-stage-view-private.h b/clutter/clutter/clutter-stage-view-private.h
-index 31ac7e144e..246bb5afc2 100644
+index 6e3fde0..bb6976b 100644
 --- a/clutter/clutter/clutter-stage-view-private.h
 +++ b/clutter/clutter/clutter-stage-view-private.h
 @@ -21,6 +21,11 @@
  #include "clutter/clutter-types.h"
  #include "mtk/mtk.h"
- 
+
 +typedef gboolean (* MetaStageViewPresentFunc) (ClutterStageView *view,
 +                                                ClutterFrame     *frame,
 +                                                int64_t           global_frame_counter,
@@ -17,7 +17,7 @@ index 31ac7e144e..246bb5afc2 100644
 @@ -46,6 +51,20 @@ void clutter_stage_view_invalidate_projection (ClutterStageView *view);
  void clutter_stage_view_set_projection (ClutterStageView        *view,
                                          const graphene_matrix_t *matrix);
- 
+
 +CLUTTER_EXPORT
 +void clutter_stage_view_replace_framebuffer (ClutterStageView *view,
 +                                              CoglFramebuffer  *framebuffer);
@@ -36,23 +36,23 @@ index 31ac7e144e..246bb5afc2 100644
  void clutter_stage_view_add_redraw_clip (ClutterStageView   *view,
                                           const MtkRectangle *clip);
 diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
-index aedd5f6cf9..fe9ff27c0b 100644
+index 52d61bd..4902031 100644
 --- a/clutter/clutter/clutter-stage-view.c
 +++ b/clutter/clutter/clutter-stage-view.c
-@@ -90,6 +90,9 @@ typedef struct _ClutterStageViewPrivate
+@@ -93,6 +93,9 @@ typedef struct _ClutterStageViewPrivate
    gboolean has_accumulated_redraw_clip;
    MtkRegion *accumulated_redraw_clip;
- 
+
 +  MetaStageViewPresentFunc present_func;
 +  gpointer present_user_data;
 +
    float refresh_rate;
    int64_t vblank_duration_us;
    ClutterFrameClock *frame_clock;
-@@ -1148,6 +1151,51 @@ clutter_stage_view_set_framebuffer (ClutterStageView *view,
+@@ -1146,6 +1149,51 @@ clutter_stage_view_set_framebuffer (ClutterStageView *view,
      }
  }
- 
+
 +void
 +clutter_stage_view_replace_framebuffer (ClutterStageView *view,
 +                                        CoglFramebuffer  *framebuffer)
@@ -102,60 +102,57 @@ index aedd5f6cf9..fe9ff27c0b 100644
  clutter_stage_view_set_transform (ClutterStageView    *view,
                                    MtkMonitorTransform  transform)
 diff --git a/config.h.meson b/config.h.meson
-index 65794f2674..b84ee1dd45 100644
+index 5e7e09b..c335e49 100644
 --- a/config.h.meson
 +++ b/config.h.meson
-@@ -52,6 +52,9 @@
- /* Define if you want to enable the native (KMS) backend based on systemd */
- #mesondefine HAVE_NATIVE_BACKEND
- 
+@@ -37,6 +37,9 @@
+ /* libwacom has get_num_rings() */
+ #mesondefine HAVE_LIBWACOM_GET_NUM_RINGS
+
 +/* Define if the Anland display backend is enabled */
 +#mesondefine HAVE_ANLAND
 +
  /* Define if you want to enable XWayland support */
  #mesondefine HAVE_XWAYLAND
- 
+
 diff --git a/meson.build b/meson.build
-index 14fb130583..878be6a938 100644
+index cdd13b6..8bb1f2e 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -279,6 +279,11 @@ if have_native_backend
-   endif
+@@ -254,6 +254,8 @@ if not have_gles2
  endif
- 
+
+
 +have_anland = get_option('anland').enabled()
-+if have_anland and not have_native_backend
-+  error('The Anland backend requires the native backend')
-+endif
 +
  have_drm_plane_size_hint = cc.has_type('struct drm_plane_size_hint',
                                          dependencies: libdrm_dep,
                                          prefix: '#include <drm_mode.h>')
-@@ -318,7 +323,7 @@ if have_startup_notification
+@@ -274,7 +276,7 @@ if have_startup_notification
  endif
- 
+
  have_remote_desktop = get_option('remote_desktop')
 -if have_remote_desktop
 +if have_remote_desktop or have_anland
    libpipewire_dep = dependency('libpipewire-0.3', version: libpipewire_req)
  endif
- 
-@@ -569,6 +574,7 @@ cdata.set('HAVE_GLES2', have_gles2)
+
+@@ -545,6 +547,7 @@ cdata.set('HAVE_EGL', have_egl)
+ cdata.set('HAVE_GL', have_gl)
+ cdata.set('HAVE_GLES2', have_gles2)
  cdata.set('HAVE_XWAYLAND', have_xwayland)
- cdata.set('HAVE_LOGIND', have_logind)
- cdata.set('HAVE_NATIVE_BACKEND', have_native_backend)
 +cdata.set('HAVE_ANLAND', have_anland)
  cdata.set('HAVE_REMOTE_DESKTOP', have_remote_desktop)
  cdata.set('HAVE_DEVKIT', have_devkit)
  cdata.set('HAVE_GNOME_DESKTOP', have_gnome_desktop)
 diff --git a/meson.options b/meson.options
-index 4824a8c750..aee9be7f64 100644
+index 4f8c0c9..46e4ce0 100644
 --- a/meson.options
 +++ b/meson.options
-@@ -46,6 +46,12 @@ option('native_backend',
-   description: 'Enable the native backend'
+@@ -34,6 +34,12 @@ option('xwayland',
+   description: 'Enable Xwayland support'
  )
- 
+
 +option('anland',
 +  type: 'feature',
 +  value: 'disabled',
@@ -166,13 +163,13 @@ index 4824a8c750..aee9be7f64 100644
    type: 'boolean',
    value: true,
 diff --git a/src/backends/meta-stage-impl.c b/src/backends/meta-stage-impl.c
-index e6f3b18a0a..738f315e93 100644
+index 167a552..6d9eb43 100644
 --- a/src/backends/meta-stage-impl.c
 +++ b/src/backends/meta-stage-impl.c
-@@ -308,6 +308,13 @@ swap_framebuffer (ClutterStageWindow *stage_window,
+@@ -309,6 +309,13 @@ swap_framebuffer (ClutterStageWindow *stage_window,
      {
        MetaStageView *view = META_STAGE_VIEW (stage_view);
- 
+
 +      if (clutter_stage_view_present (stage_view, frame,
 +                                      priv->global_frame_counter))
 +        {
@@ -183,72 +180,14 @@ index e6f3b18a0a..738f315e93 100644
        meta_topic (META_DEBUG_BACKEND,
                    "fake offscreen swap (framebuffer: %p)",
                    framebuffer);
-diff --git a/src/backends/native/meta-renderer-native.c b/src/backends/native/meta-renderer-native.c
-index d53a298a34..9505f14a18 100644
---- a/src/backends/native/meta-renderer-native.c
-+++ b/src/backends/native/meta-renderer-native.c
-@@ -712,11 +712,43 @@ meta_renderer_native_create_dma_buf_framebuffer (MetaRendererNative  *renderer_n
-   CoglTexture *cogl_tex;
-   CoglOffscreen *cogl_fbo;
-   const MetaFormatInfo *format_info;
-+  const uint64_t *import_modifiers = modifiers;
- 
-   format_info = meta_format_info_from_drm_format (drm_format);
--  g_assert (format_info);
-+  if (!format_info)
-+    {
-+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-+                   "Unsupported dma-buf format 0x%08x", drm_format);
-+      return NULL;
-+    }
-   cogl_format = format_info->cogl_format;
- 
-+  if (!meta_egl_has_extensions (egl, egl_display, NULL,
-+                                "EGL_EXT_image_dma_buf_import", NULL))
-+    {
-+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-+                   "EGL does not support dma-buf image import");
-+      return NULL;
-+    }
-+
-+  if (modifiers &&
-+      !meta_egl_has_extensions (egl, egl_display, NULL,
-+                                "EGL_EXT_image_dma_buf_import_modifiers",
-+                                NULL))
-+    {
-+      for (int i = 0; i < n_planes; i++)
-+        {
-+          if (modifiers[i] != DRM_FORMAT_MOD_LINEAR)
-+            {
-+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-+                           "EGL cannot import non-linear dma-buf modifiers");
-+              return NULL;
-+            }
-+        }
-+
-+      import_modifiers = NULL;
-+    }
-+
-   egl_image = meta_egl_create_dmabuf_image (egl,
-                                             egl_display,
-                                             width,
-@@ -726,7 +758,7 @@ meta_renderer_native_create_dma_buf_framebuffer (MetaRendererNative  *renderer_n
-                                             fds,
-                                             strides,
-                                             offsets,
--                                            modifiers,
-+                                            import_modifiers,
-                                             error);
-   if (egl_image == EGL_NO_IMAGE_KHR)
-     return NULL;
 diff --git a/src/backends/native/meta-seat-impl.c b/src/backends/native/meta-seat-impl.c
-index d13be4f14a..a5bd16b89c 100644
+index c45173a..a574bc4 100644
 --- a/src/backends/native/meta-seat-impl.c
 +++ b/src/backends/native/meta-seat-impl.c
-@@ -985,6 +985,67 @@ meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_impl,
+@@ -1004,6 +1004,67 @@ meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_impl,
    queue_event (seat_impl, event);
  }
- 
+
 +void
 +meta_seat_impl_notify_absolute_relative_motion_in_impl (MetaSeatImpl       *seat_impl,
 +                                                        ClutterInputDevice *input_device,
@@ -314,13 +253,13 @@ index d13be4f14a..a5bd16b89c 100644
  meta_seat_impl_notify_button_in_impl (MetaSeatImpl       *seat_impl,
                                        ClutterInputDevice *input_device,
 diff --git a/src/backends/native/meta-seat-impl.h b/src/backends/native/meta-seat-impl.h
-index 5233715b9f..0555e83547 100644
+index 8b2eb61..de79a34 100644
 --- a/src/backends/native/meta-seat-impl.h
 +++ b/src/backends/native/meta-seat-impl.h
-@@ -147,6 +147,17 @@ void meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_imp
+@@ -145,6 +145,17 @@ void meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_imp
                                                      float               y,
                                                      double             *axes);
- 
+
 +void meta_seat_impl_notify_absolute_relative_motion_in_impl (MetaSeatImpl       *seat_impl,
 +                                                             ClutterInputDevice *input_device,
 +                                                             uint64_t            time_us,
@@ -336,13 +275,13 @@ index 5233715b9f..0555e83547 100644
                                             ClutterInputDevice *input_device,
                                             uint64_t            time_us,
 diff --git a/src/backends/native/meta-virtual-input-device-native.c b/src/backends/native/meta-virtual-input-device-native.c
-index e82b9aa210..e5c6264f44 100644
+index 0d6b8f2..0e46565 100644
 --- a/src/backends/native/meta-virtual-input-device-native.c
 +++ b/src/backends/native/meta-virtual-input-device-native.c
 @@ -64,6 +64,15 @@ typedef struct
    double y;
  } MetaVirtualEventMotion;
- 
+
 +typedef struct
 +{
 +  uint64_t time_us;
@@ -358,7 +297,7 @@ index e82b9aa210..e5c6264f44 100644
 @@ -96,6 +105,12 @@ typedef struct
    double y;
  } MetaVirtualEventTouch;
- 
+
 +typedef struct
 +{
 +  uint64_t time_us;
@@ -371,7 +310,7 @@ index e82b9aa210..e5c6264f44 100644
 @@ -312,6 +327,57 @@ meta_virtual_input_device_native_notify_absolute_motion (ClutterVirtualInputDevi
    g_object_unref (task);
  }
- 
+
 +static gboolean
 +notify_absolute_relative_motion_in_impl (GTask *task)
 +{
@@ -429,7 +368,7 @@ index e82b9aa210..e5c6264f44 100644
 @@ -971,6 +1037,98 @@ meta_virtual_input_device_native_notify_touch_up (ClutterVirtualInputDevice *vir
    g_object_unref (task);
  }
- 
+
 +static gboolean
 +notify_touch_events_in_impl (GTask *task)
 +{
@@ -526,17 +465,17 @@ index e82b9aa210..e5c6264f44 100644
  meta_virtual_input_device_native_get_property (GObject    *object,
                                                 guint       prop_id,
 diff --git a/src/backends/native/meta-virtual-input-device-native.h b/src/backends/native/meta-virtual-input-device-native.h
-index a41b5ed294..149c989282 100644
+index a41b5ed..149c989 100644
 --- a/src/backends/native/meta-virtual-input-device-native.h
 +++ b/src/backends/native/meta-virtual-input-device-native.h
 @@ -19,6 +19,8 @@
- 
+
  #pragma once
- 
+
 +#include <stdint.h>
 +
  #include "clutter/clutter-virtual-input-device.h"
- 
+
  #define META_TYPE_VIRTUAL_INPUT_DEVICE_NATIVE (meta_virtual_input_device_native_get_type ())
 @@ -26,3 +28,33 @@ G_DECLARE_FINAL_TYPE (MetaVirtualInputDeviceNative,
                        meta_virtual_input_device_native,
@@ -573,11 +512,11 @@ index a41b5ed294..149c989282 100644
 +  const MetaVirtualTouchEvent  *events,
 +  gsize                         n_events);
 diff --git a/src/core/display.c b/src/core/display.c
-index dd75585c23..39bfa6ac52 100644
+index 45b860e..7d6d6fe 100644
 --- a/src/core/display.c
 +++ b/src/core/display.c
-@@ -42,6 +42,9 @@
- 
+@@ -36,6 +36,9 @@
+
  #include "backends/meta-backend-private.h"
  #include "backends/meta-cursor-xcursor.h"
 +#ifdef HAVE_ANLAND
@@ -586,14 +525,14 @@ index dd75585c23..39bfa6ac52 100644
  #include "backends/meta-cursor-tracker-private.h"
  #include "backends/meta-input-capture.h"
  #include "backends/meta-input-device-private.h"
-@@ -680,15 +683,29 @@ meta_display_init_x11_finish (MetaDisplay   *display,
+@@ -669,15 +672,29 @@ meta_display_init_x11_finish (MetaDisplay   *display,
                                GError       **error)
  {
    MetaX11Display *x11_display;
 +  gboolean x11_services_started;
- 
+
    g_assert (g_task_get_source_tag (G_TASK (result)) == meta_display_init_x11);
- 
+
 -  if (!g_task_propagate_boolean (G_TASK (result), error))
 +  x11_services_started = g_task_propagate_boolean (G_TASK (result), error);
 +  if (!x11_services_started)
@@ -603,7 +542,7 @@ index dd75585c23..39bfa6ac52 100644
 +#ifdef HAVE_ANLAND
 +      MetaContext *context = meta_display_get_context (display);
 +      MetaBackend *backend = meta_context_get_backend (context);
- 
+
 -      return FALSE;
 +      if (*error == NULL && META_IS_BACKEND_ANLAND (backend))
 +        {
@@ -618,16 +557,16 @@ index dd75585c23..39bfa6ac52 100644
 +          return FALSE;
 +        }
      }
- 
+
    if (display->x11_display)
 diff --git a/src/core/meta-context-main.c b/src/core/meta-context-main.c
-index 91cde41746..9687188af2 100644
+index e40394b..bf15690 100644
 --- a/src/core/meta-context-main.c
 +++ b/src/core/meta-context-main.c
-@@ -39,6 +39,10 @@
+@@ -37,6 +37,10 @@
+ #include "backends/native/meta-backend-native.h"
  #include "backends/native/meta-backend-native-types.h"
- #endif
- 
+
 +#ifdef HAVE_ANLAND
 +#include "backends/anland/meta-backend-anland.h"
 +#endif
@@ -635,21 +574,21 @@ index 91cde41746..9687188af2 100644
  #ifdef HAVE_DEVKIT
  #include "core/meta-mdk.h"
  #endif
-@@ -53,6 +57,10 @@ typedef struct _MetaContextMainOptions
-   gboolean headless;
+@@ -51,6 +55,10 @@ typedef struct _MetaContextMainOptions
    gboolean devkit;
+   char *devkit_args;
    GList *virtual_monitor_infos;
-+#endif
 +#ifdef HAVE_ANLAND
 +  gboolean anland;
 +  char *anland_socket;
- #endif
++#endif
    char *trace_file;
    gboolean debug_control;
-@@ -92,6 +100,29 @@ check_configuration (MetaContextMain  *context_main,
+   gboolean unsafe_mode;
+@@ -85,6 +93,29 @@ check_configuration (MetaContextMain  *context_main,
+       return FALSE;
      }
- #endif /* HAVE_NATIVE_BACKEND */
- 
+
 +#ifdef HAVE_ANLAND
 +  if (context_main->options.anland_socket &&
 +      !context_main->options.anland)
@@ -675,31 +614,31 @@ index 91cde41746..9687188af2 100644
 +
    return TRUE;
  }
- 
-@@ -105,11 +136,19 @@ meta_context_main_configure (MetaContext   *context,
+
+@@ -98,11 +129,19 @@ meta_context_main_configure (MetaContext   *context,
    MetaContextClass *context_class =
      META_CONTEXT_CLASS (meta_context_main_parent_class);
    g_autofree char *wayland_display = NULL;
 +#ifdef HAVE_ANLAND
 +  const char *anland_socket;
 +#endif
- 
+
    if (!context_class->configure (context, argc, argv, error))
      return FALSE;
- 
+
    wayland_display = g_steal_pointer (&context_main->options.wayland_display);
 +#ifdef HAVE_ANLAND
 +  anland_socket = g_getenv ("ANLAND_SOCKET");
 +  if (anland_socket && *anland_socket)
 +    context_main->options.anland = TRUE;
 +#endif
- 
+
    if (!check_configuration (context_main, error))
      return FALSE;
-@@ -240,6 +279,13 @@ meta_context_main_setup (MetaContext  *context,
+@@ -234,6 +273,13 @@ meta_context_main_setup (MetaContext  *context,
      }
  #endif
- 
+
 +#ifdef HAVE_ANLAND
 +  if (context_main->options.anland &&
 +      !meta_backend_anland_setup (
@@ -709,11 +648,11 @@ index 91cde41746..9687188af2 100644
 +
    return TRUE;
  }
- 
-@@ -255,6 +301,31 @@ create_headless_backend (MetaContext  *context,
+
+@@ -248,6 +294,31 @@ create_headless_backend (MetaContext  *context,
                           NULL);
  }
- 
+
 +#ifdef HAVE_ANLAND
 +static MetaBackend *
 +create_anland_backend (MetaContext  *context,
@@ -742,10 +681,10 @@ index 91cde41746..9687188af2 100644
  static MetaBackend *
  create_native_backend (MetaContext  *context,
                         GError      **error)
-@@ -273,6 +344,10 @@ meta_context_main_create_backend (MetaContext  *context,
+@@ -264,6 +335,10 @@ meta_context_main_create_backend (MetaContext  *context,
+ {
    MetaContextMain *context_main = META_CONTEXT_MAIN (context);
- 
- #ifdef HAVE_NATIVE_BACKEND
+
 +#ifdef HAVE_ANLAND
 +  if (context_main->options.anland)
 +    return create_anland_backend (context, error);
@@ -753,7 +692,7 @@ index 91cde41746..9687188af2 100644
    if (context_main->options.headless ||
        context_main->options.devkit)
      return create_headless_backend (context, error);
-@@ -381,6 +456,19 @@ meta_context_main_add_option_entries (MetaContextMain *context_main)
+@@ -368,6 +443,19 @@ meta_context_main_add_option_entries (MetaContextMain *context_main)
        &context_main->options.headless,
        N_("Run as a headless display server")
      },
@@ -773,22 +712,22 @@ index 91cde41746..9687188af2 100644
      {
        "virtual-monitor", 0, 0, G_OPTION_ARG_CALLBACK,
        add_virtual_monitor_cb,
-@@ -438,6 +526,7 @@ meta_context_main_finalize (GObject *object)
- #ifdef HAVE_NATIVE_BACKEND
+@@ -428,6 +516,7 @@ meta_context_main_finalize (GObject *object)
+ {
    MetaContextMain *context_main = META_CONTEXT_MAIN (object);
- 
+
 +  g_clear_pointer (&context_main->options.anland_socket, g_free);
    g_list_free_full (context_main->persistent_virtual_monitors, g_object_unref);
    context_main->persistent_virtual_monitors = NULL;
- 
+
 diff --git a/src/meson.build b/src/meson.build
-index 04aef85771..d6f566ed32 100644
+index 60970ce..a1c951e 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -83,9 +83,14 @@ if have_libwacom
+@@ -78,9 +78,14 @@ if have_libwacom
    ]
  endif
- 
+
 -if have_remote_desktop
 +if have_remote_desktop or have_anland
    mutter_pkg_private_deps += [
@@ -801,10 +740,10 @@ index 04aef85771..d6f566ed32 100644
      libeis_dep,
    ]
  endif
-@@ -825,6 +830,12 @@ if have_native_backend
-   ]
- endif
- 
+@@ -790,6 +795,12 @@ mutter_sources += [
+   'compositor/meta-compositor-view-native.h',
+ ]
+
 +if have_anland
 +  # The backend source list lives in the shared backend directory so every
 +  # distribution overlay consumes one list instead of keeping its own copy.
@@ -815,21 +754,21 @@ index 04aef85771..d6f566ed32 100644
    mutter_sources += [
      'core/meta-mdk.c',
 diff --git a/src/wayland/meta-wayland-text-input.c b/src/wayland/meta-wayland-text-input.c
-index aac1b88536..10271645d5 100644
+index ef1866a..119cdec 100644
 --- a/src/wayland/meta-wayland-text-input.c
 +++ b/src/wayland/meta-wayland-text-input.c
 @@ -23,6 +23,7 @@
- 
+
  #include <wayland-server.h>
- 
+
 +#include "clutter/clutter/clutter-input-focus.h"
  #include "compositor/meta-surface-actor-wayland.h"
+ #include "mtk/mtk.h"
  #include "wayland/meta-wayland-private.h"
- #include "wayland/meta-wayland-seat.h"
-@@ -809,6 +810,22 @@ meta_wayland_text_input_destroy (MetaWaylandTextInput *text_input)
+@@ -1075,6 +1076,22 @@ meta_wayland_text_input_destroy (MetaWaylandTextInput *text_input)
    g_free (text_input);
  }
- 
+
 +gboolean
 +meta_wayland_text_input_commit_string (MetaWaylandTextInput *text_input,
 +                                       const char           *text)
@@ -850,23 +789,23 @@ index aac1b88536..10271645d5 100644
  meta_wayland_text_input_create_new_resource (MetaWaylandTextInput *text_input,
                                               struct wl_client     *client,
 diff --git a/src/wayland/meta-wayland-text-input.h b/src/wayland/meta-wayland-text-input.h
-index 458614c959..c28d0a0876 100644
+index 458614c..c28d0a0 100644
 --- a/src/wayland/meta-wayland-text-input.h
 +++ b/src/wayland/meta-wayland-text-input.h
 @@ -43,3 +43,6 @@ gboolean meta_wayland_text_input_update (MetaWaylandTextInput *text_input,
- 
+
  gboolean meta_wayland_text_input_handle_event (MetaWaylandTextInput *text_input,
                                                 const ClutterEvent   *event);
 +
 +gboolean meta_wayland_text_input_commit_string (MetaWaylandTextInput *text_input,
 +                                                const char           *text);
 diff --git a/src/wayland/meta-wayland.c b/src/wayland/meta-wayland.c
-index cc303d3648..90f4fbf381 100644
+index c2f2484..a878e6b 100644
 --- a/src/wayland/meta-wayland.c
 +++ b/src/wayland/meta-wayland.c
-@@ -774,11 +774,13 @@ set_gnome_env (const char *name,
+@@ -740,11 +740,13 @@ set_gnome_env (const char *name,
        g_autofree char *remote_error = NULL;
- 
+
        remote_error = g_dbus_error_get_remote_error (error);
 -      if (g_strcmp0 (remote_error, "org.freedesktop.DBus.Error.NameHasNoOwner") == 0)
 +      if (g_strcmp0 (remote_error, "org.freedesktop.DBus.Error.NameHasNoOwner") == 0 ||
@@ -881,11 +820,11 @@ index cc303d3648..90f4fbf381 100644
            g_warning ("Failed to set environment variable %s for gnome-session: %s",
                       name, error->message);
 diff --git a/src/wayland/meta-xwayland.c b/src/wayland/meta-xwayland.c
-index 535cb57112..e5e1d6f504 100644
+index 4b99bab..a82e932 100644
 --- a/src/wayland/meta-xwayland.c
 +++ b/src/wayland/meta-xwayland.c
 @@ -47,6 +47,9 @@
- 
+
  #include "backends/meta-monitor-manager-private.h"
  #include "backends/meta-settings-private.h"
 +#ifdef HAVE_ANLAND
@@ -894,9 +833,9 @@ index 535cb57112..e5e1d6f504 100644
  #include "meta/main.h"
  #include "meta/meta-backend.h"
  #include "mtk/mtk-x11.h"
-@@ -513,7 +516,8 @@ meta_xwayland_override_display_number (int number)
+@@ -512,7 +515,8 @@ meta_xwayland_override_display_number (int number)
  }
- 
+
  static gboolean
 -ensure_x11_unix_perms (GError **error)
 +ensure_x11_unix_perms (GError  **error,
@@ -904,7 +843,7 @@ index 535cb57112..e5e1d6f504 100644
  {
    /* Try to detect systems on which /tmp/.X11-unix is owned by neither root nor
     * ourselves because in that case the owner can take over the socket we create
-@@ -545,7 +549,8 @@ ensure_x11_unix_perms (GError **error)
+@@ -544,7 +548,8 @@ ensure_x11_unix_perms (GError **error)
    /* If the directory already exists, it should belong to the same
     * user as /tmp or belong to ourselves ...
     * (if /tmp is not owned by root or ourselves we're in deep trouble) */
@@ -914,9 +853,9 @@ index 535cb57112..e5e1d6f504 100644
      {
        g_set_error (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
                     "Wrong ownership for directory \"%s\", owned by %d but "
-@@ -577,12 +582,13 @@ ensure_x11_unix_perms (GError **error)
+@@ -576,12 +581,13 @@ ensure_x11_unix_perms (GError **error)
  }
- 
+
  static gboolean
 -ensure_x11_unix_dir (GError **error)
 +ensure_x11_unix_dir (GError  **error,
@@ -927,10 +866,10 @@ index 535cb57112..e5e1d6f504 100644
        if (errno == EEXIST)
 -        return ensure_x11_unix_perms (error);
 +        return ensure_x11_unix_perms (error, allow_untrusted_owner);
- 
+
        g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
                     "Failed to create directory \"%s\": %s",
-@@ -624,12 +630,13 @@ static gboolean
+@@ -623,12 +629,13 @@ static gboolean
  choose_xdisplay (MetaXWaylandManager     *manager,
                   MetaXWaylandConnection  *connection,
                   int                     *display,
@@ -939,19 +878,19 @@ index 535cb57112..e5e1d6f504 100644
  {
    int number_of_tries = 0;
    char *lock_file = NULL;
- 
+
 -  if (!ensure_x11_unix_dir (error))
 +  if (!ensure_x11_unix_dir (error, allow_untrusted_owner))
      return FALSE;
- 
+
    do
-@@ -764,12 +771,15 @@ on_displayfd_ready (int          fd,
+@@ -763,12 +770,15 @@ on_displayfd_ready (int          fd,
                      gpointer     user_data)
  {
    GTask *task = user_data;
 +  char display_name[16];
 +  ssize_t bytes_read;
- 
+
    /* The server writes its display name to the displayfd
 -   * socket when it's ready. We don't care about the data
 -   * in the socket, just that it wrote something, since
@@ -963,15 +902,15 @@ index 535cb57112..e5e1d6f504 100644
 +  bytes_read = recv (fd, display_name, sizeof (display_name), MSG_DONTWAIT);
 +  g_task_return_boolean (task, bytes_read > 0);
    g_object_unref (task);
- 
+
    return G_SOURCE_REMOVE;
-@@ -1091,8 +1101,13 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
+@@ -1111,8 +1121,13 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
    MetaMonitorManager *monitor_manager =
      meta_backend_get_monitor_manager (backend);
    MetaX11DisplayPolicy policy;
 +  gboolean allow_untrusted_owner = FALSE;
    int display = 0;
- 
+
 +#ifdef HAVE_ANLAND
 +  allow_untrusted_owner = META_IS_BACKEND_ANLAND (backend);
 +#endif
@@ -979,8 +918,8 @@ index 535cb57112..e5e1d6f504 100644
    if (display_number_override != -1)
      display = display_number_override;
    else if (g_getenv ("RUNNING_UNDER_GDM"))
-@@ -1100,14 +1115,16 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
- 
+@@ -1120,13 +1135,15 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
+
    if (!manager->public_connection.name)
      {
 -      if (!choose_xdisplay (manager, &manager->public_connection, &display, error))
@@ -989,7 +928,7 @@ index 535cb57112..e5e1d6f504 100644
          return FALSE;
        manager->public_connection.name =
          g_strdup_printf (":%d", manager->public_connection.display_index);
- 
+
        display++;
 -      if (!choose_xdisplay (manager, &manager->private_connection, &display, error))
 +      if (!choose_xdisplay (manager, &manager->private_connection, &display,
@@ -997,4 +936,3 @@ index 535cb57112..e5e1d6f504 100644
          return FALSE;
        manager->private_connection.name =
          g_strdup_printf ("unix:%s%d", X11_TMP_UNIX_PATH,
-                          manager->private_connection.display_index);

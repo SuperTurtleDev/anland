@@ -1,0 +1,135 @@
+--- a/src/inputmethod.cpp	2026-05-12 10:26:46.000000000 +0000
++++ b/src/inputmethod.cpp	2026-06-24 16:07:19.571120919 +0000
+@@ -505,6 +505,14 @@
+     }
+ }
+ 
++void InputMethod::commitText(const QString &text)
++{
++    if (text.isEmpty()) {
++        return;
++    }
++    commitString(m_serial++, text);
++}
++
+ void InputMethod::commitString(quint32 serial, const QString &text)
+ {
+     if (auto t2 = waylandServer()->seat()->textInputV2(); t2 && t2->isEnabled()) {
+--- a/src/inputmethod.h	2026-05-12 10:26:46.000000000 +0000
++++ b/src/inputmethod.h	2026-06-24 16:07:19.571367676 +0000
+@@ -71,6 +71,8 @@
+ 
+     void commitPendingText();
+ 
++    void commitText(const QString &text);
++
+     // for use by the QPA
+     InternalInputMethodContext *internalContext() const
+     {
+--- a/src/backends/CMakeLists.txt	2026-05-12 10:26:46.000000000 +0000
++++ b/src/backends/CMakeLists.txt	2026-06-24 16:07:19.571404526 +0000
+@@ -1,3 +1,4 @@
++add_subdirectory(anland)
+ add_subdirectory(drm)
+ add_subdirectory(fakeinput)
+ add_subdirectory(libinput)
+--- a/src/main_wayland.cpp	2026-05-12 10:26:46.000000000 +0000
++++ b/src/main_wayland.cpp	2026-06-24 16:07:19.571533592 +0000
+@@ -10,6 +10,7 @@
+ 
+ #include "config-kwin.h"
+ 
++#include "backends/anland/anland_backend.h"
+ #include "backends/drm/drm_backend.h"
+ #include "backends/virtual/virtual_backend.h"
+ #include "backends/wayland/wayland_backend.h"
+@@ -357,6 +358,7 @@
+                                      i18n("Exits this instance so it can be restarted by kwin_wayland_wrapper."));
+ 
+     QCommandLineOption drmOption(QStringLiteral("drm"), i18n("Render through drm node."));
++    QCommandLineOption anlandOption(QStringLiteral("anland"), i18n("Render to the anland display daemon."));
+     QCommandLineOption locale1Option(QStringLiteral("locale1"), i18n("Extract locale information from locale1 rather than the user's configuration"));
+ 
+     QCommandLineParser parser;
+@@ -380,6 +382,7 @@
+     parser.addOption(scaleOption);
+     parser.addOption(outputCountOption);
+     parser.addOption(drmOption);
++    parser.addOption(anlandOption);
+     parser.addOption(locale1Option);
+     parser.addOption(fullscreenOption);
+ 
+@@ -444,6 +447,7 @@
+ #endif
+         Wayland,
+         Virtual,
++        Anland,
+     };
+ 
+     BackendType backendType;
+@@ -452,7 +456,9 @@
+     qreal outputScale = 1;
+ 
+     // Decide what backend to use.
+-    if (parser.isSet(drmOption)) {
++    if (parser.isSet(anlandOption)||qEnvironmentVariableIsSet("ANLAND_SOCKET")) {
++        backendType = BackendType::Anland;
++    } else if (parser.isSet(drmOption)) {
+         backendType = BackendType::Kms;
+ #if KWIN_BUILD_X11
+     } else if (parser.isSet(x11DisplayOption)) {
+@@ -562,6 +568,12 @@
+         }));
+         break;
+     }
++    case BackendType::Anland: {
++        const QString anlandSocket = qEnvironmentVariable("ANLAND_SOCKET");
++        a.setSession(KWin::Session::create(KWin::Session::Type::Noop));
++        a.setOutputBackend(std::make_unique<KWin::AnlandBackend>(anlandSocket));
++        break;
++    }
+     }
+ 
+     KWin::WaylandServer *server = KWin::WaylandServer::create();
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -267,6 +267,17 @@ static FileDescriptor exportWaitSyncFile(const FileDescriptor &fileDescriptor)
+ void Transaction::watchDmaBuf(TransactionEntry *entry)
+ {
+ #if defined(Q_OS_LINUX)
++    // The anland backend always composites client buffers with EGL; it never
++    // scans them out directly. EGL's implicit dma-buf synchronization waits
++    // before the texture is sampled, so exporting a sync_file and installing a
++    // QSocketNotifier for every mailbox commit only duplicates that wait. On
++    // fast clients this otherwise adds poll/ioctl/close work to every commit and
++    // delays wl_buffer.release. Keep the generic KWin behavior unless the
++    // anland-only startup flag explicitly opts into this composited fast path.
++    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
++        return;
++    }
++
+     const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
+     if (!attributes) {
+         return;
+diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+--- a/src/scene/surfaceitem.cpp
++++ b/src/scene/surfaceitem.cpp
+@@ -140,5 +140,17 @@ void SurfaceItem::addDamage(const Region &region)
+     }
+     m_lastDamage = now;
++    // The newest mailbox buffer is installed independently through
++    // bufferChanged, so already pending damage needs no second repaint signal.
++    bool damageAlreadyPending = !region.isEmpty() && !m_damage.empty();
++    for (const auto &[device, damage] : m_damage) {
++        if (!damage.contains(region.boundingRect())) {
++            damageAlreadyPending = false;
++            break;
++        }
++    }
+     for (auto &[device, damage] : m_damage) {
+         damage += region;
+     }
++    if (damageAlreadyPending) {
++        return;
++    }

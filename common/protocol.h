@@ -69,6 +69,25 @@ struct buf_info {
 #define INPUT_TYPE_RESOURCE       11
 #define INPUT_TYPE_RESOURCE_INVALID 12
 
+/* Native tablet input. Each record retains the 20-byte InputEvent ABI. TOOL
+ * describes a stable tool; POSITION/TILT stage axes and FRAME commits one
+ * hardware sample. No trailing payload, new fd, or daemon handshake is needed. */
+#define INPUT_TYPE_TABLET_TOOL     13
+#define INPUT_TYPE_TABLET_POSITION 14
+#define INPUT_TYPE_TABLET_TILT     15
+#define INPUT_TYPE_TABLET_FRAME    16
+
+#define TABLET_TOOL_PEN    1
+#define TABLET_TOOL_ERASER 2
+#define TABLET_CAP_PRESSURE 1u
+#define TABLET_CAP_TILT     2u
+#define TABLET_CAP_DISTANCE 4u
+#define TABLET_FLAG_PROXIMITY 1u
+#define TABLET_FLAG_TIP_DOWN  2u
+#define TABLET_FLAG_CANCELED  4u
+#define TABLET_BUTTON_PRIMARY   1u /* Linux BTN_STYLUS */
+#define TABLET_BUTTON_SECONDARY 2u /* Linux BTN_STYLUS2 */
+
 /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
 #define SERVICE_TYPE_CAMERA 1
 
@@ -121,6 +140,20 @@ struct InputEvent {
             uint32_t type;
             uint32_t fdnum; // number of fds following in DATA_MSG_INPUT_EXTEND_FDS
         } resource;
+        struct {
+            uint32_t tool_id, tool_type, capabilities, device_id;
+        } tablet_tool;
+        struct {
+            uint32_t tool_id;
+            float x, y, pressure; /* buffer pixels; pressure normalized [0,1] */
+        } tablet_position;
+        struct {
+            uint32_t tool_id;
+            float tilt_x, tilt_y, distance; /* degrees; distance normalized [0,1] */
+        } tablet_tilt;
+        struct {
+            uint32_t tool_id, flags, buttons, time_msec;
+        } tablet_frame;
         struct {
             uint32_t padding[4];
         };

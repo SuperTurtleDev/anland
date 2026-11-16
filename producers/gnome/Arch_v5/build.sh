@@ -5,7 +5,7 @@
 # Usage:
 #   ./build.sh [--nocheck|--noconfirm|--log|--nosign|--force]
 #
-# WORKDIR overrides the cache; ANLAND_SOURCE_CACHE supplies local archives.
+# WORKDIR overrides the build cache.
 # ANLAND_INSTALL=1 (or INSTALL=1) explicitly installs the resulting packages.
 # Default: JOBS=2, build only, no session or global environment changes.
 #
@@ -30,7 +30,6 @@ MUTTER_BUILDDIR="$WORKDIR/build"
 XWAYLAND_STAGE="$WORKDIR/xwayland-package"
 XWAYLAND_SRCDEST_DIR="$WORKDIR/xwayland-sources"
 XWAYLAND_BUILDDIR="$WORKDIR/xwayland-build"
-SOURCE_CACHE="${ANLAND_SOURCE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-review/arch-mutter}"
 INSTALL="${ANLAND_INSTALL:-${INSTALL:-0}}"
 export JOBS="${JOBS:-2}"
 
@@ -73,13 +72,7 @@ prepare_mutter_stage() {
        -f "$MUTTER_OVERLAY_ROOT/src/backends/anland/common/socket_utils.c" ]] || die 'Incomplete staged backend'
     tar -czf "$MUTTER_STAGE/mutter-overlay.tar.gz" -C "$MUTTER_OVERLAY_ROOT" src
     cp "$SCRIPT_DIR/PKGBUILD" "$SCRIPT_DIR/mutter.patch" "$MUTTER_STAGE/"
-    # makepkg verifies cached and downloaded archives against the PKGBUILD SHA512.
-    if [[ -f "$SOURCE_CACHE/mutter-50.5.complete.tar.gz" ]]; then
-        cp -f "$SOURCE_CACHE/mutter-50.5.complete.tar.gz" "$MUTTER_SRCDEST_DIR/mutter-50.5.tar.gz"
-    fi
-    if [[ -f "$SOURCE_CACHE/gvdb-b54bc5da.tar.gz" ]]; then
-        cp -f "$SOURCE_CACHE/gvdb-b54bc5da.tar.gz" "$MUTTER_SRCDEST_DIR/gvdb-b54bc5da.tar.gz"
-    fi
+
 }
 
 run_xwayland_makepkg() (

@@ -51,16 +51,23 @@ public:
     AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend);
     ~AnlandEglLayer() override;
 
+#ifdef ANLAND_KWIN_68
+    std::optional<OutputLayerBeginFrameInfo> beginFrame(OutputFrame *frame = nullptr) override;
+    bool endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
+#else
     std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
 #ifdef ANLAND_KWIN_66
     bool doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
 #else
     bool doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame) override;
 #endif
+#endif
 
     // OutputLayer pure virtuals. anland imports the consumer's dmabufs and
     // never allocates or scans out through DRM itself, so these are stubs.
+#ifndef ANLAND_KWIN_68
     DrmDevice *scanoutDevice() const override;
+#endif
     #ifdef ANLAND_KWIN_67
     FormatModifierMap supportedDrmFormats() const override;
 #else
@@ -90,8 +97,6 @@ public:
      */
     void setPendingFence(int fd);
     int takePendingFence();
-    /* True once per frame the layer rendered, so present() can skip frames it did not. */
-    bool takePainted();
 
     /** Update the transport handle after the backend rebuilds its session. */
     void setDevice(anland_device *device)
@@ -135,7 +140,6 @@ private:
     /* Render fence for the frame being composed, or -1. Created in doEndFrame(),
      * consumed by the backend's commit when it presents. */
     int m_pendingFence = -1;
-    bool m_painted = false;
     std::array<std::shared_ptr<GLTexture>, ANLAND_DEVICE_MAX_BUFS> m_textures;
     std::array<std::unique_ptr<GLFramebuffer>, ANLAND_DEVICE_MAX_BUFS> m_fbos;
     /* Per-buffer accumulated damage: each buffer must remember everything that
@@ -157,7 +161,11 @@ class AnlandEglBackend : public AbstractEglBackend
     Q_OBJECT
 
 public:
+#ifdef ANLAND_KWIN_68
+    AnlandEglBackend(AnlandBackend *b, RenderDevice *device);
+#else
     AnlandEglBackend(AnlandBackend *b);
+#endif
     ~AnlandEglBackend() override;
 
 #ifdef ANLAND_KWIN_67
@@ -174,7 +182,9 @@ public:
     OutputLayer *primaryLayer(Output *output) override;
     bool present(Output *output, const std::shared_ptr<OutputFrame> &frame) override;
 #endif
+#ifndef ANLAND_KWIN_68
     DrmDevice *drmDevice() const override;
+#endif
 
     AnlandBackend *backend() const
     {

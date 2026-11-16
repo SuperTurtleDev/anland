@@ -57,27 +57,32 @@ final class InputGrab implements InputGrabTransport {
     /** Byte offset of aux[0] inside a record. */
     private static final int AUX0 = 12;
 
+    private static final int PROTO_VERSION = 3;
+
     // rtype
     private static final int REC_HELLO  = 1;
     private static final int REC_DEVICE = 2;
     private static final int REC_READY  = 3;
     private static final int REC_EVENT  = 4;
     private static final int REC_BYE    = 5;
+    private static final int REC_AXIS_RANGE = 6;
 
     // DEVICE.etype (device class)
     static final int CLASS_TOUCHSCREEN = 1;
     static final int CLASS_TOUCHPAD    = 2;
     static final int CLASS_MOUSE       = 3;
     static final int CLASS_KEYBOARD    = 4;
+    static final int CLASS_GAMEPAD     = 5;
 
     // DEVICE.aux[4] flags
     static final int DEV_GRABBED    = 1;
     static final int DEV_CLICKPAD   = 4;
+    static final int DEV_PASSTHROUGH = 8;
 
     /** Broadcast device id used by the helper's "records were dropped" marker. */
     static final int DEV_ALL = 0xFFFF;
 
-    // Session end reasons. 1..4 mirror the helper's IGRAB_BYE_*; the rest are local.
+    // Session end reasons. 1..4 and 8 mirror IGRAB_BYE_*; 5..7 are local.
     static final int REASON_TOGGLE     = 1;  // toggle key pressed on a grabbed device
     static final int REASON_PEER_GONE  = 2;
     static final int REASON_STALLED    = 3;
@@ -85,6 +90,7 @@ final class InputGrab implements InputGrabTransport {
     static final int REASON_NO_ROOT    = 5;  // helper never connected (su denied/missing)
     static final int REASON_IO         = 6;  // stream broke
     static final int REASON_STOPPED    = 7;  // stop() was called
+    static final int REASON_CONTROLLER = 8;  // selected controller suppression failed/lost
 
     /** How long to wait for the helper to connect; a first-time su prompt is slow. */
     private static final int CONNECT_TIMEOUT_MS = 20000;
@@ -290,7 +296,7 @@ final class InputGrab implements InputGrabTransport {
             } catch (NumberFormatException e) {
                 continue;
             }
-            if (cls < CLASS_TOUCHSCREEN || cls > CLASS_KEYBOARD)
+            if (cls < CLASS_TOUCHSCREEN || cls > CLASS_GAMEPAD)
                 continue;
             String flags = fields[4];
             devices.add(new DiscoveredDevice(fields[0], fields[1], cls, bus,
@@ -341,6 +347,7 @@ final class InputGrab implements InputGrabTransport {
      * previous session must never target the one that replaced it.
      */
     private volatile String finishedToken = null;
+    private String cleanupToken; // guarded by killHelper; not proof that the helper has exited
     private volatile long lastMainAlive = 0L;
     private boolean endReported = false;
     private volatile String killToken;
@@ -446,7 +453,7 @@ final class InputGrab implements InputGrabTransport {
         // Closing the socket is the release that matters: the helper's poll()
         // sees EOF and ungrabs. Everything else here is a backstop.
         closeAll();
-        main.postDelayed(() -> killHelper(token), KILL_FALLBACK_MS);
+        killHelper(token); // Cleanup waits off the main thread before sending any signal.
     }
 
     // ---- main-thread liveness beacon -------------------------------------
@@ -484,6 +491,8 @@ final class InputGrab implements InputGrabTransport {
                 command.append(' ').append(nodesArgument);
             if (!excludeArgument.isEmpty())
                 command.append(' ').append(excludeArgument);
+            command.append(" apk=").append(SuCommand.shellQuote(
+                    context.getApplicationInfo().sourceDir));
             command.append(" >/dev/null 2>&1");
             String cmd = command.toString();
             try {
@@ -523,7 +532,9 @@ final class InputGrab implements InputGrabTransport {
             final int r = stopping ? REASON_STOPPED : reason;
             closeAll();
             killHelper(token);
-            if (p != null)
+            // Do not destroy the su process while its helper is still restoring.
+            // EOF and the delayed TERM/KILL cleanup below let it exit naturally.
+            if (p != null && !p.isAlive())
                 p.destroy();
             main.post(() -> finish(r));
         }
@@ -641,6 +652,10 @@ final class InputGrab implements InputGrabTransport {
 
                 switch (rtype) {
                     case REC_HELLO:
+                        if (value != PROTO_VERSION) {
+                            Log.e(TAG, "unsupported input helper protocol " + value);
+                            return REASON_IO;
+                        }
                         Log.i(TAG, "helper v" + value + " pid=" + bb.getInt(rec + AUX0 + 4)
                                 + " grabbed=" + bb.getInt(rec + AUX0));
                         break;
@@ -657,8 +672,18 @@ final class InputGrab implements InputGrabTransport {
                         final int maxY = bb.getInt(rec + AUX0 + 12);
                         final int flags = bb.getInt(rec + AUX0 + 16);
                         main.post(() -> {
-                            if (running)
+                            if (running && !stopping)
                                 listener.onDevice(d, cls, minX, maxX, minY, maxY, flags);
+                        });
+                        break;
+                    }
+                    case REC_AXIS_RANGE: {
+                        batchLen = flush(batch, batchLen);
+                        final int d = dev, axis = code, min = value;
+                        final int max = bb.getInt(rec + AUX0);
+                        main.post(() -> {
+                            if (running && !stopping)
+                                listener.onAxisRange(d, axis, min, max);
                         });
                         break;
                     }
@@ -666,18 +691,20 @@ final class InputGrab implements InputGrabTransport {
                         batchLen = flush(batch, batchLen);
                         final int grabbed = bb.getInt(rec + AUX0);
                         main.post(() -> {
-                            if (running)
+                            if (running && !stopping)
                                 listener.onReady(grabbed);
                         });
                         break;
                     }
                     case REC_EVENT:
-                        if (batchLen + 4 > batch.length)
+                        if (batchLen + EVENT_STRIDE > batch.length)
                             batchLen = flush(batch, batchLen);
                         batch[batchLen++] = dev;
                         batch[batchLen++] = etype;
                         batch[batchLen++] = code;
                         batch[batchLen++] = value;
+                        batch[batchLen++] = bb.getInt(rec + AUX0);
+                        batch[batchLen++] = bb.getInt(rec + AUX0 + 4);
                         if (etype == 0 && code == 0)   // EV_SYN / SYN_REPORT
                             batchLen = flush(batch, batchLen);
                         break;
@@ -686,8 +713,8 @@ final class InputGrab implements InputGrabTransport {
                         // The helper only sends this on its way out, so no kill
                         // is needed for this session.
                         finishedToken = token;
-                        return (value >= REASON_TOGGLE && value <= REASON_HELPER_ERR)
-                                ? value : REASON_PEER_GONE;
+                        return ((value >= REASON_TOGGLE && value <= REASON_HELPER_ERR)
+                                || value == REASON_CONTROLLER) ? value : REASON_PEER_GONE;
                     default:
                         Log.e(TAG, "bad record type " + rtype + "; ending session");
                         flush(batch, batchLen);
@@ -711,7 +738,7 @@ final class InputGrab implements InputGrabTransport {
         final int[] copy = new int[len];
         System.arraycopy(batch, 0, copy, 0, len);
         main.post(() -> {
-            if (running)
+            if (running && !stopping)
                 listener.onEvents(copy, copy.length);
         });
         return 0;
@@ -771,21 +798,35 @@ final class InputGrab implements InputGrabTransport {
      * can never be the target; the "[x]" prefix keeps the pattern from matching
      * the shell that runs pkill.
      */
-    private void killHelper(final String token) {
-        if (token == null || token.isEmpty() || token.equals(finishedToken))
+    private synchronized void killHelper(final String token) {
+        if (token == null || token.isEmpty() || token.equals(finishedToken)
+                || token.equals(cleanupToken))
             return;
-        finishedToken = token;
+        cleanupToken = token;
         Thread t = new Thread(() -> {
             String pattern = "igrabtoken=[" + token.charAt(0) + "]" + token.substring(1);
-            Process p = null;
             try {
-                p = new ProcessBuilder("su", "-c",
-                        "pkill -9 -f '" + pattern + "' >/dev/null 2>&1").start();
-                p.waitFor();
-            } catch (Exception ignored) {
-            } finally {
-                if (p != null)
-                    p.destroy();
+                Thread.sleep(KILL_FALLBACK_MS); // EOF normally completes restoration.
+                for (String signal : new String[]{"TERM", "KILL"}) {
+                    if (token.equals(finishedToken))
+                        return;
+                    Process p = null;
+                    try {
+                        p = new ProcessBuilder("su", "-c",
+                                "pkill -" + signal + " -f '" + pattern
+                                        + "' >/dev/null 2>&1").start();
+                        p.waitFor(KILL_FALLBACK_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } finally {
+                        if (p != null)
+                            p.destroy();
+                    }
+                    // TERM is handled by the helper, so allow its cleanup to run
+                    // before KILL. Native restorers have no token and survive both.
+                    if ("TERM".equals(signal))
+                        Thread.sleep(KILL_FALLBACK_MS);
+                }
+            } catch (Exception error) {
+                Log.w(TAG, "helper cleanup failed", error);
             }
         }, "anland-inputgrab-kill");
         t.setDaemon(true);

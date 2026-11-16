@@ -22,14 +22,14 @@ diff --git a/Cargo.toml b/Cargo.toml
  # version = "0.4.1"
 -git = "https://github.com/Smithay/smithay.git"
 -rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
-+path = "../smithay-ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
++path = "../smithay-latest"
  default-features = false
  
  [workspace.dependencies.smithay-drm-extras]
  # version = "0.1.0"
 -git = "https://github.com/Smithay/smithay.git"
 -rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
-+path = "../smithay-ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef/smithay-drm-extras"
++path = "../smithay-latest/smithay-drm-extras"
  # path = "../smithay/smithay-drm-extras"
  
  [package]
@@ -257,24 +257,20 @@ diff --git a/src/handlers/mod.rs b/src/handlers/mod.rs
  pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
  use crate::layout::workspace::WorkspaceId;
  use crate::layout::ActivateWindow;
-@@ -284,6 +285,24 @@
+@@ -284,6 +285,20 @@
  
  impl SelectionHandler for State {
      type SelectionUserData = Arc<[u8]>;
 +    fn new_selection(
 +        &mut self,
 +        ty: SelectionTarget,
-+        source: Option<SelectionSource>,
++        _source: Option<SelectionSource>,
 +        _seat: Seat<Self>,
 +    ) {
-+        // Forward a client-set clipboard to the Android consumer.
++        // Clearing or replacing the selection also invalidates pending reads.
 +        if ty == SelectionTarget::Clipboard {
-+            if let Some(source) = source {
-+                if source.mime_types().iter().any(|m| m == "text/plain") {
-+                    if let Backend::Anland(anland) = &self.backend {
-+                        let _ = anland.clipboard_selection_tx().send(());
-+                    }
-+                }
++            if let Backend::Anland(anland) = &self.backend {
++                anland.clipboard_selection_changed();
 +            }
 +        }
 +    }

@@ -69,6 +69,42 @@ public final class Touchpad {
     private boolean clickpadBaselineValid = false;
     private final float touchSlop;
 
+    // Physical pads can disable synthesized taps while retaining real buttons
+    // (those are delivered separately by ImmersiveMode / pointer capture).
+    private boolean tapToClick = true;
+    private int scrollGuardMs;
+    // Absolute event-time deadline rather than a per-stream latch. Long-press
+    // drag remains available once the guard has elapsed; a latched flag caused
+    // a press started inside the guard to be suppressed for its whole lifetime.
+    private long scrollGuardUntil = Long.MIN_VALUE / 2;
+    private long gestureEventTime;
+    private boolean scrollInStream;
+    private boolean debug;
+
+    void setTapFilter(boolean enabled, int guardMs, boolean debug) {
+        tapToClick = enabled;
+        scrollGuardMs = Math.max(0, Math.min(1000, guardMs));
+        this.debug = debug;
+    }
+
+    /** True when taps may be synthesized at this event time. */
+    private boolean tapAllowed(long time) {
+        return tapToClick && !scrollInStream && time >= scrollGuardUntil;
+    }
+
+    /** Extend the post-scroll guard to the current event. */
+    private void extendScrollGuard() {
+        scrollGuardUntil = gestureEventTime + scrollGuardMs;
+    }
+
+    private void markScroll() {
+        scrollInStream = true;
+        extendScrollGuard();
+        isSingleTapCandidate = false;
+        isTwoFingerTapCandidate = false;
+        isLongPressPossible = false;
+    }
+
     private boolean isSingleTapCandidate = false;
     private boolean isTwoFingerTapCandidate = false;
     private boolean isDraggingActive = false;
@@ -83,16 +119,25 @@ public final class Touchpad {
     private boolean isMultiFinger = false;
 
     // Two-finger classification, decided once per two-finger phase so a gesture
-    // cannot oscillate between scrolling and being declined.
+    // cannot oscillate between scrolling and being declined. ONE_MOVING is the
+    // asynchronous-contact state: one finger has committed, but the other has
+    // not yet moved far enough to say whether the gesture is a scroll or a pinch.
     private static final int TWO_FINGER_UNDECIDED = 0;
-    private static final int TWO_FINGER_SCROLL = 1;
-    private static final int TWO_FINGER_NOT_SCROLL = 2;
-    private int twoFingerMode = TWO_FINGER_UNDECIDED;
+    private static final int TWO_FINGER_ONE_MOVING = 1;
+    private static final int TWO_FINGER_SCROLL = 2;
+    private static final int TWO_FINGER_NOT_SCROLL = 3;
     // Same phase classified as NOT_SCROLL (a pinch) while multi-finger gestures
     // are disabled: the whole phase is swallowed instead of being forwarded as
     // touch, so the gesture does nothing and lifting one finger resumes normal
     // one-finger cursor control.
-    private static final int TWO_FINGER_IGNORED = 3;
+    private static final int TWO_FINGER_IGNORED = 4;
+    private int twoFingerMode = TWO_FINGER_UNDECIDED;
+    // A two-finger tap may jitter slightly. Use a separate tolerance instead of
+    // rejecting the tap as soon as one contact exceeds the one-finger touchSlop.
+    private static final float TWO_FINGER_TAP_SLOP_FACTOR = 2.0f;
+    private final float twoFingerTapSlop;
+    private float twoFingerMaxTravel;
+    private long streamDownTime;
     // True while three or more fingers are on the pad and multi-finger gestures
     // are disabled: swallow the stream (see recognize) until it drops to one.
     private boolean multiFingerIgnored = false;
@@ -179,6 +224,7 @@ public final class Touchpad {
         this.output = output;
         this.synthesizeDoubleTap = synthesizeDoubleTap;
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        twoFingerTapSlop = touchSlop * TWO_FINGER_TAP_SLOP_FACTOR;
         setGestureThresholds(DEFAULT_SCROLL_THRESHOLD_FACTOR,
                 DEFAULT_MOVE_THRESHOLD_FACTOR);
     }
@@ -282,6 +328,21 @@ public final class Touchpad {
     int clickpadButton(MotionEvent event) {
         if (!clickpadBaselineValid || event.getPointerCount() <= 0)
             return 0x110; // BTN_LEFT
+
+        // A press that arrives after a single contact has already been held
+        // long enough for long-press drag is intentional drag/left-click, not a
+        // right-click. This also covers the case where the first physical press
+        // is what interrupts the hold before the recognizer sees a MOVE.
+        boolean longHeldSingleContact = currentState == STATE_ONE_FINGER
+                && !isMultiFinger && event.getPointerCount() == 1
+                && event.getEventTime() - downTime1 >= TOUCH_LONG_PRESS_TIMEOUT;
+        if (isDraggingActive || longHeldSingleContact) {
+            if (debug)
+                android.util.Log.d("AnlandTouchpad",
+                        "clickpad press during long hold -> BTN_LEFT");
+            return 0x110;
+        }
+
         int limit = Math.min(event.getPointerCount(), 2);
         int slowestIndex = 0;
         float slowestSpeed = Float.MAX_VALUE;
@@ -375,9 +436,11 @@ public final class Touchpad {
      * dominates, and require both fingers to have travelled the same way along it.
      *
      * A pinch moves the fingers in opposite directions, so the sign product is
-     * negative and it is not a scroll. One finger resting while the other travels
-     * zeroes the small term, which also fails the test — AOSP calls that a cursor
-     * move; here everything that is not a scroll is forwarded as touch.
+     * negative and it is not a scroll. If only one finger has moved enough to
+     * commit while the other is still below the scroll threshold, the phase stays
+     * ONE_MOVING. This is deliberately not timed out: contact updates can lag by
+     * more than a frame under load, and the next event may still prove either
+     * scroll (same direction) or pinch (opposite direction).
      */
     private int classifyTwoFinger(float x1, float y1, float x2, float y2) {
         float dx1 = x1 - twoFingerStartX1;
@@ -399,15 +462,25 @@ public final class Touchpad {
         if (Math.abs(small) < scrollDistanceThreshold)
             small = 0f;
 
-        if (large * small <= 0f) {
-            // Not the same direction: a pinch, or one finger resting while the other
-            // travels. Stay undecided until one finger has clearly committed, so a
-            // two-finger tap is still allowed to become a click.
-            return Math.abs(large) < moveDistanceThreshold
-                    ? TWO_FINGER_UNDECIDED : TWO_FINGER_NOT_SCROLL;
+        // Both fingers already agree on a direction: this is a scroll as soon
+        // as the leading finger passes the scroll threshold.
+        if (small != 0f && large * small > 0f) {
+            return Math.abs(large) < scrollDistanceThreshold
+                    ? TWO_FINGER_UNDECIDED : TWO_FINGER_SCROLL;
         }
-        return Math.abs(large) < scrollDistanceThreshold
-                ? TWO_FINGER_UNDECIDED : TWO_FINGER_SCROLL;
+
+        // Not enough motion to classify yet.
+        if (Math.abs(large) < moveDistanceThreshold)
+            return TWO_FINGER_UNDECIDED;
+
+        // One contact has committed while the other has not updated far enough.
+        // Wait for the lagging contact rather than converting a slow event stream
+        // into a permanent pinch decision.
+        if (small == 0f)
+            return TWO_FINGER_ONE_MOVING;
+
+        // Both contacts have moved far enough in opposite directions: a pinch.
+        return TWO_FINGER_NOT_SCROLL;
     }
 
     /**
@@ -428,8 +501,37 @@ public final class Touchpad {
     }
 
     private void sendButton(int button, boolean pressed) {
+        if (debug)
+            android.util.Log.d("AnlandTouchpad", "synthetic button=" + button
+                    + " pressed=" + pressed + " t=" + gestureEventTime);
         if (output != null)
             output.onButton(button, pressed);
+    }
+
+    /**
+     * Track the largest excursion made by either contact during a two-finger
+     * tap. A dedicated tolerance avoids rejecting a normal tap because one
+     * sample briefly exceeded the single-finger slop. The maximum is used rather
+     * than the final displacement so a scroll that wanders back to its origin
+     * still cannot become a right click.
+     */
+    private void updateTwoFingerTapTravel(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (currentState != STATE_TWO_FINGER || event.getPointerCount() != 2
+                || (action != MotionEvent.ACTION_MOVE
+                    && action != MotionEvent.ACTION_POINTER_UP))
+            return;
+        float travel1 = (float) Math.hypot(event.getX(0) - twoFingerStartX1,
+                event.getY(0) - twoFingerStartY1);
+        float travel2 = (float) Math.hypot(event.getX(1) - twoFingerStartX2,
+                event.getY(1) - twoFingerStartY2);
+        twoFingerMaxTravel = Math.max(twoFingerMaxTravel,
+                Math.max(travel1, travel2));
+        if (twoFingerMaxTravel > twoFingerTapSlop)
+            isTwoFingerTapCandidate = false;
+        if (debug && twoFingerMaxTravel > twoFingerTapSlop)
+            android.util.Log.d("AnlandTouchpad", "two-finger tap rejected: travel="
+                    + twoFingerMaxTravel + " slop=" + twoFingerTapSlop);
     }
 
     private void sendScroll(int axis, float value) {
@@ -453,6 +555,22 @@ public final class Touchpad {
     private boolean recognize(MotionEvent event) {
         int action = event.getActionMasked();
         int pointerCount = event.getPointerCount();
+        gestureEventTime = event.getEventTime();
+        if (action == MotionEvent.ACTION_DOWN) {
+            scrollInStream = false;
+            streamDownTime = gestureEventTime;
+        }
+        // Keep the guard active until the last scrolling contact lifts, even if
+        // one finger lifts/rejoins or the hardware briefly reports no contacts.
+        if (scrollInStream) extendScrollGuard();
+        if (debug)
+            android.util.Log.d("AnlandTouchpad", "action=" + action + " n=" + pointerCount
+                    + " t=" + gestureEventTime + " scrolling=" + scrollInStream);
+
+        // A moved two-finger gesture is never a right tap once it leaves the
+        // tap tolerance. Inspect releases too: final positions can arrive with
+        // the lift. Scroll/pinch classification has its own thresholds.
+        updateTwoFingerTapTravel(event);
 
         // Keep clickpadBaselineValid current on every contact event: a physical
         // clickpad press cancels the gesture before recognize() sees it, so this
@@ -507,6 +625,7 @@ public final class Touchpad {
                 isMultiFinger = false;
                 currentState = STATE_ONE_FINGER;
                 twoFingerMode = TWO_FINGER_UNDECIDED;
+                twoFingerMaxTravel = 0f;
                 resetSmoothing();
                 break;
             }
@@ -526,6 +645,7 @@ public final class Touchpad {
                     lastX2 = twoFingerStartX2 = event.getX(1);
                     lastY2 = twoFingerStartY2 = event.getY(1);
                     twoFingerMode = TWO_FINGER_UNDECIDED;
+                    twoFingerMaxTravel = 0f;
                 } else if (pointerCount >= 3) {
                     if (multiFingerGesturesDisabled) {
                         // 三指及以上手势被禁用，吞掉。
@@ -546,6 +666,29 @@ public final class Touchpad {
                     float rawDy = y - lastY1;
                     float dist = (float) Math.hypot(x - startX1, y - startY1);
 
+                    // Check the hold timeout before the movement slop. A pad may
+                    // not report any MOVE while the finger is stationary, so the
+                    // first event after the 500 ms hold can already be the drag
+                    // movement. Cancelling the candidate first made that first
+                    // movement abort the long press. Once the hold has matured,
+                    // the drag wins over the tap/motion classification.
+                    if (tapToClick && isLongPressPossible && !hasLongPressed
+                            && (event.getEventTime() - downTime1) >= TOUCH_LONG_PRESS_TIMEOUT) {
+                        hasLongPressed = true;
+                        currentState = STATE_DRAGGING;
+                        isDraggingActive = true;
+                        isSingleTapCandidate = false;
+                        isTwoFingerTapCandidate = false;
+                        // No motion is emitted with the press: the cursor belongs to
+                        // the host and is already where the drag should start.
+                        sendButton(0x110, true);
+                        if (debug)
+                            android.util.Log.d("AnlandTouchpad",
+                                    "long-press drag down t=" + event.getEventTime());
+                        resetSmoothing();
+                        break;
+                    }
+
                     if (dist > touchSlop) {
                         isLongPressPossible = false;
                         isSingleTapCandidate = false;
@@ -553,18 +696,6 @@ public final class Touchpad {
                         // scroll or drag whose second finger lifted early cannot
                         // finish as a right-click.
                         isTwoFingerTapCandidate = false;
-                    }
-
-                    if (isLongPressPossible && !hasLongPressed &&
-                            (event.getEventTime() - downTime1) >= TOUCH_LONG_PRESS_TIMEOUT) {
-                        hasLongPressed = true;
-                        currentState = STATE_DRAGGING;
-                        isDraggingActive = true;
-                        // No motion is emitted with the press: the cursor belongs to
-                        // the host and is already where the drag should start.
-                        sendButton(0x110, true);
-                        resetSmoothing();
-                        break;
                     }
 
                     float[] smoothed = applySmoothing(rawDx, rawDy);
@@ -597,19 +728,25 @@ public final class Touchpad {
                         float x2 = event.getX(1);
                         float y2 = event.getY(1);
 
-                        if (twoFingerMode == TWO_FINGER_UNDECIDED) {
-                            twoFingerMode = classifyTwoFinger(x1, y1, x2, y2);
-                            if (twoFingerMode == TWO_FINGER_NOT_SCROLL) {
+                        if (twoFingerMode == TWO_FINGER_UNDECIDED
+                                || twoFingerMode == TWO_FINGER_ONE_MOVING) {
+                            int classified = classifyTwoFinger(x1, y1, x2, y2);
+                            if (classified == TWO_FINGER_NOT_SCROLL) {
                                 if (multiFingerGesturesDisabled) {
                                     // 双指捏合/张开被禁用，吞掉这一阶段
                                     //（不滚动也不转发为触摸）。
                                     twoFingerMode = TWO_FINGER_IGNORED;
                                 } else {
-                                    // A pinch, or one finger travelling against a
-                                    // resting one. Hand the gesture to the
+                                    // Both contacts have committed in opposite
+                                    // directions. Hand the gesture to the
                                     // forwarding path.
                                     return declineGesture();
                                 }
+                            } else if (classified != TWO_FINGER_UNDECIDED) {
+                                // SCROLL starts immediately; ONE_MOVING stays
+                                // pending so a later contact update can still
+                                // prove that the contacts agree.
+                                twoFingerMode = classified;
                             }
                         }
 
@@ -622,6 +759,9 @@ public final class Touchpad {
                             lastX2 = x2;
                             lastY2 = y2;
                         } else if (twoFingerMode == TWO_FINGER_SCROLL) {
+                            // Classification itself commits the stream to scroll;
+                            // subpixel deltas must never leave a right-tap armed.
+                            markScroll();
                             float avgDx = ((x1 - lastX1) + (x2 - lastX2)) / 2;
                             float avgDy = ((y1 - lastY1) + (y2 - lastY2)) / 2;
 
@@ -674,7 +814,7 @@ public final class Touchpad {
                 break;
             }
             case MotionEvent.ACTION_UP: {
-                long duration = event.getEventTime() - downTime1;
+                long duration = event.getEventTime() - streamDownTime;
                 boolean isQuickTap = duration < 300;
 
                 if (isDraggingActive) {
@@ -685,7 +825,8 @@ public final class Touchpad {
                     return true;
                 }
 
-                if (isTwoFingerTapCandidate && isQuickTap) {
+                if (tapAllowed(event.getEventTime()) && isTwoFingerTapCandidate
+                        && twoFingerMaxTravel <= twoFingerTapSlop && isQuickTap) {
                     sendButton(0x111, true);
                     sendButton(0x111, false);
                     resetTouchpadState();
@@ -693,7 +834,8 @@ public final class Touchpad {
                     return true;
                 }
 
-                if (currentState == STATE_ONE_FINGER && isSingleTapCandidate && isQuickTap) {
+                if (tapAllowed(event.getEventTime()) && currentState == STATE_ONE_FINGER
+                        && isSingleTapCandidate && isQuickTap) {
                     long gap = event.getEventTime() - lastTapTime;
                     float dist = (float) Math.hypot(lastX1 - lastTapX, lastY1 - lastTapY);
                     if (synthesizeDoubleTap && gap < 300 && dist < touchSlop
@@ -876,6 +1018,9 @@ public final class Touchpad {
         isLongPressPossible = false;
         isMultiFinger = false;
         twoFingerMode = TWO_FINGER_UNDECIDED;
+        twoFingerMaxTravel = 0f;
+        scrollInStream = false;
+        streamDownTime = 0L;
         multiFingerIgnored = false;
         // Cleared here rather than in declineGesture: the latch has to outlive the
         // events that follow it and only lifts when the gesture itself ends.

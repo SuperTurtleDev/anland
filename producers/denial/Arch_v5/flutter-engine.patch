@@ -1,0 +1,87 @@
+diff --git a/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.cc b/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.cc
+index 289bc82498..551bca76ea 100644
+--- a/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.cc
++++ b/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.cc
+@@ -43,6 +43,10 @@ void ShadowVerticesContents::SetColor(Color color) {
+   shadow_color_ = color;
+ }
+ 
++void ShadowVerticesContents::SetInheritedOpacity(Scalar opacity) {
++  inherited_opacity_ = opacity;
++}
++
+ bool ShadowVerticesContents::Render(const ContentContext& renderer,
+                                     const Entity& entity,
+                                     RenderPass& pass) const {
+@@ -71,7 +75,7 @@ bool ShadowVerticesContents::Render(const ContentContext& renderer,
+ 
+   frame_info.mvp = entity.GetShaderTransform(pass);
+ 
+-  frag_info.shadow_color = shadow_color_.Premultiply();
++  frag_info.shadow_color = shadow_color_.Premultiply() * inherited_opacity_;
+ 
+   auto& host_buffer = renderer.GetTransientsDataBuffer();
+   FS::BindFragInfo(pass, host_buffer.EmplaceUniform(frag_info));
+diff --git a/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.h b/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.h
+index c69827ed58..98dfd170bd 100644
+--- a/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.h
++++ b/engine/src/flutter/impeller/entity/contents/shadow_vertices_contents.h
+@@ -25,6 +25,9 @@ class ShadowVerticesContents final : public SolidBlurContents {
+   // |SolidBlurContents|
+   void SetColor(Color color) override;
+ 
++  // |Contents|
++  void SetInheritedOpacity(Scalar opacity) override;
++
+   // |Contents|
+   std::optional<Rect> GetCoverage(const Entity& entity) const override;
+ 
+@@ -41,6 +44,7 @@ class ShadowVerticesContents final : public SolidBlurContents {
+  private:
+   const std::shared_ptr<ShadowVertices> geometry_;
+   Color shadow_color_;
++  Scalar inherited_opacity_ = 1.0f;
+ 
+   ShadowVerticesContents(const ShadowVerticesContents&) = delete;
+ 
+diff --git a/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.cc b/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.cc
+index 193a9a5199..d9c7a81d92 100644
+--- a/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.cc
++++ b/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.cc
+@@ -44,7 +44,13 @@ void SolidRRectLikeBlurContents::SetColor(Color color) {
+ }
+ 
+ Color SolidRRectLikeBlurContents::GetColor() const {
+-  return color_;
++  return color_ * inherited_opacity_;
++}
++
++void SolidRRectLikeBlurContents::SetInheritedOpacity(Scalar opacity) {
++  // color_ is premultiplied: scale RGB and alpha together, without baking
++  // opacity into the source color or accumulating repeated assignments.
++  inherited_opacity_ = opacity;
+ }
+ 
+ static Point eccentricity(Point v, double sInverse) {
+diff --git a/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.h b/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.h
+index a65b721565..a9f75ef9ee 100644
+--- a/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.h
++++ b/engine/src/flutter/impeller/entity/contents/solid_rrect_like_blur_contents.h
+@@ -40,6 +40,9 @@ class SolidRRectLikeBlurContents : public SolidBlurContents {
+ 
+   Color GetColor() const;
+ 
++  // |Contents|
++  void SetInheritedOpacity(Scalar opacity) override;
++
+   // |Contents|
+   std::optional<Rect> GetCoverage(const Entity& entity) const override;
+ 
+@@ -90,6 +93,7 @@ class SolidRRectLikeBlurContents : public SolidBlurContents {
+   Scalar corner_radius_;
+   Sigma sigma_;
+   Color color_;
++  Scalar inherited_opacity_ = 1.0f;
+ 
+   SolidRRectLikeBlurContents(const SolidRRectLikeBlurContents&) = delete;
+ 

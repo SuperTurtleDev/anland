@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.16)
+project(anland_denial_bridge VERSION 5.0.0 LANGUAGES C)
+get_filename_component(ANLAND_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+add_subdirectory("${ANLAND_ROOT}/libdisplay_producer" public)
+add_library(anland_denial_bridge SHARED session.c)
+target_link_libraries(anland_denial_bridge PRIVATE display_producer)
+target_compile_options(anland_denial_bridge PRIVATE -Wall -Wextra -Werror)
+set_target_properties(anland_denial_bridge PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON
+    INSTALL_RPATH "$ORIGIN")
+install(TARGETS anland_denial_bridge LIBRARY DESTINATION lib)
+install(FILES session.h DESTINATION include/anland-denial)

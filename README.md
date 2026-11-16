@@ -184,6 +184,31 @@ struct OutputEvent{
 | `INPUT_TYPE_DISPLAY_REFRESH` | 7 | — | ✅ | ✅ | `display { refresh_mhz }` | No |
 | `INPUT_TYPE_CLIPBOARD` | 8 | — | — | **✅ V3 new** | `clipboard { size }` + variable‑length data | **Yes** |
 
+#### Native tablet input
+
+The Android consumer sends native pen and eraser input through four additional
+fixed-size records. Their definitions are in `common/protocol.h`:
+
+| Type | Value | Fields |
+|------|:-----:|--------|
+| `INPUT_TYPE_TABLET_TOOL` | 13 | `tool_id, tool_type, capabilities, device_id` |
+| `INPUT_TYPE_TABLET_POSITION` | 14 | `tool_id, x, y, pressure` |
+| `INPUT_TYPE_TABLET_TILT` | 15 | `tool_id, tilt_x, tilt_y, distance` |
+| `INPUT_TYPE_TABLET_FRAME` | 16 | `tool_id, flags, buttons, time_msec` |
+
+`TOOL` establishes a stable identity and its supported axes. `POSITION` and
+`TILT` stage one sample; `FRAME` commits it with proximity, tip and side-button
+state. Positions are buffer pixels, pressure/distance are normalized to 0–1,
+and the two tilt angles are degrees. Pen side buttons retain `BTN_STYLUS` and
+`BTN_STYLUS2` semantics. A canceled or disconnected tool releases its tip and
+buttons before leaving proximity. The assembler supports 16 tool identities per
+session and rejects malformed samples.
+
+The updated APK and compositor backend are both required. `InputEvent` remains
+20 bytes, with no trailing tablet payload or new connection channel, so the
+existing daemon and Magisk module remain compatible. Older backends do not
+receive pen input through the removed mouse/right-click/hover-scroll mapping.
+
 #### OutputEvent types
 
 | Type | Value | V2 | V3 | Payload | Variable? |

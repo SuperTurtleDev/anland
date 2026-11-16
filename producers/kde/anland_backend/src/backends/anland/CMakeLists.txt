@@ -1,4 +1,7 @@
 # Keep one transport/presentation backend; only KWin's API boundary differs.
+if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.4")
+    target_compile_definitions(kwin PUBLIC ANLAND_KWIN_64=1)
+endif()
 if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.6")
     target_compile_definitions(kwin PUBLIC ANLAND_KWIN_66=1)
 endif()
@@ -6,6 +9,9 @@ endif()
 # Keep the 6.6/older backend API paths unchanged.
 if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.7")
     target_compile_definitions(kwin PUBLIC ANLAND_KWIN_67=1)
+endif()
+if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.8")
+    target_compile_definitions(kwin PUBLIC ANLAND_KWIN_68=1)
 endif()
 target_sources(kwin PRIVATE
     anland_backend.cpp
@@ -29,6 +35,7 @@ target_sources(kwin PRIVATE
     # matches what a future window-level backend will expose.
     libdisplay_producer/anland_scene.c
     libdisplay_producer/anland_scene_legacy.c
+    libdisplay_producer/anland_pacing.c
     libdisplay_producer/anland_present.c
     libdisplay_producer/anland_buffer_registry.c
     libdisplay_producer/anland_window_map.c

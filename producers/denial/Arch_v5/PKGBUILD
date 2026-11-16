@@ -1,0 +1,155 @@
+# build.sh compiles; package the cached engine, denial and denial-desktop.
+source "$startdir/sources.conf"
+_kind=${DENIAL_PACKAGE_KIND:-wm}
+# Arch pkgver forbids '-'; the package version follows the selected Denial source.
+pkgver=${DENIAL_VERSION//-/.}
+pkgrel=${ANLAND_PKGREL:-2}
+arch=('aarch64')
+url='https://github.com/denialwm/denial'
+license=('GPL-3.0-or-later')
+options=('!strip' '!debug')
+source=()
+sha256sums=()
+case $_kind in
+    engine)
+        pkgname=denial-anland-engine
+        pkgver=${ENGINE_VERSION%-*}
+        pkgrel=${ENGINE_VERSION##*-}
+        pkgdesc='Denial private ARM64 Flutter embedder engine (GLES/LTO)'
+        url='https://github.com/denialwm/flutter'
+        license=('BSD-3-Clause')
+        depends=(glibc fontconfig)
+        ;;
+    wm)
+        pkgname=denial
+        pkgdesc='Denial Anland compositor and embedded Flutter desktop shell'
+        # Audio controls load libpulse.so.0 dynamically, so ELF NEEDED cannot infer it.
+        depends=("denial-anland-engine=$ENGINE_VERSION" glibc gcc-libs libglvnd mesa libdrm libinput seatd libxkbcommon xkeyboard-config wayland systemd-libs libpipewire libpulse pam dbus bash coreutils util-linux procps-ng binutils)
+        optdepends=('denial-desktop: full desktop session, applications, Polkit and portals' 'xorg-xwayland: X11 applications')
+        provides=("denial-anland-wm=$pkgver-$pkgrel")
+        conflicts=(denial-anland-wm denial-git)
+        replaces=(denial-anland-wm)
+        ;;
+    de)
+        pkgname=denial-desktop
+        pkgrel=${ANLAND_DE_PKGREL:-2}
+        pkgdesc='Full Denial desktop: Settings/Welcome, Polkit, portals and Plugin Manager'
+        license+=(BSD-3-Clause OFL-1.1 CC-BY-SA-4.0 GPL-3.0-only)
+        # Upstream's denial-plugin-manager declares dart directly on Arch: the
+        # compiler kit links the SDK found in PATH instead of shipping one.
+        depends=("denial=$pkgver-${ANLAND_PKGREL:-2}" "denial-anland-engine=$ENGINE_VERSION" glibc gcc-libs libglvnd mesa wayland libxkbcommon dbus polkit systemd-libs bash coreutils git unzip xz zlib xdg-utils xorg-xwayland zenity xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr dart)
+        optdepends=('networkmanager: network controls' 'pipewire-pulse: audio controls' 'upower: battery information' 'power-profiles-daemon: power profiles')
+        provides=("denial-anland-de=$pkgver-$pkgrel")
+        conflicts=(denial-anland-de)
+        replaces=(denial-anland-de)
+        backup=('etc/xdg/xdg-desktop-portal-wlr/Denial')
+        ;;
+    *) printf 'unknown package kind: %s\n' "$_kind" >&2; return 1 ;;
+esac
+
+_bundle() {
+    local app=$1 dest=$2 binary=${3:-}
+    install -dm755 "$dest/lib" "$dest/data"
+    install -m644 "$DENIAL_BUILD_DIR/$app/lib/libapp.so" "$dest/lib/"
+    cp -a "$DENIAL_BUILD_DIR/$app/flutter_assets" "$dest/data/"
+    ln -s ../../../flutter/lib/libflutter_engine.so "$dest/lib/"
+    ln -s ../../../flutter/data/icudtl.dat "$dest/data/"
+    if [[ -n $binary ]]; then install -m755 "$CARGO_TARGET_DIR/release/denial-app" "$dest/$binary"; fi
+}
+
+package() {
+    [[ -d ${DENIAL_BUILD_DIR:-} && -d ${DENIAL_SOURCE_TREE:-} ]] || {
+        printf 'build.sh must build the inputs first\n' >&2; return 1;
+    }
+    local private="$pkgdir/usr/lib/denial-anland" bin="$pkgdir/usr/bin" name
+    if [[ $_kind == engine ]]; then
+        local engine="$DENIAL_ENGINE_DIR" metadata="$pkgdir/usr/share/denial-anland/engine"
+        local notices="$DENIAL_SOURCE_TREE/prebuilt/flutter-engine/linux-x64-release"
+        install -Dm755 "$engine/libflutter_engine.so" "$private/flutter/lib/libflutter_engine.so"
+        install -Dm644 "$engine/icudtl.dat" "$private/flutter/data/icudtl.dat"
+        install -Dm644 "$engine/args.gn" "$metadata/args.gn"
+        install -Dm644 "$DENIAL_ENGINE_SOURCES" "$metadata/sources.json"
+        for name in LICENSE.flutter LICENSE.third_party; do
+            install -Dm644 "$notices/$name" "$pkgdir/usr/share/licenses/$pkgname/$name"
+        done
+        install -Dm644 "$FLUTTER_ROOT/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.framework"
+        (cd "$private/flutter" && sha256sum lib/libflutter_engine.so data/icudtl.dat) > "$metadata/SHA256SUMS"
+        return
+    fi
+    install -dm755 "$bin" "$pkgdir/usr/share/licenses/$pkgname"
+    install -m644 "$DENIAL_SOURCE_TREE/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/"
+    if [[ $_kind == wm ]]; then
+        private+=/wm
+        install -dm755 "$private"
+        install -m755 "$CARGO_TARGET_DIR/release/deniald" "$CARGO_TARGET_DIR/release/denialctl" "$private/"
+        install -m755 "$DENIAL_BUILD_DIR/native/usr/lib/libanland_denial_bridge.so" \
+            "$DENIAL_BUILD_DIR/native/usr/lib/libdisplay_producer.so" "$private/"
+        _bundle dart_shell "$private/shell"
+        install -m755 "$startdir/startup.sh" "$bin/denial"
+        ln -s denial "$bin/denial-session"
+        ln -s denial "$bin/denial-anland"
+        ln -s ../lib/denial-anland/wm/denialctl "$bin/denialctl"
+        ln -s denialctl "$bin/denial-anlandctl"
+        install -dm755 "$pkgdir/usr/share/denial"
+        printf '%s\n' "$DENIAL_VERSION" > "$pkgdir/usr/share/denial/version"
+        return
+    fi
+    private+=/desktop
+    install -dm755 "$private/native"
+    for name in denial-app denial-polkit-agent denial-portal; do
+        install -m755 "$CARGO_TARGET_DIR/release/$name" "$private/native/"
+    done
+    install -m755 "$DENIAL_BUILD_DIR/denial-plugins" "$private/native/"
+    _bundle settings_app "$private/settings" denial-settings
+    _bundle polkit_app "$private/polkit" denial-app
+    _bundle plugin_manager_app "$private/plugins" denial-plugin-manager
+    cp -a "$DENIAL_BUILD_DIR/plugin-build-kit" "$private/"
+    # SDK metadata must remain readable after pacman changes ownership to root.
+    chmod 644 "$private/plugin-build-kit/flutter/bin/cache/artifacts/material_fonts/codepoints"
+    # The compiler kit links the system Dart SDK from PATH at first use; shipping
+    # a private copy would add ~600 MB and contradict upstream's packaging.
+    printf '%s\n' '{"schema":1,"buildKit":"../plugin-build-kit","denialctl":"../../wm/denialctl"}' > "$private/native/denial-plugins.installation.json"
+    printf '%s\n' '{"schema":1,"backend":"../native/denial-plugins"}' > "$private/plugins/denial-plugin-manager.installation.json"
+    ln -s ../lib/denial-anland/desktop/settings/denial-settings "$bin/denial-settings"
+    for name in denial-app denial-portal; do ln -s "../lib/denial-anland/desktop/native/$name" "$bin/$name"; done
+    for name in denial-plugins denial-plugin-manager; do
+        local dir=native
+        [[ $name != denial-plugin-manager ]] || dir=plugins
+        cat > "$bin/$name" <<EOF
+#!/usr/bin/env bash
+exec /usr/lib/denial-anland/desktop/$dir/$name "\$@"
+EOF
+        chmod 755 "$bin/$name"
+    done
+    cat > "$bin/denial-polkit-agent" <<'EOF'
+#!/usr/bin/env bash
+base=/usr/lib/denial-anland/desktop
+exec "$base/native/denial-polkit-agent" --runner "$base/polkit/denial-app" --bundle "$base/polkit" --engine "$base/polkit/lib/libflutter_engine.so" "$@"
+EOF
+    chmod 755 "$bin/denial-polkit-agent"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/arch/dev.denial.Settings.desktop" "$pkgdir/usr/share/applications/dev.denial.Settings.desktop"
+    for name in dev.denial.Welcome.desktop dev.denial.PluginManager.desktop; do
+        install -Dm644 "$DENIAL_SOURCE_TREE/packaging/$name" "$pkgdir/usr/share/applications/$name"
+    done
+    # Register integration, but never enable/start/restart services during packaging
+    # or installation. The compositor activates the session after its first frame.
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/denial-session.target" \
+        "$pkgdir/usr/lib/systemd/user/denial-session.target"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/denial-polkit-agent.service" \
+        "$pkgdir/usr/lib/systemd/user/denial-polkit-agent.service"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/arch/denial-portal.service" \
+        "$pkgdir/usr/lib/systemd/user/denial-portal.service"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/arch/denial.portal" \
+        "$pkgdir/usr/share/xdg-desktop-portal/portals/denial.portal"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/arch/denial-portals.conf" \
+        "$pkgdir/usr/share/xdg-desktop-portal/denial-portals.conf"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/arch/org.freedesktop.impl.portal.desktop.denial.service" \
+        "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.denial.service"
+    install -Dm644 "$DENIAL_SOURCE_TREE/packaging/arch/xdg-desktop-portal-wlr-Denial" \
+        "$pkgdir/etc/xdg/xdg-desktop-portal-wlr/Denial"
+    install -dm755 "$pkgdir/usr/share/wayland-sessions"
+    printf '[Desktop Entry]\nName=Denial (Anland)\nComment=Denial Anland desktop\nExec=denial\nTryExec=denial\nType=Application\nDesktopNames=Denial\n' \
+        > "$pkgdir/usr/share/wayland-sessions/denial.desktop"
+    install -m644 "$DENIAL_SOURCE_TREE/LICENSES/"*.txt "$pkgdir/usr/share/licenses/$pkgname/"
+    bash "$DENIAL_SOURCE_TREE/tools/generate-denial-package-copyright" denial "$pkgdir/usr/share/licenses/$pkgname/copyright"
+}

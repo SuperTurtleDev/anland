@@ -20,9 +20,9 @@ import java.nio.charset.StandardCharsets;
  *
  * Owns a 1x1 hidden EditText whose {@link ForwardingInputConnection} forwards
  * committed / composing text and editing keys to the remote in real time, plus
- * the show/hide toggle and IME-visibility query. Surface resizing and extra-keys
- * bar layout stay in the host; SystemIME reaches back through {@link Host} only
- * to read the active bar (for modifier combos) and to report visibility changes.
+ * the show/hide toggle and IME-visibility query. Surface resizing stays in the
+ * host; SystemIME reaches back through {@link Host} only to read the active
+ * modifier latch (for modifier combos) and to report visibility changes.
  */
 public final class SystemIME {
 
@@ -34,9 +34,12 @@ public final class SystemIME {
 
     /** Callback surface SystemIME needs from its host (MainActivity). */
     public interface Host {
-        /** The current extra-keys bar, or null if none is built. */
-        ExtraKeysBar getExtraKeysBar();
-        /** IME shown/hidden via the toggle; host syncs the bar / surface layout. */
+        /**
+         * The modifier latch that soft-keyboard text input should combine with
+         * (the HUD overlay), or null when no HUD is available.
+         */
+        com.anland.consumer.hud.IModifierProvider getModifierProvider();
+        /** IME shown/hidden via the toggle; host re-applies the surface layout. */
         void onImeVisibilityChanged(boolean visible);
     }
 
@@ -136,20 +139,21 @@ public final class SystemIME {
         KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
 
     /*
-     * If an extra-keys-bar modifier (CTRL/ALT/SHIFT) is currently held, take the
-     * first key-mappable character of `s` and send it as a modifier combo (e.g.
-     * Ctrl+C) through the bar, which also clears the unlocked modifiers. Returns
-     * true if the input was consumed this way, false to fall back to plain text.
+     * If a latched modifier (CTRL/ALT/SHIFT) is active on the HUD overlay, take
+     * the first key-mappable character of `s` and send it as a modifier combo
+     * (e.g. Ctrl+C) through the overlay, which also clears the unlocked
+     * modifiers. Returns true if the input was consumed this way, false to fall
+     * back to plain text.
      */
     private boolean maybeSendModifierCombo(String s) {
-        ExtraKeysBar bar = host.getExtraKeysBar();
-        if (bar == null || !bar.hasActiveModifier()
+        com.anland.consumer.hud.IModifierProvider modifiers = host.getModifierProvider();
+        if (modifiers == null || !modifiers.hasActiveModifier()
                 || s == null || s.isEmpty())
             return false;
         for (int i = 0; i < s.length(); i++) {
             int evdev = charToEvdev(s.charAt(i));
             if (evdev != -1) {
-                bar.sendKeyComboFromExternal(evdev);
+                modifiers.sendKeyComboFromExternal(evdev);
                 return true;
             }
         }

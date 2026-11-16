@@ -1,62 +1,6 @@
-diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
 --- a/src/inputmethod.cpp
 +++ b/src/inputmethod.cpp
-@@ -51,39 +51,28 @@
- namespace KWin
- {
- 
--static std::vector<quint32> textToKey(const QString &text)
-+static QList<xkb_keysym_t> textToKey(const QString &inputString)
- {
--    if (text.isEmpty()) {
--        return {};
--    }
-+    QList<xkb_keysym_t> result;
- 
--    auto sequence = QKeySequence::fromString(text);
--    if (sequence.isEmpty()) {
--        return {};
--    }
-+    for (int i = 0; i < inputString.size(); ++i) {
-+        char32_t cp = inputString[i].unicode();
- 
--    const QList<xkb_keysym_t> syms = KWin::Xkb::keysymsFromQtKey(sequence[0]);
--    if (syms.empty()) {
--        return {};
--    }
--
--    std::optional<xkb_keycode_t> keyCode;
--    for (xkb_keysym_t sym : syms) {
--        auto code = input()->keyboard()->xkb()->keycodeFromKeysym(sym);
--        if (code) {
--            keyCode = code->first;
--            break;
-+        if (inputString[i].isHighSurrogate() && i + 1 < inputString.size()
-+            && inputString[i + 1].isLowSurrogate()) {
-+            cp = QChar::surrogateToUcs4(inputString[i].unicode(), inputString[i + 1].unicode());
-+            i++;
-         }
--    }
--    if (!keyCode) {
--        return {};
--    }
- 
--    if (text.isUpper()) {
--        return {KEY_LEFTSHIFT, quint32(keyCode.value())};
-+        const xkb_keysym_t keysym = xkb_utf32_to_keysym(cp);
-+        if (keysym != XKB_KEY_NoSymbol) {
-+            result.append(keysym);
-+        } else {
-+            qCWarning(KWIN_VIRTUALKEYBOARD) << "Could not map codepoint" << Qt::hex << int(cp) << "to keysym";
-+        }
-     }
- 
--    return {quint32(keyCode.value())};
-+    return result;
- }
- 
- InputMethod::InputMethod()
-@@ -566,6 +555,76 @@
+@@ -566,6 +566,16 @@
      waylandServer()->seat()->notifyKeyboardKey(keysymToKeycode(sym), state);
  }
  
@@ -65,134 +9,32 @@ diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
 +    if (text.isEmpty()) {
 +        return;
 +    }
-+
-+    // Use the same routing path as a real zwp_input_method_v1 commit_string.
++    // Same entry point the zwp_input_method_v1 context's commitString signal is
++    // wired to (see adoptInputMethodContext): KWin decides how to deliver it.
 +    commitString(m_serial++, text);
-+}
-+
-+static QByteArray keymapContentsForKeysym(xkb_keycode_t newKeycode, xkb_keysym_t customSym)
-+{
-+    char symName[64];
-+    if (xkb_keysym_get_name(customSym, symName, sizeof(symName)) <= 0) {
-+        qCWarning(KWIN_VIRTUALKEYBOARD) << "Could not find name for keysym" << customSym;
-+        return {};
-+    }
-+
-+    const int keycode = newKeycode + 8;
-+    const QString keymap = QString::asprintf(
-+        R"eof(xkb_keymap {
-+  xkb_keycodes "custom" {
-+    <CSTM> = %d;
-+  };
-+  xkb_types "(custom)" { include "complete" };
-+  xkb_compatibility "custom" { include "complete" };
-+  xkb_symbols "custom" {
-+    include "pc+us"
-+    key <CSTM> { [ %s ] };
-+  };
-+};
-+)eof",
-+        keycode,
-+        symName);
-+
-+    return keymap.toLatin1();
-+}
-+
-+static void sendKeySymWithTemporaryKeymap(xkb_keysym_t keySym)
-+{
-+    static const uint syntheticKeyCode = 247;
-+    const QByteArray temporaryKeymap = keymapContentsForKeysym(syntheticKeyCode, keySym);
-+    if (temporaryKeymap.isEmpty()) {
-+        return;
-+    }
-+
-+    auto keyboard = waylandServer()->seat()->keyboard();
-+    if (!keyboard) {
-+        return;
-+    }
-+
-+    keyboard->setKeymap(temporaryKeymap);
-+    waylandServer()->seat()->notifyKeyboardKey(syntheticKeyCode, KeyboardKeyState::Pressed);
-+    waylandServer()->seat()->notifyKeyboardKey(syntheticKeyCode, KeyboardKeyState::Released);
-+    keyboard->setKeymap(input()->keyboard()->xkb()->keymapContents());
-+}
-+
-+void InputMethod::forwardKeySym(int keySym)
-+{
-+    const std::optional<std::pair<int, int>> keyCode = input()->keyboard()->xkb()->keycodeFromKeysym(keySym);
-+    if (!keyCode || keyCode->second > 0) {
-+        sendKeySymWithTemporaryKeymap(keySym);
-+        return;
-+    }
-+
-+    const quint32 key = keyCode->first;
-+    waylandServer()->seat()->notifyKeyboardKey(key, KeyboardKeyState::Pressed);
-+    waylandServer()->seat()->notifyKeyboardKey(key, KeyboardKeyState::Released);
 +}
 +
  void InputMethod::commitString(qint32 serial, const QString &text)
  {
      if (auto t1 = waylandServer()->seat()->textInputV1(); t1 && t1->isEnabled()) {
-@@ -587,28 +646,12 @@
-     } else {
-         // The application has no way of communicating with the input method.
-         // So instead, try to convert what we get from the input method into
--        // keycodes and send those as fake input to the client.
--        auto keys = textToKey(text);
--        if (keys.empty()) {
--            return;
--        }
--
--        // First, send all the extracted keys as pressed keys to the client.
--        for (const auto &key : keys) {
--            waylandServer()->seat()->notifyKeyboardKey(key, KeyboardKeyState::Pressed);
--        }
--
--        // Then, send key release for those keys in reverse.
--        for (auto itr = keys.rbegin(); itr != keys.rend(); ++itr) {
--            // Since we are faking key events, we do not have distinct press/release
--            // events. So instead, just queue the button release so it gets sent
--            // a few moments after the press.
--            auto key = *itr;
--            QMetaObject::invokeMethod(
--                this, [key]() {
--                waylandServer()->seat()->notifyKeyboardKey(key, KeyboardKeyState::Released);
--            }, Qt::QueuedConnection);
-+        // keysyms and send those as fake input to the client.
-+        const QList<xkb_keysym_t> keySyms = textToKey(text);
-+        for (const xkb_keysym_t &keySym : keySyms) {
-+            forwardKeySym(keySym);
-         }
-+        input()->keyboard()->xkb()->forwardModifiers();
-     }
- }
- 
-diff --git a/src/inputmethod.h b/src/inputmethod.h
+
 --- a/src/inputmethod.h
 +++ b/src/inputmethod.h
-@@ -73,6 +73,12 @@
+@@ -73,6 +73,13 @@
  
      void commitPendingText();
  
 +    // Inject committed text from a compositor-side input source that does not
-+    // speak zwp_input_method_v1, such as the anland Android consumer keyboard.
-+    // This uses the same routing path as a real input method commit_string
-+    // request, including text-input clients and the key-event fallback.
++    // speak zwp_input_method_v1 (e.g. the anland Android consumer's keyboard).
++    // Enters KWin's routing at the same point a real IME's commit_string does:
++    // delivered to the focused text-input client, or synthesized as key events
++    // when the client has no text-input interface enabled.
 +    void commitText(const QString &text);
 +
  Q_SIGNALS:
      void panelChanged();
      void activeChanged(bool active);
-@@ -107,6 +113,7 @@
-     void updateInputPanelState();
-     void adoptInputMethodContext();
-     void commitString(qint32 serial, const QString &text);
-+    void forwardKeySym(int keySym);
-     void keysymReceived(quint32 serial, quint32 time, quint32 sym, bool pressed, quint32 modifiers);
-     void deleteSurroundingText(int32_t index, uint32_t length);
-     void setCursorPosition(qint32 index, qint32 anchor);
-diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
-index 93e1991..6d08333 100644
+
 --- a/src/backends/CMakeLists.txt
 +++ b/src/backends/CMakeLists.txt
 @@ -1,3 +1,4 @@
@@ -200,8 +42,7 @@ index 93e1991..6d08333 100644
  add_subdirectory(drm)
  add_subdirectory(fakeinput)
  add_subdirectory(libinput)
-diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
-index 26d51b4..d7baa81 100644
+
 --- a/src/main_wayland.cpp
 +++ b/src/main_wayland.cpp
 @@ -10,6 +10,7 @@
@@ -212,7 +53,7 @@ index 26d51b4..d7baa81 100644
  #include "backends/drm/drm_backend.h"
  #include "backends/virtual/virtual_backend.h"
  #include "backends/wayland/wayland_backend.h"
-@@ -346,6 +347,7 @@ int main(int argc, char *argv[])
+@@ -346,6 +347,7 @@
                                       i18n("Exits this instance so it can be restarted by kwin_wayland_wrapper."));
  
      QCommandLineOption drmOption(QStringLiteral("drm"), i18n("Render through drm node."));
@@ -220,7 +61,7 @@ index 26d51b4..d7baa81 100644
      QCommandLineOption locale1Option(QStringLiteral("locale1"), i18n("Extract locale information from locale1 rather than the user's configuration"));
  
      QCommandLineParser parser;
-@@ -369,6 +371,7 @@ int main(int argc, char *argv[])
+@@ -369,6 +371,7 @@
      parser.addOption(scaleOption);
      parser.addOption(outputCountOption);
      parser.addOption(drmOption);
@@ -228,7 +69,7 @@ index 26d51b4..d7baa81 100644
      parser.addOption(locale1Option);
  
      QCommandLineOption inputMethodOption(QStringLiteral("inputmethod"),
-@@ -430,6 +433,7 @@ int main(int argc, char *argv[])
+@@ -430,6 +433,7 @@
          X11,
          Wayland,
          Virtual,
@@ -236,7 +77,7 @@ index 26d51b4..d7baa81 100644
      };
  
      BackendType backendType;
-@@ -439,7 +443,9 @@ int main(int argc, char *argv[])
+@@ -439,7 +443,9 @@
      qreal outputScale = 1;
  
      // Decide what backend to use.
@@ -247,13 +88,14 @@ index 26d51b4..d7baa81 100644
          backendType = BackendType::Kms;
  #if KWIN_BUILD_X11
      } else if (parser.isSet(x11DisplayOption)) {
-@@ -544,6 +550,14 @@ int main(int argc, char *argv[])
+@@ -544,6 +550,15 @@
          }));
          break;
      }
 +    case BackendType::Anland: {
-+        // The display-daemon socket path comes from $ANLAND_SOCKET; the backend
-+        // falls back to its built-in default (/tmp/display_daemon.sock) if unset.
++        // The display-daemon socket path comes from $ANLAND_SOCKET; when it is
++        // unset the backend probes the well-known daemon locations
++        // (/run/display.sock, /tmp/anland/display_daemon.sock, ...) itself.
 +        const QString anlandSocket = qEnvironmentVariable("ANLAND_SOCKET");
 +        a.setSession(KWin::Session::create(KWin::Session::Type::Noop));
 +        a.setOutputBackend(std::make_unique<KWin::AnlandBackend>(anlandSocket));
@@ -262,33 +104,59 @@ index 26d51b4..d7baa81 100644
      }
  
      KWin::WaylandServer *server = KWin::WaylandServer::create();
-diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+
 --- a/src/wayland/transaction.cpp
 +++ b/src/wayland/transaction.cpp
-@@ -18,5 +18,13 @@ namespace KWin
- TransactionDmaBufLocker *TransactionDmaBufLocker::get(GraphicsBuffer *buffer)
- {
-+    // KWin 6.3 performs implicit dma-buf waiting through a per-buffer locker.
-+    // The anland backend always composites with EGL, whose implicit sync waits
-+    // before sampling the imported texture, so the locker duplicates that wait
-+    // for high-rate mailbox clients. Explicit sync timelines remain untouched.
-+    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
-+        return nullptr;
-+    }
+@@ -271,14 +271,25 @@
+         }
+ 
+         if (entry.state->bufferIsSet && entry.state->buffer) {
++            // The anland backend always composites client buffers with EGL; it
++            // never scans them out directly. EGL's implicit dma-buf
++            // synchronization waits before the texture is sampled, so keeping a
++            // QSocketNotifier armed for every mailbox commit only duplicates that
++            // wait. On fast clients this adds poll/ioctl work to every commit and
++            // delays wl_buffer.release. Keep the generic KWin behavior unless the
++            // anland-only startup flag explicitly opts into this fast path.
++            static const bool skipImplicitSyncWait = qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1;
 +
-     static QHash<GraphicsBuffer *, TransactionDmaBufLocker *> lockers;
-     if (auto it = lockers.find(buffer); it != lockers.end()) {
-         return *it;
-diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+             // Avoid applying the transaction until all graphics buffers have become idle.
+             if (entry.state->acquirePoint.timeline) {
+                 auto eventFd = entry.state->acquirePoint.timeline->eventFd(entry.state->acquirePoint.point);
+                 if (entry.surface && eventFd.isValid()) {
+                     new TransactionEventFdLocker(this, std::move(eventFd), entry.surface->client());
+                 }
+-            } else if (auto locker = TransactionDmaBufLocker::get(entry.state->buffer)) {
+-                locker->add(this);
++            } else if (!skipImplicitSyncWait) {
++                if (auto locker = TransactionDmaBufLocker::get(entry.state->buffer)) {
++                    locker->add(this);
++                }
+             }
+         }
+ 
+
 --- a/src/scene/surfaceitem.cpp
 +++ b/src/scene/surfaceitem.cpp
-@@ -114,2 +114,9 @@ void SurfaceItem::addDamage(const QRegion &region)
-     m_lastDamage = std::chrono::steady_clock::now();
+@@ -103,6 +103,10 @@
+ 
+ void SurfaceItem::addDamage(const QRegion &region)
+ {
 +    // Mailbox clients commonly replace a fully damaged buffer hundreds of times
 +    // before the next composite. The latest buffer still gets installed through
 +    // bufferChanged; repeating damage mapping and repaint propagation is redundant.
 +    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
+     if (m_lastDamage) {
+         const auto diff = std::chrono::steady_clock::now() - *m_lastDamage;
+         m_lastDamageTimeDiffs.push_back(diff);
+@@ -113,6 +117,9 @@
+     }
+     m_lastDamage = std::chrono::steady_clock::now();
+     m_damage += region;
 +    if (damageAlreadyPending) {
 +        return;
 +    }
-     m_damage += region;
+ 
+     const QRectF sourceBox = m_bufferToSurfaceTransform.map(m_bufferSourceBox, m_bufferSize);
+     const qreal xScale = sourceBox.width() / m_destinationSize.width();
+

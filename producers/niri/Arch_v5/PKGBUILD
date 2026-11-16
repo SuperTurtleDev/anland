@@ -1,31 +1,40 @@
 # Maintainer: anland contributors
-# Official niri v26.04 plus the single repository Anland backend.
+# Niri v26.04 and its matching Smithay revision plus the Anland backend.
 pkgname=niri-anland
-pkgver=26.4.0
+pkgver=0
 pkgrel=5
 pkgdesc='Scrollable-tiling Wayland compositor with the common Anland producer backend'
 arch=('aarch64')
 url='https://github.com/niri-wm/niri'
 license=('GPL-3.0-or-later')
-_upstream_version=26.04
-_smithay_rev=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef
 depends=(glibc gcc-libs mesa libdrm libinput seatd libdisplay-info libxkbcommon pixman wayland pango cairo pipewire libpipewire systemd-libs xwayland-satellite xorg-xwayland)
 makedepends=(cargo rust cmake make gcc clang pkgconf patch tar unzip)
 source=(
-  "niri-${_upstream_version}.zip::https://github.com/niri-wm/niri/archive/refs/tags/v${_upstream_version}.zip"
-  "smithay-${_smithay_rev}.tar.gz::https://github.com/Smithay/smithay/archive/${_smithay_rev}.tar.gz"
+  'niri::git+https://github.com/niri-wm/niri.git#commit=8ed0da44d974c32c6877d2f4630c314da0717ecb'
+  'smithay-latest::git+https://github.com/Smithay/smithay.git#commit=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef'
   'niri.patch'
   'smithay.patch'
   'anland-overlay.tar'
 )
 noextract=('anland-overlay.tar')
 sha256sums=(
-  '065c06f624ba46af8e82fe358ecc74392a645688a73871532d193c5d45bca6d5'
-  '2df0f01fd83ee01dc2fcd5976ac0004334b03ef567f467b6c511f11fc1c8a7b9'
+  'SKIP'
+  'SKIP'
   'SKIP'
   'SKIP'
   'SKIP'
 )
+
+pkgver() {
+  python3 - "$srcdir/niri/Cargo.toml" <<'PY_VERSION'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as f: data = tomllib.load(f)
+version = data.get('package', {}).get('version')
+if not isinstance(version, str): version = data.get('workspace', {}).get('package', {}).get('version')
+if not isinstance(version, str): raise SystemExit('Niri Cargo package version is missing')
+print(version)
+PY_VERSION
+}
 
 require_aarch64() {
   [[ "$(uname -m)" == aarch64 && "${CARCH:-}" == aarch64 ]] || {
@@ -42,14 +51,14 @@ cargo_environment() {
 
 prepare() {
   require_aarch64 || return 1
-  local tree="$srcdir/niri-$_upstream_version"
+  local tree="$srcdir/niri"
   local overlay="$srcdir/anland-overlay"
   tar -xf "$srcdir/anland-overlay.tar" -C "$srcdir"
   [[ -f "$tree/Cargo.lock" && -f "$overlay/producers/niri/anland_backend/mod.rs" ]] || {
     error 'official niri source or shared backend overlay missing'; return 1;
   }
-  patch --batch --forward --fuzz=0 -Np1 -d "$tree" -i "$srcdir/niri.patch"
-  patch --batch --forward --fuzz=0 -Np1 -d "$srcdir/smithay-$_smithay_rev" -i "$srcdir/smithay.patch"
+  patch --batch --forward --fuzz=2 --no-backup-if-mismatch -Np1 -d "$tree" -i "$srcdir/niri.patch"
+  patch --batch --forward --fuzz=2 --no-backup-if-mismatch -Np1 -d "$srcdir/smithay-latest" -i "$srcdir/smithay.patch"
   mkdir -p "$tree/src/backend/anland"
   install -m644 "$overlay"/producers/niri/anland_backend/*.rs "$tree/src/backend/anland/"
   cargo_environment
@@ -63,7 +72,7 @@ prepare() {
 }
 
 build() {
-  local tree="$srcdir/niri-$_upstream_version"
+  local tree="$srcdir/niri"
   local overlay="$srcdir/anland-overlay"
   cmake -S "$overlay/producers/niri/anland_backend" -B "$srcdir/bridge-build" \
     -DCMAKE_BUILD_TYPE=Release
@@ -76,7 +85,7 @@ build() {
 }
 
 package() {
-  local tree="$srcdir/niri-$_upstream_version"
+  local tree="$srcdir/niri"
   local target="${ANLAND_NIRI_TARGET_DIR:-$srcdir/cargo-target}"
   install -Dm755 "$target/release/niri" "$pkgdir/usr/bin/niri-anland"
   install -Dm755 "$srcdir/bridge-build/libanland_niri_bridge.so" "$pkgdir/usr/lib/libanland_niri_bridge.so"

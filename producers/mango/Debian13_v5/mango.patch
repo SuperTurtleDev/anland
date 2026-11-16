@@ -1,0 +1,832 @@
+Mango Anland 5 integration (locally adapted combined patch)
+
+Upstream baseline: 3b119a23b785db47d0f2b2aa2ed36787ad5ae167
+Original Anland changes: luochen88, 91acc518688a4db979d05771d34dffec2be6d744
+Local integration: private sysconfdir, opt-in session management,
+external backend build/header wiring, and compositor-provided text input.
+README and backend C/header payloads are intentionally omitted.
+Backend files are supplied by producers/mango/anland_backend/.
+This is not the original author's unmodified commit patch.
+
+ assets/mango-anland.desktop             |  8 ++++
+ assets/mango-anland.service             | 35 ++++++++++++++
+ include/mango/ext-protocol/text-input.h |  3 ++
+ include/mango/layout/horizontal.h       |  1 +
+ include/mango/layout/vertical.h         |  1 +
+ meson.build                             | 29 ++++++++----
+ meson_options.txt                       |  1 +
+ scripts/anland-volume.sh                | 75 ++++++++++++++++++++++++++++++
+ scripts/mango-anland                    | 82 +++++++++++++++++++++++++++++++++
+ src/ext-protocol/text-input.c           | 51 ++++++++++++++++++--
+ src/input/touch.c                       | 38 +++++++++++++--
+ src/main.c                              | 50 ++++++++++++++------
+ src/manage/monitor.c                    | 12 ++++-
+ 13 files changed, 353 insertions(+), 33 deletions(-)
+
+diff --git a/assets/mango-anland.desktop b/assets/mango-anland.desktop
+new file mode 100644
+index 00000000..99178219
+--- /dev/null
++++ b/assets/mango-anland.desktop
+@@ -0,0 +1,8 @@
++[Desktop Entry]
++Encoding=UTF-8
++Name=Mango Anland
++DesktopNames=mango;wlroots
++Comment=MangoWM Anland 5 session
++Exec=mango-anland start
++Icon=mango
++Type=Application
+diff --git a/assets/mango-anland.service b/assets/mango-anland.service
+new file mode 100644
+index 00000000..8aae3d9f
+--- /dev/null
++++ b/assets/mango-anland.service
+@@ -0,0 +1,35 @@
++[Unit]
++Description=MangoWM Anland session
++After=pipewire.service pipewire-pulse.service
++Wants=pipewire.service pipewire-pulse.service
++StartLimitIntervalSec=60
++StartLimitBurst=5
++
++[Service]
++Type=simple
++WorkingDirectory=%h
++Environment=MANGO_ANLAND_SYSTEMD=1
++Environment=ANLAND_SOCKET=/run/display.sock
++Environment=ANLAND_DRM_DEVICE=/dev/dri/renderD128
++Environment=WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128
++Environment=XWAYLAND_GBM_DEVICE=/dev/dri/renderD128
++Environment=ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1
++Environment=XDG_SESSION_TYPE=wayland
++Environment=XDG_CURRENT_DESKTOP=mango
++Environment=MESA_LOADER_DRIVER_OVERRIDE=kgsl
++Environment=GALLIUM_DRIVER=zink
++Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
++Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
++ExecSearchPath=%h/.local/bin:/usr/local/bin
++ExecStart=mango-anland run
++Restart=on-failure
++RestartSec=2s
++KillMode=control-group
++KillSignal=SIGTERM
++FinalKillSignal=SIGKILL
++SendSIGKILL=yes
++TimeoutStopSec=5s
++TasksMax=infinity
++
++[Install]
++WantedBy=graphical-session.target
+diff --git a/include/mango/ext-protocol/text-input.h b/include/mango/ext-protocol/text-input.h
+index 4d9ec2e3..ff9c728c 100644
+--- a/include/mango/ext-protocol/text-input.h
++++ b/include/mango/ext-protocol/text-input.h
+@@ -6,6 +6,7 @@
+ #include <wlr/types/wlr_text_input_v3.h>
+ 
+ struct mango_input_method_relay {
++    bool compositor_input_method;
+ 	struct wl_list text_inputs;
+ 	struct wlr_input_method_v2 *input_method;
+ 	struct wlr_surface *focused_surface;
+@@ -27,6 +28,7 @@ struct mango_input_method_relay {
+ 
+ 	struct wl_listener keyboard_grab_destroy;
+ 	struct wl_listener focused_surface_destroy;
++	struct wl_listener keyboard_focus_change;
+ };
+ 
+ struct mango_input_method_popup {
+@@ -65,6 +67,8 @@ void mango_im_relay_finish(struct mango_input_method_relay *relay);
+ 
+ void mango_im_relay_set_focus(struct mango_input_method_relay *relay,
+ 							  struct wlr_surface *surface);
++bool mango_text_input_commit_utf8(struct mango_input_method_relay *relay,
++	const char *text, size_t length);
+ /*----------------------------------------------------------*/
+ 
+ /* ------------------ Protocol internal code ------------------------------ */
+diff --git a/meson.build b/meson.build
+index 5f6c7764..d0d9ceeb 100644
+--- a/meson.build
++++ b/meson.build
+@@ -15,15 +15,7 @@ endif
+ prefix = get_option('prefix')
+ sysconfdir = get_option('sysconfdir')
+ 
+-# If sysconfdir starts with prefix, strip the prefix.
+-if sysconfdir.startswith(prefix) and not is_nixos
+-  sysconfdir = sysconfdir.substring(prefix.length())
+-  # Ensure sysconfdir is an absolute path.
+-  if not sysconfdir.startswith('/')
+-    sysconfdir = '/' + sysconfdir
+-  endif
+-endif
+-
++# Keep a private sysconfdir private; never redirect its install into /etc.
+ cc = meson.get_compiler('c')
+ libm = cc.find_library('m')
+ libdrm = dependency('libdrm')
+@@ -40,6 +32,7 @@ libscenefx_dep = dependency('scenefx-0.5',version: '>=0.5.0')
+ pixman_dep = dependency('pixman-1')
+ cjson_dep = dependency('libcjson')
+ pangocairo_dep = dependency('pangocairo')
++anland_dep = dependency('display-producer', required : get_option('anland'))
+ 
+ # version info
+ git = find_program('git', required : false)
+@@ -77,6 +70,9 @@ c_args = [
+   '-DVERSION="@0@"'.format(version_with_hash),
+   '-DSYSCONFDIR="@0@"'.format('/etc'),
+ ]
++if anland_dep.found()
++  c_args += '-DHAVE_ANLAND'
++endif
+ 
+ # add debug args only when debug option is enabled
+ if get_option('asan')
+@@ -102,6 +98,12 @@ endif
+ # NOTE: mmsg/mmsg.c lives outside src/ on purpose (separate binary, own main()).
+ find = find_program('find')
+ mango_sources = files(run_command(find, 'src', '-name', '*.c', check: true).stdout().split())
++if anland_dep.found()
++  mango_sources += files('anland_backend/anland.c',
++    'anland_backend/output.c', 'anland_backend/buffer.c',
++    'anland_backend/input.c', 'anland_backend/text.c',
++    'anland_backend/clipboard.c')
++endif
+ 
+ mango_inc = include_directories('.', 'include')
+ 
+@@ -126,6 +128,7 @@ executable('mango',
+     pixman_dep,
+     cjson_dep,
+     pangocairo_dep,
++    anland_dep,
+   ],
+   install : true,
+   c_args : c_args,
+@@ -177,6 +180,7 @@ mandir = get_option('mandir')
+ desktop_install_dir = join_paths(prefix, 'share/wayland-sessions')
+ portal_install_dir = join_paths(prefix, 'share/xdg-desktop-portal')
+ install_data('assets/mango.desktop', install_dir : desktop_install_dir)
++install_data('assets/mango-anland.desktop', install_dir : desktop_install_dir)
+ install_data('assets/mango-portals.conf', install_dir : portal_install_dir)
+ install_data('assets/config.conf', install_dir : join_paths(sysconfdir, 'mango'))
+ 
+@@ -186,6 +190,14 @@ install_data('assets/config.conf', install_dir : join_paths(sysconfdir, 'mango')
+ # set_activation_env() in src/main.c
+ install_data('assets/mango-session.target',
+   install_dir : join_paths(prefix, 'lib/systemd/user'))
++install_data('assets/mango-anland.service',
++  install_dir : join_paths(prefix, 'lib/systemd/user'))
++install_data('scripts/mango-anland',
++  install_dir : join_paths(prefix, 'bin'),
++  install_mode : 'rwxr-xr-x')
++install_data('scripts/anland-volume.sh',
++  install_dir : join_paths(prefix, 'bin'),
++  install_mode : 'rwxr-xr-x')
+ 
+ # generate the mmsg man page at build time so the version always
+ # matches the project version
+diff --git a/meson_options.txt b/meson_options.txt
+index 2521b28c..294a439a 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,2 +1,3 @@
+ option('xwayland', type : 'feature', value : 'enabled')
+ option('asan', type : 'boolean', value : false)
++option('anland', type : 'feature', value : 'auto')
+diff --git a/scripts/anland-volume.sh b/scripts/anland-volume.sh
+new file mode 100755
+index 00000000..a0671e51
+--- /dev/null
++++ b/scripts/anland-volume.sh
+@@ -0,0 +1,75 @@
++#!/bin/sh
++set -eu
++
++RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
++STATE=${ANLAND_VOLUME_STATE:-$RUNTIME_DIR/anland-volume-state}
++LOCK=${STATE}.lock
++STEP=${ANLAND_VOLUME_STEP:-5}
++DEFAULT_VOLUME=${ANLAND_VOLUME_DEFAULT:-100}
++
++mkdir -p "$RUNTIME_DIR"
++
++read_state() {
++    if [ -r "$STATE" ]; then
++        set -- $(cat "$STATE")
++        vol=${1:-$DEFAULT_VOLUME}
++        muted=${2:-0}
++    else
++        vol=$DEFAULT_VOLUME
++        muted=0
++    fi
++    case "$vol" in ''|*[!0-9]*) vol=$DEFAULT_VOLUME ;; esac
++    case "$muted" in 1) muted=1 ;; *) muted=0 ;; esac
++    if [ "$vol" -lt 0 ]; then vol=0; fi
++    if [ "$vol" -gt 150 ]; then vol=150; fi
++}
++
++write_state() {
++    tmp="$STATE.$$"
++    printf '%s %s\n' "$vol" "$muted" > "$tmp"
++    mv "$tmp" "$STATE"
++}
++
++with_lock() {
++    exec 9>"$LOCK"
++    flock 9
++    read_state
++    case "$1" in
++        get)
++            printf '%s %s\n' "$vol" "$muted"
++            ;;
++        up)
++            vol=$((vol + STEP))
++            if [ "$vol" -gt 150 ]; then vol=150; fi
++            muted=0
++            write_state
++            printf '%s %s\n' "$vol" "$muted"
++            ;;
++        down)
++            vol=$((vol - STEP))
++            if [ "$vol" -lt 0 ]; then vol=0; fi
++            muted=0
++            write_state
++            printf '%s %s\n' "$vol" "$muted"
++            ;;
++        toggle)
++            if [ "$muted" = 1 ]; then muted=0; else muted=1; fi
++            write_state
++            printf '%s %s\n' "$vol" "$muted"
++            ;;
++        set)
++            vol=${2:-}
++            case "$vol" in ''|*[!0-9]*) echo "Usage: $0 set <0-150>" >&2; exit 2 ;; esac
++            if [ "$vol" -gt 150 ]; then vol=150; fi
++            muted=0
++            write_state
++            printf '%s %s\n' "$vol" "$muted"
++            ;;
++        *)
++            echo "Usage: $0 {get|up|down|toggle|set <0-150>}" >&2
++            exit 2
++            ;;
++    esac
++}
++
++with_lock "${1:-get}" "${2:-}"
+diff --git a/scripts/mango-anland b/scripts/mango-anland
+new file mode 100755
+index 00000000..3844f4b0
+--- /dev/null
++++ b/scripts/mango-anland
+@@ -0,0 +1,82 @@
++#!/bin/sh
++set -eu
++
++SERVICE=mango-anland.service
++RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
++LOCK_FILE="$RUNTIME_DIR/mango-anland.lock"
++
++export ANLAND=1
++export ANLAND_SOCKET=${ANLAND_SOCKET:-/run/display.sock}
++export ANLAND_DRM_DEVICE=${ANLAND_DRM_DEVICE:-/dev/dri/renderD128}
++export WLR_RENDER_DRM_DEVICE=${WLR_RENDER_DRM_DEVICE:-$ANLAND_DRM_DEVICE}
++export XWAYLAND_GBM_DEVICE=${XWAYLAND_GBM_DEVICE:-$ANLAND_DRM_DEVICE}
++export ANLAND_SKIP_IMPLICIT_SYNC_WAIT=${ANLAND_SKIP_IMPLICIT_SYNC_WAIT:-1}
++export XDG_RUNTIME_DIR="$RUNTIME_DIR"
++export PULSE_SERVER=${PULSE_SERVER:-unix:$RUNTIME_DIR/pulse/native}
++export XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-wayland}
++export XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-mango}
++export MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-kgsl}
++export GALLIUM_DRIVER=${GALLIUM_DRIVER:-zink}
++export WLR_RENDERER_ALLOW_SOFTWARE=${WLR_RENDERER_ALLOW_SOFTWARE:-1}
++
++wait_for_anland() {
++    i=0
++    while [ "$i" -lt 60 ]; do
++        if [ -S "$ANLAND_SOCKET" ] && [ -e "$ANLAND_DRM_DEVICE" ]; then
++            return 0
++        fi
++        i=$((i + 1))
++        sleep 0.5
++    done
++    echo "mango-anland: Anland socket or DRM device is unavailable" >&2
++    return 1
++}
++
++run_mango() {
++    wait_for_anland
++    command -v mango >/dev/null 2>&1 || {
++        echo "mango-anland: mango executable is unavailable" >&2
++        return 1
++    }
++    command -v mangobar >/dev/null 2>&1 || {
++        echo "mango-anland: mangobar executable is unavailable" >&2
++        return 1
++    }
++    mkdir -p "$RUNTIME_DIR"
++    exec 9>"$LOCK_FILE"
++    if ! flock -n 9; then
++        echo "mango-anland: session is already running" >&2
++        return 1
++    fi
++    exec mango -s 'while :; do mangobar; sleep 1; done'
++}
++
++case "${1:-start}" in
++    start)
++        if [ "${MANGO_ANLAND_SYSTEMD:-0}" = 1 ]; then
++            run_mango
++        else
++            exec systemctl --user start "$SERVICE"
++        fi
++        ;;
++    stop)
++        exec systemctl --user stop "$SERVICE"
++        ;;
++    restart)
++        exec systemctl --user restart "$SERVICE"
++        ;;
++    kill)
++        systemctl --user stop "$SERVICE" || true
++        systemctl --user reset-failed "$SERVICE" || true
++        ;;
++    status)
++        exec systemctl --user status "$SERVICE"
++        ;;
++    run)
++        run_mango
++        ;;
++    *)
++        echo "Usage: $0 {start|stop|restart|kill|status|run}" >&2
++        exit 2
++        ;;
++esac
+diff --git a/src/ext-protocol/text-input.c b/src/ext-protocol/text-input.c
+--- a/src/ext-protocol/text-input.c
++++ b/src/ext-protocol/text-input.c
+@@ -11,7 +11,63 @@
+ #include <wlr/types/wlr_layer_shell_v1.h>
+ #include <wlr/types/wlr_output_layout.h>
+ #include <wlr/types/wlr_virtual_keyboard_v1.h>
++#include "anland_backend/anland.h"
++#include <stdint.h>
++#include <wlr/util/log.h>
+ #include <wlr/types/wlr_xdg_shell.h>
++
++static bool valid_utf8(const char *text) {
++	const unsigned char *s = (const unsigned char *)text;
++	while (*s) {
++		uint32_t cp;
++		size_t n;
++		if (*s < 0x80) { s++; continue; }
++		if ((*s & 0xe0) == 0xc0) { cp = *s & 0x1f; n = 1; if (cp < 2) return false; }
++		else if ((*s & 0xf0) == 0xe0) { cp = *s & 0x0f; n = 2; }
++		else if ((*s & 0xf8) == 0xf0) { cp = *s & 0x07; n = 3; }
++		else return false;
++		for (size_t i = 0; i < n; i++) { if ((s[i + 1] & 0xc0) != 0x80) return false; cp = (cp << 6) | (s[i + 1] & 0x3f); }
++		if ((n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) ||
++				cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
++		s += n + 1;
++	}
++	return true;
++}
++
++bool mango_text_input_commit_utf8(struct mango_input_method_relay *relay,
++		const char *text, size_t length) {
++	/* commit_string is one Wayland string event, not an arbitrary byte stream.
++	 * Keep its header, NUL and padding below the default 4096-byte buffer.
++	 * Do not split into several commit_string events before one done: v3
++	 * double-buffers that value and clients may retain only the last chunk. */
++	if (!text || length == 0 || length > 4000 || memchr(text, '\0', length)) {
++		wlr_log(WLR_ERROR, "Anland text rejected: invalid payload or length > 4000 (%zu bytes)", length);
++		return false;
++	}
++	struct wlr_surface *focus = server.seat ?
++		server.seat->keyboard_state.focused_surface : NULL;
++	if (!relay || !relay->compositor_input_method || !focus ||
++			relay->focused_surface != focus || !relay->active_text_input) {
++		wlr_log(WLR_DEBUG, "Anland text rejected: no synchronized keyboard/text-input focus");
++		return false;
++	}
++	struct wlr_text_input_v3 *input = relay->active_text_input->input;
++	if (!input->current_enabled || input->focused_surface != focus ||
++			wl_resource_get_client(input->resource) != wl_resource_get_client(focus->resource)) {
++		wlr_log(WLR_DEBUG, "Anland text rejected: text-input-v3 disabled or wrong surface");
++		return false;
++	}
++	char *copy = strndup(text, length);
++	if (!copy || !valid_utf8(copy)) {
++		wlr_log(WLR_ERROR, "Anland text rejected: allocation failure or invalid UTF-8");
++		free(copy);
++		return false;
++	}
++	wlr_text_input_v3_send_commit_string(input, copy);
++	wlr_text_input_v3_send_done(input);
++	free(copy);
++	return true; /* Queued to Wayland, not proof the application consumed it. */
++}
+ 
+ Monitor *output_from_wlr_output(struct wlr_output *wlr_output) {
+ 	Monitor *m = NULL;
+@@ -86,7 +142,7 @@
+ get_active_text_input(struct mango_input_method_relay *relay) {
+ 	struct text_input *text_input;
+ 
+-	if (!relay->input_method) {
++	if (!relay->input_method && !relay->compositor_input_method) {
+ 		return NULL;
+ 	}
+ 	wl_list_for_each(text_input, &relay->text_inputs, link) {
+@@ -118,7 +174,7 @@
+ 		struct wlr_text_input_v3 *input = text_input->input;
+ 
+ 		struct wlr_surface *new_focused_surface;
+-		if (relay->input_method && relay->focused_surface &&
++		if ((relay->input_method || relay->compositor_input_method) && relay->focused_surface &&
+ 			wl_resource_get_client(input->resource) ==
+ 				wl_resource_get_client(relay->focused_surface->resource)) {
+ 			new_focused_surface = relay->focused_surface;
+@@ -254,6 +310,7 @@
+ 	struct wlr_input_method_keyboard_grab_v2 *keyboard_grab =
+ 		relay->input_method->keyboard_grab;
+ 	wl_list_remove(&relay->keyboard_grab_destroy.link);
++	mango_anland_set_ime_grab(server.backend, false);
+ 
+ 	if (keyboard_grab->keyboard) {
+ 		wlr_seat_keyboard_notify_modifiers(keyboard_grab->input_method->seat,
+@@ -267,6 +324,8 @@
+ 		wl_container_of(listener, relay, input_method_grab_keyboard);
+ 	struct wlr_input_method_keyboard_grab_v2 *keyboard_grab = data;
+ 
++	/* IME grabs do not emit seat->events.keyboard_grab_begin. */
++	mango_anland_set_ime_grab(server.backend, true);
+ 	struct wlr_keyboard *active_keyboard = wlr_seat_get_keyboard(server.seat);
+ 
+ 	if (!is_keyboard_emulated_by_input_method(active_keyboard,
+@@ -286,6 +345,7 @@
+ 	wl_list_remove(&relay->input_method_grab_keyboard.link);
+ 	wl_list_remove(&relay->input_method_new_popup_surface.link);
+ 	wl_list_remove(&relay->input_method_destroy.link);
++	mango_anland_set_ime_grab(server.backend, false);
+ 	relay->input_method = NULL;
+ 
+ 	update_text_inputs_focused_surface(relay);
+@@ -349,6 +409,9 @@
+ 	}
+ 
+ 	relay->input_method = input_method;
++	/* Android may already have an active editor before this IME connects.
++	 * Activation belongs to this new IME, not to the cached editor pointer. */
++	relay->active_text_input = NULL;
+ 
+ 	relay->input_method_commit.notify = handle_input_method_commit;
+ 	wl_signal_add(&relay->input_method->events.commit,
+@@ -370,6 +433,8 @@
+ 
+ 	update_text_inputs_focused_surface(relay);
+ 	update_active_text_input(relay);
++	if (relay->active_text_input)
++		send_state_to_input_method(relay);
+ }
+ void send_state_to_input_method(struct mango_input_method_relay *relay) {
+ 	struct wlr_input_method_v2 *input_method = relay->input_method;
+@@ -398,7 +463,7 @@
+ 	struct mango_input_method_relay *relay = text_input->relay;
+ 
+ 	update_active_text_input(relay);
+-	if (relay->active_text_input == text_input) {
++	if (relay->input_method && relay->active_text_input == text_input) {
+ 		update_popups_position(relay);
+ 		send_state_to_input_method(relay);
+ 	}
+@@ -416,7 +481,7 @@
+ 		wl_container_of(listener, text_input, commit);
+ 	struct mango_input_method_relay *relay = text_input->relay;
+ 
+-	if (relay->active_text_input == text_input) {
++	if (relay->input_method && relay->active_text_input == text_input) {
+ 		update_popups_position(relay);
+ 		send_state_to_input_method(relay);
+ 	}
+@@ -469,10 +534,23 @@
+ 	mango_im_relay_set_focus(relay, NULL);
+ }
+ 
++static void handle_relay_keyboard_focus_change(struct wl_listener *listener, void *data) {
++	struct mango_input_method_relay *relay =
++		wl_container_of(listener, relay, keyboard_focus_change);
++	struct wlr_seat_keyboard_focus_change_event *event = data;
++	/* Covers session locks, focus clearing and surface destruction too. */
++	mango_im_relay_set_focus(relay, event->new_surface);
++}
++
+ struct mango_input_method_relay *mango_im_relay_create() {
+ 	struct mango_input_method_relay *relay =
+ 		ecalloc(1, sizeof(struct mango_input_method_relay));
+-	wl_list_init(&relay->text_inputs);
++	#ifdef HAVE_ANLAND
++    /* Android supplies committed text itself; do not require a Linux IME process.
++     * main.c selects this backend through the same ANLAND_SOCKET condition. */
++    relay->compositor_input_method = getenv("ANLAND_SOCKET") != NULL;
++#endif
++    wl_list_init(&relay->text_inputs);
+ 	wl_list_init(&relay->popups);
+ 	relay->popup_tree = wlr_scene_tree_create(&server.scene->tree);
+ 
+@@ -485,10 +563,17 @@
+ 				  &relay->new_input_method);
+ 
+ 	relay->focused_surface_destroy.notify = handle_focused_surface_destroy;
++	relay->keyboard_focus_change.notify = handle_relay_keyboard_focus_change;
++	wl_signal_add(&server.seat->keyboard_state.events.focus_change,
++		&relay->keyboard_focus_change);
++	mango_im_relay_set_focus(relay, server.seat->keyboard_state.focused_surface);
+ 
+ 	return relay;
+ }
+ void mango_im_relay_finish(struct mango_input_method_relay *relay) {
++	mango_anland_set_ime_grab(server.backend, false);
++	wl_list_remove(&relay->keyboard_focus_change.link);
++	mango_im_relay_set_focus(relay, NULL);
+ 	wl_list_remove(&relay->new_text_input.link);
+ 	wl_list_remove(&relay->new_input_method.link);
+ 	free(relay);
+diff --git a/src/input/touch.c b/src/input/touch.c
+index 11ac8798..9966dd4a 100644
+--- a/src/input/touch.c
++++ b/src/input/touch.c
+@@ -1,11 +1,13 @@
+ #include "mango/input/touch.h"
++#include "anland_backend/anland.h"
+ #include "mango/common/input-event-codes.h"
+ #include "mango/common/log.h"
+ #include "mango/common/server.h"
+ #include "mango/common/util.h"
+ #include "mango/input/pointer.h"
+ #include "mango/ipc/ipc.h"
+ #include "mango/manage/client.h"
++#include "mango/manage/layer.h"
+ #include "mango/manage/misc.h"
+ #include "mango/manage/monitor.h"
+ #include <wayland-client-core.h>
+@@ -15,6 +17,7 @@
+ #include <wlr/types/wlr_idle_notify_v1.h>
+ #include <wlr/types/wlr_input_device.h>
+ #include <wlr/types/wlr_seat.h>
++#include <wlr/types/wlr_layer_shell_v1.h>
+ #include <wlr/types/wlr_touch.h>
+ 
+ void handle_cursor_touch_up(struct wl_listener *listener, void *data);
+@@ -41,6 +44,24 @@ struct touch_point {
+ // touch emulates the pointer; pointer_touch_id isolates multiple fingers.
+ static bool simulating_pointer_from_touch = false;
+ static int32_t pointer_touch_id = -1;
++static int32_t cursor_touch_id = -1;
++
++static bool touch_should_drive_cursor(struct wlr_touch *touch) {
++	return mango_anland_touch_is(touch);
++}
++
++static void touch_drive_cursor(struct wlr_touch *touch, int32_t touch_id,
++		double x, double y) {
++	if (!touch_should_drive_cursor(touch))
++		return;
++	if (cursor_touch_id < 0)
++		cursor_touch_id = touch_id;
++	if (cursor_touch_id != touch_id)
++		return;
++	wlr_cursor_warp_absolute(server.cursor, &touch->base, x, y);
++	pointer_cursor_activity();
++}
++
+ 
+ // Reapplied on every touch down.
+ void touch_apply_monitor_mapping(struct wlr_touch *touch) {
+@@ -178,10 +199,27 @@ void handle_cursor_touch_down(struct wl_listener *listener, void *data) {
+ 	wl_list_insert(&server.touch_points, &point->link);
+ 	int touch_point_count = wl_list_length(&server.touch_points);
+ 
+-	// Hides the cursor during touch input.
+-	pointer_hide_cursor(NULL);
++	if (!touch_should_drive_cursor(event->touch))
++		pointer_hide_cursor(NULL);
++	else
++		touch_drive_cursor(event->touch, event->touch_id, event->x, event->y);
+ 
+ 	if (point->touch_protocol) {
++		/* wl_touch does not imply keyboard focus. Select only on first down,
++		 * using the same client/layer focus policy as a pointer press. Never
++		 * synthesize mouse buttons or let a second finger steal focus. */
++		if (touch_point_count == 1 && !server.session_locked) {
++			LayerSurface *layer = NULL;
++			toplevel_from_wlr_surface(point->surface, &c, &layer);
++			if (c && c->scene && c->scene->node.enabled && c->mon &&
++					VISIBLEON(c, c->mon) &&
++					(!client_is_unmanaged(c) || client_wants_focus(c)))
++				client_focus(c, 1);
++			if (layer && !server.exclusive_focus &&
++					layer->layer_surface->current.keyboard_interactive ==
++					ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND)
++				layer_focus(layer);
++		}
+ 		// Touch protocol touch point: exit pointer emulation and clear pointer
+ 		// focus to avoid interference.
+ 		simulating_pointer_from_touch = false;
+@@ -197,9 +235,12 @@ void handle_cursor_touch_down(struct wl_listener *listener, void *data) {
+ 		// xwayland_ignore_scale).
+ 		touch_apply_xwayland_scale(point->surface, &sx, &sy);
+ 
+-		if (touch_point_count == 1)
++		if (touch_point_count == 1) {
+ 			wlr_cursor_warp_absolute(server.cursor, &event->touch->base,
+-									 event->x, event->y);
++						 event->x, event->y);
++			if (touch_should_drive_cursor(event->touch))
++				pointer_cursor_activity();
++		}
+ 
+ 		wl_signal_add(&point->surface->events.destroy, &point->surface_destroy);
+ 		point->surface_destroy.notify = handle_touch_point_surface_destroy;
+@@ -233,6 +274,7 @@ void handle_cursor_touch_motion(struct wl_listener *listener, void *data) {
+ 	}
+ 
+ 	wlr_idle_notifier_v1_notify_activity(server.idle_notifier, server.seat);
++	touch_drive_cursor(event->touch, event->touch_id, event->x, event->y);
+ 
+ 	wl_list_for_each(point, &server.touch_points, link) {
+ 		if (point->touch_id != event->touch_id)
+@@ -289,6 +331,8 @@ void handle_cursor_touch_up(struct wl_listener *listener, void *data) {
+ 			simulating_pointer_from_touch = false;
+ 			pointer_touch_id = -1;
+ 		}
++		if (event->touch_id == cursor_touch_id)
++			cursor_touch_id = -1;
+ 
+ 		wl_list_remove(&point->link);
+ 		free(point);
+@@ -328,6 +372,8 @@ void handle_cursor_touch_cancel(struct wl_listener *listener, void *data) {
+ 			simulating_pointer_from_touch = false;
+ 			pointer_touch_id = -1;
+ 		}
++		if (event->touch_id == cursor_touch_id)
++			cursor_touch_id = -1;
+ 
+ 		wl_list_remove(&point->link);
+ 		free(point);
+@@ -353,6 +399,7 @@ void touch_finish_all(void) {
+ 		touch_emulate_button(BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED, 0);
+ 	simulating_pointer_from_touch = false;
+ 	pointer_touch_id = -1;
++	cursor_touch_id = -1;
+ 
+ 	wl_list_for_each_safe(point, tmp, &server.touch_points, link) {
+ 		if (point->touch_protocol && point->surface)
+diff --git a/src/main.c b/src/main.c
+index 6c207b97..dabf0761 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -1,6 +1,7 @@
+ /*
+  * See LICENSE file for copyright and license details.
+  */
++#include "anland_backend/anland.h"
+ #include "mango/animation/common.h"
+ #include "mango/common/log.h"
+ #include "mango/common/server.h"
+@@ -251,11 +252,23 @@ static char *env_vars[] = {
+ 	NULL,
+ };
+ 
++/* Direct Anland sessions must not import/unset the shared user environment or
++ * start/stop graphical-session.target. Full session integration is opt-in. */
++static bool manage_activation_env(void) {
++#ifdef HAVE_ANLAND
++    const char *socket = getenv("ANLAND_SOCKET");
++    const char *manage = getenv("MANGO_ANLAND_MANAGE_SESSION");
++    if (socket && *socket && (!manage || strcmp(manage, "1") != 0))
++        return false;
++#endif
++    return getenv("DBUS_SESSION_BUS_ADDRESS") != NULL;
++}
++
+ void set_activation_env() {
+-	if (!getenv("DBUS_SESSION_BUS_ADDRESS")) {
++	if (!manage_activation_env()) {
+ 		mango_error(true, WLR_INFO,
+ 					"Not updating dbus execution environment: "
+-					"DBUS_SESSION_BUS_ADDRESS not set");
++					"session integration disabled or DBUS_SESSION_BUS_ADDRESS not set");
+ 		return;
+ 	}
+ 
+@@ -296,10 +309,10 @@ cleanup:
+ }
+ 
+ void unset_activation_env(void) {
+-	if (!getenv("DBUS_SESSION_BUS_ADDRESS")) {
++	if (!manage_activation_env()) {
+ 		mango_error(true, WLR_INFO,
+ 					"Not clearing dbus execution environment: "
+-					"DBUS_SESSION_BUS_ADDRESS not set");
++					"session integration disabled or DBUS_SESSION_BUS_ADDRESS not set");
+ 		return;
+ 	}
+ 
+@@ -479,17 +492,26 @@ void setup(void) {
+ 	 * doesn't meet your needs. The backend uses the renderer, for example,
+ 	 * to fall back to software cursors if the backend does not support
+ 	 * hardware cursors (some older GPUs don't). */
+-	if (!(server.backend =
+-			  wlr_backend_autocreate(server.event_loop, &server.session)))
+-		die("couldn't create backend");
+-
+-	server.headless_backend = wlr_headless_backend_create(server.event_loop);
+-	if (!server.headless_backend) {
+-		mango_error(true, WLR_ERROR,
+-					"Failed to create secondary headless backend");
+-	} else {
+-		wlr_multi_backend_add(server.backend, server.headless_backend);
++#ifdef HAVE_ANLAND
++	const char *anland_socket = getenv("ANLAND_SOCKET");
++	if (anland_socket && *anland_socket) {
++		server.backend = mango_anland_backend_create(server.event_loop,
++			anland_socket);
++		server.session = NULL;
++		server.headless_backend = NULL;
++	} else
++#endif
++	{
++		server.backend = wlr_backend_autocreate(server.event_loop,
++			&server.session);
++		if (server.backend) {
++			server.headless_backend = wlr_headless_backend_create(server.event_loop);
++			if (server.headless_backend)
++				wlr_multi_backend_add(server.backend, server.headless_backend);
++		}
+ 	}
++	if (!server.backend)
++		die("couldn't create backend");
+ 
+ 	/* Initialize the scene graph used to lay out windows */
+ 	server.scene = wlr_scene_create();
+diff --git a/src/manage/monitor.c b/src/manage/monitor.c
+index cc59fc9e..2f42e786 100644
+--- a/src/manage/monitor.c
++++ b/src/manage/monitor.c
+@@ -1,4 +1,5 @@
+ #include "mango/manage/monitor.h"
++#include "anland_backend/anland.h"
+ #include "mango/animation/client.h"
+ #include "mango/animation/common.h"
+ #include "mango/animation/layer.h"
+@@ -372,6 +373,15 @@ bool mango_scene_output_commit(struct wlr_scene_output *scene_output,
+ 	struct wlr_scene_output_state_options opts = {0};
+ 	if (m->icc_transform && !has_img_desc)
+ 		opts.color_transform = m->icc_transform;
++	if (mango_anland_output_is(wlr_output)) {
++		/* Anland/Android consumer buffers are imported as external dmabufs and
++		 * must not rely on preserved contents across acquisitions. Cursor-only
++		 * damage otherwise redraws just the cursor trail, leaving untouched areas
++		 * black on freshly acquired buffers. */
++		wlr_damage_ring_add_whole(&scene_output->damage_ring);
++	}
++	if (mango_anland_output_is(wlr_output))
++		opts.swapchain = mango_anland_output_swapchain(wlr_output);
+ 	if (!wlr_scene_output_build_state(scene_output, state, &opts))
+ 		return false;
+ 
+@@ -748,7 +758,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
+ 		(state.committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION) ||
+ 		wlr_output->image_description != NULL;
+ 	struct wlr_scene_output_state_options opts = {
+-		.swapchain = NULL, // Lets the scene create it automatically.
++		.swapchain = mango_anland_output_swapchain(wlr_output),
+ 		.color_transform = NULL,
+ 	};
+ 	if (m->icc_transform && !has_img_desc)
+diff --git a/src/input/tablet.c b/src/input/tablet.c
+--- a/src/input/tablet.c
++++ b/src/input/tablet.c
+@@ -1,0 +2 @@
++#include "anland_backend/anland.h"
+@@ -27,2 +28,3 @@
+-	if (!wlr_input_device_is_libinput(device) ||
+-		!(device_handle = wlr_libinput_get_device_handle(device))) {
++    bool anland = mango_anland_tablet_is(wlr_tablet_from_input_device(device));
++    if (!anland && (!wlr_input_device_is_libinput(device) ||
++        !(device_handle = wlr_libinput_get_device_handle(device)))) {
+@@ -46 +48,3 @@
+-	if (libinput_device_config_send_events_get_modes(device_handle)) {
++    if (anland) {
++		wlr_cursor_attach_input_device(server.cursor, device);
++    } else if (libinput_device_config_send_events_get_modes(device_handle)) {
+@@ -52,0 +57,3 @@
++
++    /* Android pens have no libinput group or companion pad. */
++    if (anland) return;

@@ -1,0 +1,26 @@
+From 3e73e479160069b6444a6011057a6cd7403ac9f0 Mon Sep 17 00:00:00 2001
+From: luochen88 <178459155+luochen88@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 13:16:01 +0000
+Subject: [PATCH] fix: improve GBM device failure diagnostics
+
+---
+ render/egl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/render/egl.c b/render/egl.c
+index 85d5f6f49161277003f58684d6fb9b60c33f0ec2..58a1f997ddcf0ef40b7da6bb5bfcff611c47822c 100644
+--- a/render/egl.c
++++ b/render/egl.c
+@@ -594,8 +594,8 @@ struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
+ 
+ 		egl->gbm_device = gbm_create_device(gbm_fd);
+ 		if (!egl->gbm_device) {
++			wlr_log_errno(WLR_ERROR, "Failed to create GBM device from fd %d", gbm_fd);
+ 			close(gbm_fd);
+-			wlr_log(WLR_ERROR, "Failed to create GBM device");
+ 			goto error;
+ 		}
+ 
+-- 
+2.47.3
+

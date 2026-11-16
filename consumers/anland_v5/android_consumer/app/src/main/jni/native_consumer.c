@@ -9,12 +9,14 @@
 #include <jni.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "anw_hidden.h"
@@ -31,6 +33,24 @@
 
 #define PIXEL_FORMAT_RGBA_8888 1
 #define MAX_COLLECT_BUFS 8
+#define PACING_REPORT_INTERVAL_NS (5ULL * 1000ULL * 1000ULL * 1000ULL)
+
+struct pacing_sample {
+    uint64_t total_ns;
+    uint64_t worst_ns;
+    uint64_t count;
+};
+
+struct consumer_pacing {
+    uint64_t interval_start_ns;
+    uint64_t producer_waits;
+    uint64_t surface_queued;
+    uint64_t queue_failures;
+    struct pacing_sample producer_wait;
+    struct pacing_sample completion_to_queue;
+    struct pacing_sample acquire_fence_wait;
+    struct pacing_sample buffer_reuse;
+};
 
 /* Saved JVM reference for event-thread JNI callbacks. Process-global (the JVM is);
  * the per-thread env is attached as needed. The activity callback target is
@@ -46,6 +66,9 @@ static void on_fallback(void *userdata);
 static void on_exit_fallback(void *userdata);
 struct consumer_state {
     pthread_mutex_t lock;
+    /* Serialises the producer input stream; tablet frames hold it across their
+     * four records so the FRAME remains an atomic sample commit. */
+    pthread_mutex_t input_lock;
     ANativeWindow *window;
     display_ctx *ctx;
     pthread_t render_thread;
@@ -59,6 +82,8 @@ struct consumer_state {
     int dmabuf_fds[MAX_COLLECT_BUFS];
     struct buf_info dmabuf_infos[MAX_COLLECT_BUFS];
     ANativeWindowBuffer *buf_anb[MAX_COLLECT_BUFS];
+    uint64_t buffer_queued_at_ns[MAX_COLLECT_BUFS];
+    struct consumer_pacing pacing;
 
     int screen_w;
     int screen_h;
@@ -85,6 +110,9 @@ struct consumer_state {
     char cfg_bridge_path[512];
     int  cfg_custom_width;
     int  cfg_custom_height;
+    /* SurfaceHolder dimensions avoid stale ANativeWindow geometry after rotation. */
+    int  cfg_screen_width;
+    int  cfg_screen_height;
     bool cfg_topapp_enable;
     char cfg_topapp_path[512];
     int cfg_topapp_mode;
@@ -130,6 +158,102 @@ struct consumer_state {
 static void topapp_handle_scheduling_event(struct consumer_state *s,
                                            const struct OutputEvent *event);
 
+static int send_input_event(struct consumer_state *s, const struct InputEvent *event)
+{
+    pthread_mutex_lock(&s->input_lock);
+    int rc = s->ctx ? push_input_event(s->ctx, event) : 0;
+    pthread_mutex_unlock(&s->input_lock);
+    return rc;
+}
+
+static int send_input_payload(struct consumer_state *s, const struct InputEvent *event,
+                              void *payload, size_t size)
+{
+    pthread_mutex_lock(&s->input_lock);
+    int rc = s->ctx ? push_input_event_with_length(s->ctx, event, payload, size) : 0;
+    pthread_mutex_unlock(&s->input_lock);
+    return rc;
+}
+
+static uint64_t monotonic_now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void pacing_add(struct pacing_sample *sample, uint64_t duration_ns)
+{
+    sample->total_ns += duration_ns;
+    if (duration_ns > sample->worst_ns)
+        sample->worst_ns = duration_ns;
+    sample->count++;
+}
+
+static uint64_t pacing_mean_us(const struct pacing_sample *sample)
+{
+    return sample->count ? sample->total_ns / sample->count / 1000ULL : 0;
+}
+
+static void pacing_reset(struct consumer_state *s)
+{
+    memset(&s->pacing, 0, sizeof(s->pacing));
+    memset(s->buffer_queued_at_ns, 0, sizeof(s->buffer_queued_at_ns));
+}
+
+static void pacing_report_if_due(struct consumer_state *s, uint64_t now_ns)
+{
+    if (!s->pacing.interval_start_ns || now_ns < s->pacing.interval_start_ns ||
+        now_ns - s->pacing.interval_start_ns < PACING_REPORT_INTERVAL_NS)
+        return;
+
+    const uint64_t elapsed_ns = now_ns - s->pacing.interval_start_ns;
+    const uint64_t queue_fps = elapsed_ns
+        ? s->pacing.surface_queued * 1000000000ULL / elapsed_ns : 0;
+    LOGI("pacing queue_fps=%llu queued=%llu queue_fail=%llu producer_wait=%llu "
+         "producer_wait_us(avg/max)=%llu/%llu(n=%llu) "
+         "completion_to_queue_us(avg/max)=%llu/%llu(n=%llu) "
+         "acquire_fence_us(avg/max)=%llu/%llu(n=%llu) "
+         "buffer_reuse_us(avg/max)=%llu/%llu(n=%llu)",
+         (unsigned long long)queue_fps,
+         (unsigned long long)s->pacing.surface_queued,
+         (unsigned long long)s->pacing.queue_failures,
+         (unsigned long long)s->pacing.producer_waits,
+         (unsigned long long)pacing_mean_us(&s->pacing.producer_wait),
+         (unsigned long long)(s->pacing.producer_wait.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.producer_wait.count,
+         (unsigned long long)pacing_mean_us(&s->pacing.completion_to_queue),
+         (unsigned long long)(s->pacing.completion_to_queue.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.completion_to_queue.count,
+         (unsigned long long)pacing_mean_us(&s->pacing.acquire_fence_wait),
+         (unsigned long long)(s->pacing.acquire_fence_wait.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.acquire_fence_wait.count,
+         (unsigned long long)pacing_mean_us(&s->pacing.buffer_reuse),
+         (unsigned long long)(s->pacing.buffer_reuse.worst_ns / 1000ULL),
+         (unsigned long long)s->pacing.buffer_reuse.count);
+    memset(&s->pacing, 0, sizeof(s->pacing));
+    s->pacing.interval_start_ns = now_ns;
+}
+
+static int queue_surface_buffer(struct consumer_state *s,
+                                ANativeWindowBuffer *buffer, int fence_fd,
+                                int buffer_index, uint64_t completion_ns)
+{
+    const int rc = api.queueBuffer(s->window, buffer, fence_fd);
+    const uint64_t queued_ns = monotonic_now_ns();
+    if (buffer_index >= 0 && buffer_index < s->buf_count)
+        s->buffer_queued_at_ns[buffer_index] = rc == 0 ? queued_ns : 0;
+    if (rc == 0)
+        s->pacing.surface_queued++;
+    else
+        s->pacing.queue_failures++;
+    if (completion_ns && queued_ns >= completion_ns)
+        pacing_add(&s->pacing.completion_to_queue, queued_ns - completion_ns);
+    pacing_report_if_due(s, queued_ns);
+    return rc;
+}
+
 static int collect_dmabufs(struct consumer_state *s)
 {
     ANativeWindow *win = s->window;
@@ -156,23 +280,8 @@ static int collect_dmabufs(struct consumer_state *s)
             continue;
         }
 
+        int fd = anb->handle->data[0];   /* first fd backs the dma-buf */
         int stride = anb->stride, width = anb->width, height = anb->height;
-        /* Qualcomm gralloc puts the pixel dma-buf first, MediaTek puts its
-         * gralloc_extra metadata handle there and the dma-buf later. Only a
-         * dma-buf reports a size, so take the first fd large enough to hold
-         * the pixels. */
-        int fd = -1;
-        for (int k = 0; k < anb->handle->numFds && fd < 0; k++) {
-            off_t size = lseek(anb->handle->data[k], 0, SEEK_END);
-            if (size >= (off_t)stride * 4 * height)
-                fd = anb->handle->data[k];
-        }
-        if (fd < 0) {
-            LOGE("no dma-buf among the %d fds of the buffer on attempt %d",
-                 anb->handle->numFds, attempt);
-            api.cancelBuffer(win, anb, -1);
-            continue;
-        }
 
         /* deduplicate by ANativeWindowBuffer pointer (stable per queue slot) */
         bool dup_found = false;
@@ -242,7 +351,7 @@ static void send_refresh_rate(struct consumer_state *s)
         .type = INPUT_TYPE_DISPLAY_REFRESH,
         .display = { .refresh_mhz = s->refresh_mhz },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 /*
@@ -736,6 +845,7 @@ static void topapp_handle_scheduling_event(struct consumer_state *s,
 
 static int do_connect(struct consumer_state *s)
 {
+    pacing_reset(s);
     /* Snapshot the connection config for this attempt. */
     pthread_mutex_lock(&s->cfg_lock);
     bool use_root = s->cfg_use_root;
@@ -763,8 +873,10 @@ static int do_connect(struct consumer_state *s)
         audio_set_ctx(s->audio, NULL);   /* detach audio before the old ctx (and its fd) dies */
         stop_event_thread(s);
         join_event_thread(s);
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     }
     cleanup_dmabufs(s);
 
@@ -772,11 +884,16 @@ static int do_connect(struct consumer_state *s)
     pthread_mutex_lock(&s->cfg_lock);
     int cw = s->cfg_custom_width;
     int ch = s->cfg_custom_height;
+    int sw = s->cfg_screen_width;
+    int sh = s->cfg_screen_height;
     pthread_mutex_unlock(&s->cfg_lock);
 
     if (cw > 0 && ch > 0) {
         s->screen_w = cw;
         s->screen_h = ch;
+    } else if (sw > 0 && sh > 0) {
+        s->screen_w = sw;
+        s->screen_h = sh;
     } else {
        s->screen_w = ANativeWindow_getWidth(win);
        s->screen_h = ANativeWindow_getHeight(win);
@@ -808,18 +925,22 @@ static int do_connect(struct consumer_state *s)
     LOGI("connecting to %s (%dx%d, %d bufs, root=%d)", sock,
          s->screen_w, s->screen_h, s->buf_count, use_root);
 
+    pthread_mutex_lock(&s->input_lock);
     if (use_root) {
         int ctrl_fd = recv_fd_via_root_helper(sock, helper_path, bridge_path);
         if (ctrl_fd < 0) {
             LOGE("root helper connect failed");
+            pthread_mutex_unlock(&s->input_lock);
             return -1;
         }
         if (connect_to_deamon_with_fd(&s->ctx, ctrl_fd) < 0) {
             LOGE("connect_to_deamon_with_fd failed");
+            pthread_mutex_unlock(&s->input_lock);
             return -1;
         }
     } else if (connect_to_deamon(&s->ctx, sock) < 0) {
         LOGE("connect_to_deamon failed");
+        pthread_mutex_unlock(&s->input_lock);
         return -1;
     }
 
@@ -846,7 +967,9 @@ static int do_connect(struct consumer_state *s)
     audio_set_ctx(s->audio, s->ctx);   /* audio fd is now live; threads pick it up via get_audio_fd */
 
     s->need_reconnect = false;
+    s->pacing.interval_start_ns = monotonic_now_ns();
     LOGI("connected");
+    pthread_mutex_unlock(&s->input_lock);
     return 0;
 }
 
@@ -970,6 +1093,7 @@ static void *render_thread_func(void *arg)
         TracyCZoneN(zDequeue, "dequeueBuffer", 1);
         int dq = api.dequeueBuffer(s->window, &anb, &acqfence);
         TracyCZoneEnd(zDequeue);
+        const uint64_t dequeued_ns = monotonic_now_ns();
         if (dq != 0 || !anb) {
             usleep(16000);
             continue;
@@ -980,7 +1104,11 @@ static void *render_thread_func(void *arg)
         if (acqfence >= 0) {
             TracyCZoneN(zAcqFence, "acquire fence wait", 1);
             struct pollfd fpfd = { .fd = acqfence, .events = POLLIN };
+            const uint64_t wait_start_ns = monotonic_now_ns();
             poll(&fpfd, 1, 1000);
+            const uint64_t wait_end_ns = monotonic_now_ns();
+            if (wait_end_ns >= wait_start_ns)
+                pacing_add(&s->pacing.acquire_fence_wait, wait_end_ns - wait_start_ns);
             close(acqfence);
             TracyCZoneEnd(zAcqFence);
         }
@@ -994,16 +1122,21 @@ static void *render_thread_func(void *arg)
         }
 
         if (idx < 0) {
-            api.queueBuffer(s->window, anb, -1);
+            queue_surface_buffer(s, anb, -1, -1, 0);
             usleep(16000);
             continue;
         }
+
+        if (s->buffer_queued_at_ns[idx] && dequeued_ns >= s->buffer_queued_at_ns[idx])
+            pacing_add(&s->pacing.buffer_reuse,
+                       dequeued_ns - s->buffer_queued_at_ns[idx]);
+        s->buffer_queued_at_ns[idx] = 0;
 
         TracyCZoneN(zSelect, "select_dmabuf", 1);
         int sel = select_dmabuf(s->ctx, idx);
         TracyCZoneEnd(zSelect);
         if (sel < 0) {
-            api.queueBuffer(s->window, anb, -1);
+            queue_surface_buffer(s, anb, -1, idx, 0);
             usleep(16000);
             continue;
         }
@@ -1013,9 +1146,15 @@ static void *render_thread_func(void *arg)
          * before scanout -- this lets the producer submit before its GPU render
          * completes (no glFinish stall). rfence == -1 falls back to "ready now". */
         TracyCZoneN(zRefresh, "refresh_done (producer render)", 1);
+        const uint64_t wait_start_ns = monotonic_now_ns();
         int rfence = refresh_done(s->ctx);
+        const uint64_t completion_ns = monotonic_now_ns();
         TracyCZoneEnd(zRefresh);
-        api.queueBuffer(s->window, anb, rfence);
+        if (completion_ns >= wait_start_ns) {
+            s->pacing.producer_waits++;
+            pacing_add(&s->pacing.producer_wait, completion_ns - wait_start_ns);
+        }
+        queue_surface_buffer(s, anb, rfence, idx, completion_ns);
         TracyCFrameMark;
     }
 
@@ -1053,6 +1192,7 @@ Java_com_anland_consumer_Native_nativeCreate(JNIEnv *env, jclass clazz)
     if (!s)
         return 0;
     pthread_mutex_init(&s->lock, NULL);
+    pthread_mutex_init(&s->input_lock, NULL);
     pthread_mutex_init(&s->cfg_lock, NULL);
     pthread_mutex_init(&s->topapp_lock, NULL);
     s->cfg_topapp_mode = 1;
@@ -1083,8 +1223,10 @@ Java_com_anland_consumer_Native_nativeDestroy(JNIEnv *env, jclass clazz, jlong h
         stop_event_thread(s);
         join_event_thread(s);
         topapp_restore_tree(s);
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     } else {
         topapp_restore_tree(s);
     }
@@ -1115,6 +1257,7 @@ Java_com_anland_consumer_Native_nativeDestroy(JNIEnv *env, jclass clazz, jlong h
     s->activity_obj = NULL;
     pthread_mutex_destroy(&s->topapp_lock);
     pthread_mutex_destroy(&s->cfg_lock);
+    pthread_mutex_destroy(&s->input_lock);
     pthread_mutex_destroy(&s->lock);
     LOGI("instance %p destroyed", (void *)s);
     free(s);
@@ -1181,6 +1324,20 @@ Java_com_anland_consumer_Native_nativeSetCustomResolution(
 }
 
 JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSetScreenSize(
+    JNIEnv *env, jclass clazz, jlong handle, jint width, jint height)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->cfg_lock);
+    s->cfg_screen_width = width;
+    s->cfg_screen_height = height;
+    pthread_mutex_unlock(&s->cfg_lock);
+}
+
+JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeStart(
     JNIEnv *env, jclass clazz, jlong handle, jobject surface, jobject clipboardTarget,
     jobject activityTarget)
@@ -1207,8 +1364,10 @@ Java_com_anland_consumer_Native_nativeStart(
     }
 
     if (s->ctx) {
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     }
     s->motion_has_last = false;
     cleanup_dmabufs(s);
@@ -1279,8 +1438,10 @@ Java_com_anland_consumer_Native_nativeStop(
         stop_event_thread(s);
         join_event_thread(s);
         topapp_restore_tree(s); /* stopping the pipeline ends the boost */
+        pthread_mutex_lock(&s->input_lock);
         disconnect(s->ctx);
         s->ctx = NULL;
+        pthread_mutex_unlock(&s->input_lock);
     } else {
         topapp_restore_tree(s);
     }
@@ -1330,13 +1491,13 @@ Java_com_anland_consumer_Native_nativeSendTouch(
     JNIEnv *env, jclass clazz, jlong handle, jint action, jfloat x, jfloat y, jint pointer_id)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_TOUCH,
         .touch = { .action = action, .x = x, .y = y, .pointer_id = pointer_id },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 JNIEXPORT void JNICALL
@@ -1344,12 +1505,12 @@ Java_com_anland_consumer_Native_nativeSendTouchFrame(
     JNIEnv *env, jclass clazz, jlong handle)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_TOUCH_FRAME,
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 JNIEXPORT void JNICALL
@@ -1357,13 +1518,13 @@ Java_com_anland_consumer_Native_nativeSendKey(
     JNIEnv *env, jclass clazz, jlong handle, jint action, jint keycode)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_KEY,
         .key = { .action = action, .keycode = keycode },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
 
 JNIEXPORT void JNICALL
@@ -1371,8 +1532,14 @@ Java_com_anland_consumer_Native_nativeSendMouseMotion(
     JNIEnv *env, jclass clazz, jlong handle, jfloat x, jfloat y, jfloat dx, jfloat dy)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
+
+    pthread_mutex_lock(&s->input_lock);
+    if (!s->ctx) {
+        pthread_mutex_unlock(&s->input_lock);
+        return;
+    }
 
     if (dx == 0.0f && dy == 0.0f && s->motion_has_last) {
         dx = x - s->motion_last_x;
@@ -1388,6 +1555,7 @@ Java_com_anland_consumer_Native_nativeSendMouseMotion(
         .pointer_motion = { .x = x, .y = y, .dx = dx, .dy = dy },
     };
     push_input_event(s->ctx, &ev);
+    pthread_mutex_unlock(&s->input_lock);
 }
 
 JNIEXPORT void JNICALL
@@ -1395,27 +1563,101 @@ Java_com_anland_consumer_Native_nativeSendMouseButton(
     JNIEnv *env, jclass clazz, jlong handle, jint button, jboolean pressed)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_BUTTON,
         .pointer_button = { .button = button, .pressed = pressed ? 1 : 0 },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
 }
+
+
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendMouseScroll(
     JNIEnv *env, jclass clazz, jlong handle, jint axis, jfloat value)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_AXIS,
         .pointer_axis = { .axis = axis, .value = value, .discrete = 0 },
     };
-    push_input_event(s->ctx, &ev);
+    send_input_event(s, &ev);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSendTabletSample(
+    JNIEnv *env, jclass clazz, jlong handle, jint tool_id, jint tool_type,
+    jint capabilities, jint device_id, jfloat x, jfloat y, jfloat pressure,
+    jfloat tilt_x, jfloat tilt_y, jfloat distance, jint flags, jint buttons,
+    jlong time_msec)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+
+    uint32_t frame_flags = (uint32_t)flags;
+    uint32_t frame_buttons = (uint32_t)buttons;
+    if (frame_flags & TABLET_FLAG_CANCELED) {
+        frame_flags = TABLET_FLAG_CANCELED;
+        frame_buttons = 0;
+        pressure = 0.0f;
+    } else if (!(frame_flags & TABLET_FLAG_PROXIMITY)) {
+        frame_flags = 0;
+        frame_buttons = 0;
+        pressure = 0.0f;
+    }
+
+    struct InputEvent tool = {
+        .type = INPUT_TYPE_TABLET_TOOL,
+        .tablet_tool = {
+            .tool_id = (uint32_t)tool_id,
+            .tool_type = (uint32_t)tool_type,
+            .capabilities = (uint32_t)capabilities,
+            .device_id = (uint32_t)device_id,
+        },
+    };
+    struct InputEvent position = {
+        .type = INPUT_TYPE_TABLET_POSITION,
+        .tablet_position = {
+            .tool_id = (uint32_t)tool_id,
+            .x = x,
+            .y = y,
+            .pressure = pressure,
+        },
+    };
+    struct InputEvent tilt = {
+        .type = INPUT_TYPE_TABLET_TILT,
+        .tablet_tilt = {
+            .tool_id = (uint32_t)tool_id,
+            .tilt_x = tilt_x,
+            .tilt_y = tilt_y,
+            .distance = distance,
+        },
+    };
+    struct InputEvent frame = {
+        .type = INPUT_TYPE_TABLET_FRAME,
+        .tablet_frame = {
+            .tool_id = (uint32_t)tool_id,
+            .flags = frame_flags,
+            .buttons = frame_buttons,
+            .time_msec = (uint32_t)time_msec,
+        },
+    };
+
+    pthread_mutex_lock(&s->input_lock);
+    if (s->ctx) {
+        /* Repeat TOOL metadata so a new connection always sees it before axes. */
+        if (push_input_event(s->ctx, &tool) == 0
+                && push_input_event(s->ctx, &position) == 0
+                && push_input_event(s->ctx, &tilt) == 0)
+            push_input_event(s->ctx, &frame); /* FRAME commits this sample. */
+    }
+    pthread_mutex_unlock(&s->input_lock);
 }
 
 JNIEXPORT void JNICALL
@@ -1423,7 +1665,7 @@ Java_com_anland_consumer_Native_nativeSendClipboard(
     JNIEnv *env, jclass clazz, jlong handle, jbyteArray data)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
 
     jsize len = (*env)->GetArrayLength(env, data);
@@ -1439,7 +1681,7 @@ Java_com_anland_consumer_Native_nativeSendClipboard(
         .type = INPUT_TYPE_CLIPBOARD,
         .clipboard = { .size = (uint32_t)len },
     };
-    push_input_event_with_length(s->ctx, &ev, buf, len);
+    send_input_payload(s, &ev, buf, len);
     free(buf);
 }
 
@@ -1448,7 +1690,7 @@ Java_com_anland_consumer_Native_nativeSendTextInput(
     JNIEnv *env, jclass clazz, jlong handle, jbyteArray data)
 {
     struct consumer_state *s = STATE(handle);
-    if (!s || !s->ctx)
+    if (!s)
         return;
 
     jsize len = (*env)->GetArrayLength(env, data);
@@ -1464,7 +1706,7 @@ Java_com_anland_consumer_Native_nativeSendTextInput(
         .type = INPUT_TYPE_TEXT_INPUT,
         .text_input = { .size = (uint32_t)len },
     };
-    push_input_event_with_length(s->ctx, &ev, buf, len);
+    send_input_payload(s, &ev, buf, len);
     free(buf);
 }
 

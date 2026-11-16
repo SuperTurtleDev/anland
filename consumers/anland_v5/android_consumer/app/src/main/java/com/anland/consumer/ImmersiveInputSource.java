@@ -12,7 +12,7 @@ import java.util.Set;
 enum ImmersiveInputSource {
     DIRECT_EVENT_NODES("direct_event_nodes"),
     EXISTING_UINPUT_BUS("existing_uinput_bus"),
-    /** Physical pointers/touch plus Gold's remapped keyboard output. */
+    /** Physical pointers/touch/controllers plus Gold's remapped keyboard output. */
     DIRECT_PLUS_GOLD_KEYBOARD("direct_plus_gold_keyboard");
 
     /**

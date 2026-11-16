@@ -59,6 +59,10 @@ public:
     AnlandOutput(AnlandBackend *parent, const QString &name);
     ~AnlandOutput() override;
 
+#ifdef ANLAND_KWIN_68
+    std::expected<void, OutputError> testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
+    std::expected<void, OutputError> present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
+#else
     RenderLoop *renderLoop() const override;
 #ifdef ANLAND_KWIN_66
     bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
@@ -73,6 +77,7 @@ public:
     bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
 #else
     void present(const std::shared_ptr<OutputFrame> &frame);
+#endif
 #endif
 #endif
 #endif
@@ -136,7 +141,9 @@ private:
     Q_DISABLE_COPY(AnlandOutput);
 
     AnlandBackend *m_backend;
+#ifndef ANLAND_KWIN_68
     std::unique_ptr<RenderLoop> m_renderLoop;
+#endif
     std::shared_ptr<OutputFrame> m_frame;
 #ifdef ANLAND_KWIN_66
     std::unique_ptr<AnlandEglLayer> m_eglLayer;

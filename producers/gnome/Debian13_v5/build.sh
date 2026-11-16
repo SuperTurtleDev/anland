@@ -7,16 +7,13 @@
 # are root or an ordinary user with sudo rights.
 #
 # The Mutter patch enables the Anland backend, and the sibling 'mutter/'
-# directory contains the backend files copied into the source tree. The Mutter
-# source version is pinned below because the patch targets that Debian package
-# revision. XWayland follows the latest source version available to apt.
+# directory contains the backend files copied into the source tree. Mutter and
+# XWayland both follow the latest source versions available to APT.
 #
 # You can override the patch locations with MUTTER_PATCH=... and
 # XWAYLAND_PATCH=... ./build.sh.
 #
 set -u
-
-MUTTER_VERSION='48.7-0+deb13u1'
 
 # ---- sudo helper (no-op if already root) -----------------------------------
 if [ "$(id -u)" -eq 0 ]; then
@@ -26,8 +23,10 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$ROOT/producers/common/latest-source.sh"
 WORKDIR="${WORKDIR:-$HOME/anland-debbuild}"
-JOBS="$(nproc)"
+JOBS="${JOBS:-$(nproc)}"
 
 # ---- locate a patch file by name, regardless of where it lives -------------
 find_patch() {
@@ -68,29 +67,23 @@ ensure_deb_src() {
 
 # ---- build one source package with an optional overlay and patch ------------
 build_pkg() {
-    local src="$1" patch="$2" version="${3:-}" overlay_dir="${4:-}" \
-        sentinel="${5:-}" source_spec="$1" source_label
+    local src="$1" patch="$2" overlay_dir="${3:-}" sentinel="${4:-}"
+    local result prepared version source_label source_identity build_root tree
 
-    if [ -n "$version" ]; then
-        source_spec="$src=$version"
-        source_label="$version"
-    else
-        source_label='latest available'
-    fi
+    result=$(anland_prepare_latest_apt_source "$src" "$WORKDIR" "$patch" "${ANLAND_OFFLINE:-0}") \
+        || die "cannot prepare latest $src source"
+    IFS=$'\t' read -r prepared version <<< "$result"
+    [ -d "$prepared" ] && [ -n "$version" ] || die "invalid latest $src source result"
+    source_identity=$(cat "$prepared/.anland-source-identity") || die "cannot identify latest $src source"
+    source_label="$version"
 
-    log "Installing build dependencies for '$src' ($source_label)"
-    $SUDO apt-get build-dep -y "$source_spec" \
+    log "Installing build dependencies for '$src' $source_label"
+    $SUDO apt-get build-dep -y "$src=$version" \
         || warn "build-dep for $src had issues; continuing"
 
-    log "Fetching source for '$src' ($source_label)"
-    rm -rf "${WORKDIR:?}/$src"
-    mkdir -p "$WORKDIR/$src"
-    ( cd "$WORKDIR/$src" && apt-get source "$source_spec" ) \
-        || die "apt-get source $src failed"
-
-    local tree
-    tree="$(find "$WORKDIR/$src" -maxdepth 1 -type d -name "${src}-*" | head -1)"
-    [ -n "$tree" ] || die "could not find unpacked source tree for $src"
+    build_root=$(mktemp -d "$WORKDIR/build-$src-${source_identity:0:12}.XXXXXX") || die "cannot create $src build workspace"
+    tree="$build_root/$src"
+    cp -a "$prepared" "$tree" || die "cannot copy latest $src source"
 
     if [ -n "$overlay_dir" ]; then
         [ -d "$overlay_dir" ] || die "overlay directory not found: $overlay_dir"
@@ -101,10 +94,6 @@ build_pkg() {
         cp -aL "$overlay_dir/." "$tree/" \
             || die "failed to stage the backend overlay for $src"
     fi
-
-    log "Applying patch: $patch -> $tree"
-    ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
-        || die "patch did not apply cleanly for $src"
 
     log "Building '$src' $source_label (.deb)"
     # -d: don't re-check build-deps (already installed above)
@@ -119,7 +108,7 @@ build_pkg() {
     fi
     log "Installing built .deb(s) for '$src'"
     local debs
-    debs="$(find "$WORKDIR/$src" -maxdepth 1 -name '*.deb' -type f)"
+    debs="$(find "$build_root" -maxdepth 1 -name '*.deb' -type f)"
     [ -n "$debs" ] || die "no .deb produced for $src"
     printf '%s\n' "$debs"
     # shellcheck disable=SC2086
@@ -135,7 +124,7 @@ main() {
     xwayland_patch="$(find_patch xwayland.patch "${XWAYLAND_PATCH:-}")" \
         || die "xwayland.patch not found (set XWAYLAND_PATCH=... to override)"
 
-    log "mutter version : $MUTTER_VERSION"
+    log "mutter source : latest available to APT"
     log "mutter.patch   : $mutter_patch"
     log "xwayland.patch : $xwayland_patch"
     log "xwayland source: latest available"
@@ -143,9 +132,9 @@ main() {
 
     ensure_deb_src
 
-    build_pkg mutter "$mutter_patch" "$MUTTER_VERSION" "$SCRIPT_DIR/mutter" \
+    build_pkg mutter "$mutter_patch" "$SCRIPT_DIR/mutter" \
         'have_anland = get_option'
-    build_pkg xwayland "$xwayland_patch" '' '' \
+    build_pkg xwayland "$xwayland_patch" '' \
         'No usable linux-dmabuf main device'
 
     if [ "${ANLAND_INSTALL:-0}" != 1 ]; then

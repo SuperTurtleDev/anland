@@ -173,7 +173,11 @@ bool AnlandEglLayer::importBuffers(int count)
         // EglBackend::importDmaBufAsTexture() builds the EGLImage and wraps it in
         // a GLTexture in one step (the 5.27-era manual EGLImageKHR +
         // EGLImageTexture(...) dance is gone in 6.x).
+#ifdef ANLAND_KWIN_68
+        std::shared_ptr<GLTexture> texture = m_backend->openglContext()->importDmaBufAsTexture(attrs);
+#else
         std::shared_ptr<GLTexture> texture = m_backend->importDmaBufAsTexture(attrs);
+#endif
         if (!texture) {
             qCWarning(KWIN_ANLAND) << "failed to import dmabuf" << i << "as texture";
             releaseBuffers();
@@ -215,7 +219,11 @@ void AnlandEglLayer::onOutputTransformChanged()
 #endif
 }
 
+#ifdef ANLAND_KWIN_68
+std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::beginFrame(OutputFrame *)
+#else
 std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
+#endif
 {
 #ifdef ANLAND_KWIN_66
     m_backend->openglContext()->makeCurrent();
@@ -285,17 +293,15 @@ void AnlandEglLayer::scheduleBufferCatchUp(int index)
         // KWin 6.6 added per-layer repaint scheduling.
         scheduleRepaint(nullptr);
 #else
-        // Older KWin has no per-layer scheduling, and every frame it composites
-        // also damages the software cursor (CursorScene::prePaint() returns its
-        // rect unconditionally). A catch-up frame therefore always made new damage
-        // for the other slots, so the slots woke each other forever and an idle
-        // desktop rendered at the full refresh rate. Leave the debt in the slot
-        // instead: the next real frame repaints it through beginFrame()'s repaint.
+        // Older KWin versions schedule the compositor through the render loop.
+        m_output->renderLoop()->scheduleRepaint();
 #endif
     }
 }
 
-#ifdef ANLAND_KWIN_66
+#ifdef ANLAND_KWIN_68
+bool AnlandEglLayer::endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
+#elif defined(ANLAND_KWIN_66)
 bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
 #else
 bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame)
@@ -336,9 +342,6 @@ bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegi
         glFinish();
     }
     setPendingFence(fence.takeFileDescriptor().take());
-    // KWin runs a paint pass whenever a layer reports it needs one, even when the
-    // region to render comes out empty. Such a frame changed nothing.
-    m_painted = !renderedDeviceRegion.isEmpty();
     return true;
 }
 
@@ -352,11 +355,6 @@ void AnlandEglLayer::setPendingFence(int fd)
     m_pendingFence = fd;
 }
 
-bool AnlandEglLayer::takePainted()
-{
-    return std::exchange(m_painted, false);
-}
-
 int AnlandEglLayer::takePendingFence()
 {
     const int fd = m_pendingFence;
@@ -364,10 +362,12 @@ int AnlandEglLayer::takePendingFence()
     return fd;
 }
 
+#ifndef ANLAND_KWIN_68
 DrmDevice *AnlandEglLayer::scanoutDevice() const
 {
     return m_backend->drmDevice();
 }
+#endif
 
 #ifdef ANLAND_KWIN_67
 FormatModifierMap AnlandEglLayer::supportedDrmFormats() const
@@ -383,11 +383,16 @@ std::shared_ptr<GLTexture> AnlandEglLayer::texture() const
     return m_textures[m_currentIndex];
 }
 
+#ifdef ANLAND_KWIN_68
+AnlandEglBackend::AnlandEglBackend(AnlandBackend *b, RenderDevice *device)
+    : EglBackend(device)
+#else
 AnlandEglBackend::AnlandEglBackend(AnlandBackend *b)
 #ifdef ANLAND_KWIN_66
     : EglBackend()
 #else
     : AbstractEglBackend()
+#endif
 #endif
     , m_backend(b)
 {
@@ -412,14 +417,18 @@ anland_device *AnlandEglBackend::device() const
     return m_backend->device();
 }
 
+#ifndef ANLAND_KWIN_68
 DrmDevice *AnlandEglBackend::drmDevice() const
 {
     return m_backend->drmDevice();
 }
+#endif
 
 bool AnlandEglBackend::initializeEgl()
 {
-#ifdef ANLAND_KWIN_67
+#ifdef ANLAND_KWIN_68
+    return initClientExtensions();
+#elif defined(ANLAND_KWIN_67)
     if (!initClientExtensions() || !m_backend->renderDevice()) {
         return false;
     }

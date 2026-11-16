@@ -208,6 +208,11 @@ static void apply_format(struct anland_audio *a, const struct audio_format *f)
     const uint32_t rate = f->rate ? f->rate : DEFAULT_RATE;
     const uint32_t channels = f->channels ? f->channels
                                           : (playback ? DEFAULT_PLAY_CHANNELS : DEFAULT_CAP_CHANNELS);
+    /* Validate before changing live stream state or doing PCM stride math. */
+    if ((f->role != AUDIO_ROLE_PLAYBACK && f->role != AUDIO_ROLE_CAPTURE) ||
+        f->format != AUDIO_FORMAT_S16LE || rate < 8000 || rate > 384000 ||
+        channels > 2 || f->quantum > rate)
+        return;
 
     uint32_t *cur_rate     = playback ? &a->play_rate : &a->cap_rate;
     uint32_t *cur_channels = playback ? &a->play_channels : &a->cap_channels;
@@ -274,7 +279,7 @@ static void on_audio_readable(void *data, int fd, uint32_t mask)
         size_t avail = (size_t)n - sizeof(struct audio_msg);
 
         if (h.type == AUDIO_MSG_FORMAT) {
-            if (avail >= sizeof(struct audio_format)) {
+            if (h.size == sizeof(struct audio_format) && avail == sizeof(struct audio_format)) {
                 struct audio_format f;
                 memcpy(&f, a->rx + sizeof(struct audio_msg), sizeof(f));
                 apply_format(a, &f);

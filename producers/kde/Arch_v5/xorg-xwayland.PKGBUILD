@@ -2,7 +2,7 @@
 # Arch Linux ARM xorg-xwayland rebuilt with the anland kgsl/turnip fixes.
 
 pkgname=xorg-xwayland
-pkgver=24.1.13
+pkgver=0
 pkgrel=1.1
 pkgdesc='Run X clients under Wayland (anland kgsl/turnip fixes)'
 arch=('aarch64')
@@ -35,13 +35,23 @@ makedepends=(
   wayland-protocols mesa-libgl systemd
 )
 source=(
-  "xwayland-${pkgver}.tar.xz::https://xorg.freedesktop.org/archive/individual/xserver/xwayland-${pkgver}.tar.xz"
+  'xorg-xserver::git+https://gitlab.freedesktop.org/xorg/xserver.git'
   'xwayland.patch'
 )
-sha512sums=(
-  'e06e58025b441892fdd17ac55fd5c7e137bffc941b76ad784dc008047c778c6ee2895fcc47b9e8c74b1d8372491e69c39933c4186aec4df55571614f8ba98e3c'
-  'SKIP'
-)
+sha256sums=('SKIP' 'SKIP')
+
+pkgver() {
+  cd "$srcdir/xorg-xserver"
+  local description
+  description="$(git describe --long --tags --match 'xwayland-*' 2>/dev/null || true)"
+  if [[ "$description" =~ ^xwayland-([0-9]+(\.[0-9]+)+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
+    printf '%s.r%s.g%s
+' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+  else
+    printf '0.0.0.r%s.g%s
+' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  fi
+}
 provides=('xorg-server-xwayland')
 conflicts=('xorg-server-xwayland')
 replaces=('xorg-server-xwayland')
@@ -55,11 +65,11 @@ require_aarch64() {
 
 prepare() {
   require_aarch64 || return 1
-  patch -Np1 -d "$srcdir/xwayland-$pkgver" -i "$srcdir/xwayland.patch"
+  patch --batch --forward --fuzz=2 --no-backup-if-mismatch -Np1 -d "$srcdir/xorg-xserver" -i "$srcdir/xwayland.patch"
 }
 
 build() {
-  meson setup "$srcdir/build" "$srcdir/xwayland-$pkgver" \
+  meson setup "$srcdir/build" "$srcdir/xorg-xserver" \
     --prefix=/usr \
     --libexecdir=lib \
     --sbindir=bin \
@@ -69,6 +79,9 @@ build() {
     -D b_pie=true \
     -D python.bytecompile=1 \
     -D ipv6=true \
+    -D xorg=false \
+    -D xnest=false \
+    -D xephyr=false \
     -D xvfb=false \
     -D xdmcp=false \
     -D xcsecurity=true \
@@ -90,5 +103,5 @@ package() {
   rm "$pkgdir/usr/share/man/man1/Xserver.1"
 
   install -m644 -Dt "$pkgdir/usr/share/licenses/$pkgname" \
-    "$srcdir/xwayland-$pkgver/COPYING"
+    "$srcdir/xorg-xserver/COPYING"
 }

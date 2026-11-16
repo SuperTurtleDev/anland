@@ -13,6 +13,7 @@
 
 #include <stdbool.h>
 #include "anland_device.h"
+#include "anland_pacing.h"
 #include "anland_scene.h"
 
 #ifdef __cplusplus
@@ -24,6 +25,8 @@ typedef struct anland_present anland_present;
 typedef struct anland_present_config {
     /* Daemon socket hint; NULL/empty retains anland_device's discovery rules. */
     const char *endpoint;
+    /* Opt-in absent-connector startup. Other callers retain strict HELLO. */
+    bool defer_connector;
 } anland_present_config_t;
 
 /* Config is borrowed for this call. No service or backend selector is needed. */
@@ -37,6 +40,7 @@ anland_device *anland_present_device(anland_present *present);
 bool anland_present_connected(const anland_present *present);
 /* Connection alone does not guarantee a writable target during release retry. */
 bool anland_present_target_available(const anland_present *present);
+bool anland_present_renderable(const anland_present *present);
 
 /* Preserve scene/layer identity. reopen replaces a dead daemon connection;
  * reconnect picks up a consumer on the existing daemon connection. A new
@@ -49,6 +53,10 @@ void anland_present_drop_session(anland_present *present);
  * Acceptance, presentation and buffer release remain separate scene facts. */
 int anland_present_present(anland_present *present);
 int anland_present_pump(anland_present *present, int timeout_ms);
+
+/* Read-only frame lifecycle counters. Durations are measured in nanoseconds. */
+void anland_present_pacing(const anland_present *present, anland_pacing *out);
+void anland_present_note_refresh(anland_present *present, uint64_t refresh_mhz);
 
 #ifdef __cplusplus
 }

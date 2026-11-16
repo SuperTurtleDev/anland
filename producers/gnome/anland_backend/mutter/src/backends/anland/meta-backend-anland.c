@@ -18,8 +18,13 @@
 #include "backends/meta-stage-view-private.h"
 #include "backends/meta-virtual-monitor.h"
 #include "backends/native/meta-renderer-native-private.h"
+#ifdef ANLAND_MUTTER_51
+#include "common/meta-cogl-drm-formats.h"
+#endif
 #include "meta/meta-backend.h"
 #include "meta/meta-context.h"
+#include "meta/display.h"
+#include "meta/window.h"
 #include "meta/meta-wayland-compositor.h"
 #include "wayland/meta-wayland.h"
 
@@ -30,12 +35,21 @@
 #include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <wayland-server-core.h>
 
 #define ANLAND_RECONNECT_INTERVAL_MS 200
 /* Protocol pixel-format convention shared by the daemon and every consumer
  * (see anland_device.h: 1 = ABGR8888). */
 #define ANLAND_FORMAT_RGBA_8888 1
 #define ANLAND_MAX_RESOURCE_FDS 64
+
+typedef struct
+{
+  MetaBackendAnland *backend;
+  struct wl_resource *resource;
+  struct wl_listener destroy_listener;
+  gboolean active;
+} MetaAnlandPointerConstraintWatch;
 
 enum
 {
@@ -69,6 +83,14 @@ struct _MetaBackendAnland
   MetaAnlandCamera *camera;
   MetaAnlandInput *input;
   MetaAnlandClipboard *clipboard;
+  struct wl_protocol_logger *protocol_logger;
+  GHashTable *constraint_watches;
+  guint active_constraints;
+  pid_t active_scheduling_pid;
+  gboolean active_scheduling_known;
+  gboolean capture_mouse_active;
+  gboolean capture_mouse_sent;
+  gboolean capture_mouse_known;
 
   GSource *buffer_ready_source;
   GSource *input_source;
@@ -98,14 +120,225 @@ static void invalidate_consumer (MetaBackendAnland *backend);
 static void dispatch_present_events (MetaBackendAnland *backend);
 static void release_stage_view (MetaBackendAnland *backend);
 static void schedule_reconnect (MetaBackendAnland *backend);
+static void update_active_scheduling (MetaBackendAnland *backend,
+                                     gboolean          force);
+static void update_capture_mouse (MetaBackendAnland *backend,
+                                  gboolean          force);
+
+static void
+on_pointer_constraint_destroy (struct wl_listener *listener,
+                               void                *data)
+{
+  MetaAnlandPointerConstraintWatch *watch =
+    wl_container_of (listener, watch, destroy_listener);
+  MetaBackendAnland *backend = watch->backend;
+
+  (void) data;
+  if (watch->active && backend->active_constraints > 0)
+    backend->active_constraints--;
+  g_hash_table_remove (backend->constraint_watches, watch->resource);
+  wl_list_remove (&watch->destroy_listener.link);
+  g_free (watch);
+
+  backend->capture_mouse_active = backend->active_constraints > 0;
+  update_capture_mouse (backend, FALSE);
+}
+
+static void
+clear_pointer_constraint_watches (MetaBackendAnland *backend)
+{
+  GHashTableIter iter;
+  gpointer value;
+
+  if (!backend->constraint_watches)
+    return;
+
+  g_hash_table_iter_init (&iter, backend->constraint_watches);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    {
+      MetaAnlandPointerConstraintWatch *watch = value;
+
+      wl_list_remove (&watch->destroy_listener.link);
+      g_free (watch);
+    }
+
+  g_hash_table_remove_all (backend->constraint_watches);
+  backend->active_constraints = 0;
+  backend->capture_mouse_active = FALSE;
+}
+
+static void
+update_pointer_constraint (MetaBackendAnland *backend,
+                           struct wl_resource *resource,
+                           gboolean           active)
+{
+  MetaAnlandPointerConstraintWatch *watch;
+
+  watch = g_hash_table_lookup (backend->constraint_watches, resource);
+  if (!watch && active)
+    {
+      watch = g_new0 (MetaAnlandPointerConstraintWatch, 1);
+      watch->backend = backend;
+      watch->resource = resource;
+      watch->destroy_listener.notify = on_pointer_constraint_destroy;
+      wl_resource_add_destroy_listener (resource, &watch->destroy_listener);
+      g_hash_table_insert (backend->constraint_watches, resource, watch);
+    }
+
+  if (watch && watch->active != active)
+    {
+      watch->active = active;
+      if (active)
+        backend->active_constraints++;
+      else if (backend->active_constraints > 0)
+        backend->active_constraints--;
+      backend->capture_mouse_active = backend->active_constraints > 0;
+      update_capture_mouse (backend, FALSE);
+    }
+}
+
+static void
+on_wayland_protocol_message (void                             *user_data,
+                              enum wl_protocol_logger_type      direction,
+                              const struct wl_protocol_logger_message *message)
+{
+  MetaBackendAnland *backend = META_BACKEND_ANLAND (user_data);
+  const char *resource_class;
+  const char *event_name;
+  gboolean active;
+
+  if (direction != WL_PROTOCOL_LOGGER_EVENT || !message->resource ||
+      !message->message || !message->message->name)
+    return;
+
+  resource_class = wl_resource_get_class (message->resource);
+  event_name = message->message->name;
+  if (g_strcmp0 (resource_class, "zwp_locked_pointer_v1") == 0)
+    {
+      if (g_strcmp0 (event_name, "locked") == 0)
+        active = TRUE;
+      else if (g_strcmp0 (event_name, "unlocked") == 0)
+        active = FALSE;
+      else
+        return;
+    }
+  else if (g_strcmp0 (resource_class, "zwp_confined_pointer_v1") == 0)
+    {
+      if (g_strcmp0 (event_name, "confined") == 0)
+        active = TRUE;
+      else if (g_strcmp0 (event_name, "unconfined") == 0)
+        active = FALSE;
+      else
+        return;
+    }
+  else
+    return;
+
+  update_pointer_constraint (backend, message->resource, active);
+}
+
+static void
+on_focus_window_changed (MetaDisplay       *display,
+                         GParamSpec        *pspec,
+                         MetaBackendAnland *backend)
+{
+  (void) display;
+  (void) pspec;
+  update_active_scheduling (backend, FALSE);
+}
+
+static void
+update_active_scheduling (MetaBackendAnland *backend,
+                          gboolean           force)
+{
+  MetaContext *context = meta_backend_get_context (META_BACKEND (backend));
+  MetaDisplay *display = meta_context_get_display (context);
+  MetaWindow *window = display ? meta_display_get_focus_window (display) : NULL;
+  pid_t pid = window ? meta_window_get_pid (window) : 0;
+
+  if (pid <= 0)
+    pid = getpid ();
+  if (!force && backend->active_scheduling_known &&
+      pid == backend->active_scheduling_pid)
+    return;
+
+  if (!force && pid != backend->active_scheduling_pid &&
+      backend->active_scheduling_pid > 0 && backend->device &&
+      anland_device_is_connected (backend->device) &&
+      anland_device_scheduling (backend->device,
+                                backend->active_scheduling_pid,
+                                ANLAND_DEVICE_SCHED_FLAG_SETTREE) != 0)
+    {
+      backend->active_scheduling_known = FALSE;
+      g_warning ("Failed to restore previous Anland scheduling target");
+      return;
+    }
+
+  backend->active_scheduling_pid = pid;
+  backend->active_scheduling_known = FALSE;
+  if (backend->device && anland_device_is_connected (backend->device))
+    {
+      if (anland_device_scheduling (backend->device, pid,
+                                    ANLAND_DEVICE_SCHED_FLAG_SETTREE |
+                                    ANLAND_DEVICE_SCHED_FLAG_ON) == 0)
+        backend->active_scheduling_known = TRUE;
+      else
+        g_warning ("Failed to promote focused Anland scheduling target");
+    }
+}
+
+static void
+update_capture_mouse (MetaBackendAnland *backend,
+                     gboolean           force)
+{
+  if (!backend->device || !anland_device_is_connected (backend->device))
+    {
+      backend->capture_mouse_known = FALSE;
+      return;
+    }
+
+  if (!force && backend->capture_mouse_known &&
+      backend->capture_mouse_sent == backend->capture_mouse_active)
+    return;
+
+  if (anland_device_set_consumer_var (
+        backend->device, ANLAND_DEVICE_VAR_CAPTURE_MOUSE,
+        backend->capture_mouse_active ? 1 : 0) == 0)
+    {
+      backend->capture_mouse_sent = backend->capture_mouse_active;
+      backend->capture_mouse_known = TRUE;
+    }
+  else
+    {
+      backend->capture_mouse_known = FALSE;
+      g_warning ("Failed to update Anland pointer capture state");
+    }
+}
 
 static void
 on_context_started (MetaContext        *context,
                     MetaBackendAnland *backend)
 {
+  MetaWaylandCompositor *compositor =
+    meta_context_get_wayland_compositor (context);
+  MetaDisplay *display = meta_context_get_display (context);
+
+  if (display)
+    g_signal_connect_object (display, "notify::focus-window",
+                             G_CALLBACK (on_focus_window_changed),
+                             backend, 0);
+  update_active_scheduling (backend, FALSE);
+
   backend->clipboard = meta_anland_clipboard_new (META_BACKEND (backend));
   if (!backend->clipboard)
     g_warning ("Failed to initialize Anland clipboard bridge");
+
+  if (compositor && !backend->protocol_logger)
+    backend->protocol_logger = wl_display_add_protocol_logger (
+      meta_wayland_compositor_get_wayland_display (compositor),
+      on_wayland_protocol_message, backend);
+  if (compositor && !backend->protocol_logger)
+    g_warning ("Failed to monitor Anland pointer constraints");
 }
 
 static gboolean
@@ -227,8 +460,14 @@ handle_resource_input (MetaBackendAnland       *backend,
   int fds[ANLAND_MAX_RESOURCE_FDS];
   int n_fds = 0;
 
-  if (event->resource.fdnum == 0 ||
-      event->resource.fdnum > G_N_ELEMENTS (fds) ||
+  if (event->resource.fdnum == 0)
+    {
+      if (event->resource.type == ANLAND_DEVICE_SERVICE_CAMERA)
+        meta_anland_camera_clear (backend->camera);
+      return TRUE;
+    }
+
+  if (event->resource.fdnum > G_N_ELEMENTS (fds) ||
       anland_device_read_fds (backend->device, fds, G_N_ELEMENTS (fds),
                               &n_fds, 100) != 1 ||
       n_fds != (int) event->resource.fdnum)
@@ -245,6 +484,12 @@ handle_resource_input (MetaBackendAnland       *backend,
 
   if (event->resource.type == ANLAND_DEVICE_SERVICE_CAMERA && backend->camera)
     {
+      if (event->type == ANLAND_DEVICE_IN_RESOURCE_INVALID || n_fds < 2)
+        {
+          close_resource_fds (fds, n_fds);
+          meta_anland_camera_clear (backend->camera);
+          return TRUE;
+        }
       meta_anland_camera_set_resources (backend->camera, fds[0], &fds[1],
                                         n_fds - 1);
       return TRUE;
@@ -423,7 +668,7 @@ update_virtual_monitor (MetaBackendAnland  *backend,
   if (backend->virtual_monitor)
     {
       release_stage_view (backend);
-#ifdef ANLAND_MUTTER_50
+#if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
       {
         GList *mode_infos = NULL;
         mode_infos = g_list_append (mode_infos,
@@ -445,7 +690,7 @@ update_virtual_monitor (MetaBackendAnland  *backend,
       return TRUE;
     }
 
-#ifdef ANLAND_MUTTER_50
+#if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
   g_autoptr (MetaVirtualMonitorInfo) info =
     meta_virtual_monitor_info_new_simple (backend->output.width,
                                           backend->output.height,
@@ -849,13 +1094,18 @@ on_stage_view_present (ClutterStageView *stage_view,
   cogl_context = cogl_framebuffer_get_context (framebuffer);
   cogl_framebuffer_flush (framebuffer);
 
-  #ifdef ANLAND_MUTTER_50
+#if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
   if (cogl_context_has_winsys_feature (cogl_context,
                                        COGL_WINSYS_FEATURE_SYNC_FD))
 #else
   if (cogl_context_has_feature (cogl_context, COGL_FEATURE_ID_SYNC_FD))
 #endif
+#ifdef ANLAND_MUTTER_51
+    fence_fd = cogl_renderer_get_latest_sync_fd (
+      cogl_display_get_renderer (cogl_context_get_display (cogl_context)));
+#else
     fence_fd = cogl_context_get_latest_sync_fd (cogl_context);
+#endif
 
   /* Native fence support is a capability, not a guarantee that this particular
    * export succeeded. Without an fd, wait for rendering before committing the
@@ -965,6 +1215,16 @@ input_source_dispatch (gpointer user_data)
              backend->device, &event, 0)) > 0)
     {
       MetaAnlandInputEventResult input_result;
+
+      if (event.type == ANLAND_DEVICE_IN_RESOURCE_INVALID)
+        {
+          if (!handle_resource_input (backend, &event))
+            {
+              invalidate_consumer (backend);
+              return G_SOURCE_REMOVE;
+            }
+          continue;
+        }
 
       input_result = meta_anland_input_handle_event (backend->input,
                                                       &event,
@@ -1123,9 +1383,22 @@ activate_consumer (MetaBackendAnland *backend)
       stride = fb.stride;
       offset = fb.offset;
       modifier = fb.modifier;
+#ifdef ANLAND_MUTTER_51
+      CoglContext *cogl_context =
+        meta_renderer_native_get_cogl_context (renderer_native);
+      CoglRenderer *cogl_renderer =
+        cogl_display_get_renderer (cogl_context_get_display (cogl_context));
+      const MetaFormatInfo *format_info =
+        meta_format_info_from_drm_format (DRM_FORMAT_ABGR8888);
+      framebuffers[i] = cogl_renderer_create_dma_buf_framebuffer (
+        cogl_renderer, cogl_context, fb.width, fb.height,
+        DRM_FORMAT_ABGR8888, format_info->cogl_format,
+        1, &fd, &stride, &offset, &modifier, &error);
+#else
       framebuffers[i] = meta_renderer_native_create_dma_buf_framebuffer (
         renderer_native, fb.width, fb.height,
         DRM_FORMAT_ABGR8888, 1, &fd, &stride, &offset, &modifier, &error);
+#endif
 
       /* meta_renderer_native_create_dma_buf_framebuffer() imports the dmabuf
        * into an EGLImage synchronously (EGL_IMAGE_PRESERVED_KHR), so the dup can
@@ -1163,6 +1436,17 @@ activate_consumer (MetaBackendAnland *backend)
     {
       g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
                    "Failed to duplicate Anland data fd");
+      goto failed;
+    }
+
+  /* Control sends may synchronously trigger fallback. Keep imports local until
+   * they finish so teardown cannot retire buffers we are about to publish. */
+  update_active_scheduling (backend, TRUE);
+  update_capture_mouse (backend, TRUE);
+  if (!anland_device_is_connected (backend->device))
+    {
+      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
+                   "Anland consumer disconnected while restoring controls");
       goto failed;
     }
 
@@ -1390,6 +1674,13 @@ meta_backend_anland_dispose (GObject *object)
   MetaBackendAnland *backend = META_BACKEND_ANLAND (object);
 
   g_clear_handle_id (&backend->reconnect_source_id, g_source_remove);
+  if (backend->protocol_logger)
+    {
+      wl_protocol_logger_destroy (backend->protocol_logger);
+      backend->protocol_logger = NULL;
+    }
+  clear_pointer_constraint_watches (backend);
+  g_clear_pointer (&backend->constraint_watches, g_hash_table_unref);
   clear_device (backend);
   uninhibit_frame_clock (backend);
   g_clear_pointer (&backend->audio, meta_anland_audio_free);
@@ -1428,6 +1719,8 @@ meta_backend_anland_init (MetaBackendAnland *backend_anland)
 {
   backend_anland->socket_path = get_default_socket_path ();
   backend_anland->current_buffer = -1;
+  backend_anland->constraint_watches =
+    g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
 gboolean

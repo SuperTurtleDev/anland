@@ -15,9 +15,27 @@
 #include <time.h>
 #include <sys/time.h>
 
-/* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
- * caller's reconnect loop stays responsive when no consumer is present yet. */
-#define HANDSHAKE_TIMEOUT_MS 100
+/* Consumer discovery has no wall-clock deadline. Deferred callers keep every
+ * partial record and descriptor, and advance it without blocking their loop. */
+static int64_t monotonic_ms(void);
+
+/* One bounded stream record; ancillary ownership survives short reads. */
+struct handshake_record {
+    unsigned char bytes[sizeof(struct data_msg) + MAX_BUFS * sizeof(struct buf_info)];
+    size_t used;
+    int fds[MAX_BUFS], fd_count;
+};
+
+#define OUTPUT_QUEUE_MAX (2U * 1024U * 1024U)
+#define OUTPUT_PAYLOAD_MAX (1024U * 1024U)
+
+/* One writer/order per data channel. A queued frame remains accounted until its
+ * last byte is sent; on session teardown no suffix can survive into a new one. */
+struct output_message {
+    struct output_message *next;
+    size_t size, offset;
+    unsigned char bytes[];
+};
 
 struct display_ctx {
     int      ctrl_fd;
@@ -32,6 +50,11 @@ struct display_ctx {
     uint32_t pixel_format;
     uint32_t refresh;
     bool     fallback;
+    bool     have_screen_info, pickup_requested;
+    unsigned char screen_bytes[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
+    size_t screen_used;
+    size_t pickup_sent;
+    struct handshake_record pickup, buffers;
 
     int      dmabuf_fds[MAX_BUFS];
     struct buf_info dmabuf_infos[MAX_BUFS];
@@ -42,6 +65,8 @@ struct display_ctx {
     int input_kind;
     int input_fds[64], input_fd_count;
     int64_t input_deadline;
+    struct output_message *output_head, *output_tail;
+    size_t output_bytes;
 
 
     void (*pre_release_cb)(void *);
@@ -55,8 +80,26 @@ struct display_ctx {
  * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
  * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
  */
+static void clear_output_queue(display_ctx *ctx)
+{
+    while (ctx->output_head) {
+        struct output_message *message = ctx->output_head;
+        ctx->output_head = message->next;
+        free(message);
+    }
+    ctx->output_tail = NULL;
+    ctx->output_bytes = 0;
+}
+
 static void release_consumer_resources(display_ctx *ctx)
 {
+    clear_output_queue(ctx);
+    for (int i = 0; i < ctx->pickup.fd_count; ++i) close(ctx->pickup.fds[i]);
+    for (int i = 0; i < ctx->buffers.fd_count; ++i) close(ctx->buffers.fds[i]);
+    memset(&ctx->pickup, 0, sizeof(ctx->pickup));
+    memset(&ctx->buffers, 0, sizeof(ctx->buffers));
+    ctx->pickup_requested = false;
+    ctx->pickup_sent = 0;
     for (int i = 0; i < ctx->buf_count; i++) {
         if (ctx->dmabuf_fds[i] >= 0) {
             close(ctx->dmabuf_fds[i]);
@@ -94,115 +137,128 @@ static void enter_fallback(display_ctx *ctx)
         ctx->fallback_cb(ctx->fallback_userdata);
 }
 
-/*
- * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
- * with a short timeout so it returns promptly when no consumer is up yet. On
- * success the five fds and shm_ptr are installed on ctx; the caller releases them
- * via release_consumer_resources() on any later failure. Returns 0 / -1.
- */
+/* 1 complete, 0 pending, -1 fatal. Never wait in a compositor callback.
+ * recvmsg on every chunk catches split/extra SCM_RIGHTS, including on payload.
+ * No prefix or descriptor is discarded on EAGAIN. Caller owns fatal cleanup. */
+static int handshake_read(int fd, struct handshake_record *r, size_t total)
+{
+    for (unsigned budget = 0; budget < 16 && r->used < total; ++budget) {
+        struct iovec iov = {r->bytes + r->used, total - r->used};
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(MAX_BUFS * sizeof(int))]; } control;
+        struct msghdr msg = {.msg_iov=&iov, .msg_iovlen=1,
+            .msg_control=control.bytes, .msg_controllen=sizeof(control.bytes)};
+        ssize_t n = recvmsg(fd, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (n <= 0) { if (!n) errno=ECONNRESET; return -1; }
+        bool bad = msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC);
+        for (struct cmsghdr *c=CMSG_FIRSTHDR(&msg); c; c=CMSG_NXTHDR(&msg,c)) {
+            if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) {
+                bad=true; continue;
+            }
+            size_t bytes=c->cmsg_len-CMSG_LEN(0);
+            if (bytes % sizeof(int)) bad=true;
+            int *fds=(int *)CMSG_DATA(c);
+            for (size_t i=0; i<bytes/sizeof(int); ++i) {
+                if (r->fd_count < MAX_BUFS) r->fds[r->fd_count++]=fds[i];
+                else { close(fds[i]); bad=true; }
+            }
+        }
+        r->used+=(size_t)n;
+        if (bad) { errno=EPROTO; return -1; }
+    }
+    return r->used >= total;
+}
+
 static int pickup_fds(display_ctx *ctx)
 {
-    struct ctrl_msg hdr = { .type = CTRL_MSG_PICKUP_FDS, .size = 0 };
-    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
-        return -1;
-
-    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
-    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
-        return -1;
-
-    int fds[5];
-    int fd_count = 0;
+    if (ctx->data_fd >= 0) return 1;
+    struct ctrl_msg request = {.type=CTRL_MSG_PICKUP_FDS, .size=0};
+    if (ctx->pickup_sent < sizeof(request)) {
+        ssize_t n=send(ctx->ctrl_fd, (unsigned char *)&request+ctx->pickup_sent,
+            sizeof(request)-ctx->pickup_sent, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+        if (n <= 0) return -1;
+        ctx->pickup_sent+=(size_t)n;
+        if (ctx->pickup_sent != sizeof(request)) return 0;
+        ctx->pickup_requested=true;
+    }
+    int rc=handshake_read(ctx->ctrl_fd, &ctx->pickup, sizeof(struct ctrl_msg));
+    if (rc != 1) return rc;
     struct ctrl_msg resp;
-    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 5, &fd_count);
-    if (n < (int)sizeof(resp) || resp.type != CTRL_MSG_FDS_READY
-        || resp.size != 0 || fd_count != 5) {
-        for (int i = 0; i < fd_count; i++)
-            close(fds[i]);
-        return -1;
+    memcpy(&resp,ctx->pickup.bytes,sizeof(resp));
+    if (resp.type != CTRL_MSG_FDS_READY || resp.size != 0 || ctx->pickup.fd_count != 5) {
+        errno=EPROTO; return -1;
     }
-
-    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm, audio }.
-     * fence_fd is the write end of the dedicated producer->consumer render-done channel;
-     * audio_fd is the full-duplex PCM socket (producer writes playback, reads mic). */
-    ctx->buf_ready_efd    = fds[0];
-    ctx->fence_fd         = fds[1];
-    ctx->data_fd          = fds[2];
-    ctx->shm_fd           = fds[3];
-    ctx->audio_fd         = fds[4];
-    struct timeval io_timeout = {.tv_sec=0, .tv_usec=100000};
-    if (setsockopt(ctx->data_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout)) < 0)
-        return -1;
-
-    ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
-    if (ctx->shm_ptr == MAP_FAILED) {
-        ctx->shm_ptr = NULL;
-        return -1;
-    }
-    return 0;
+    /* { buf_ready, fence, data, shm, audio }; ownership transfers exactly once. */
+    ctx->buf_ready_efd=ctx->pickup.fds[0];
+    ctx->fence_fd=ctx->pickup.fds[1];
+    ctx->data_fd=ctx->pickup.fds[2];
+    ctx->shm_fd=ctx->pickup.fds[3];
+    ctx->audio_fd=ctx->pickup.fds[4];
+    ctx->pickup.fd_count=0;
+    ctx->pickup_requested=false;
+    ctx->shm_ptr=mmap(NULL,sizeof(uint32_t),PROT_READ,MAP_SHARED,ctx->shm_fd,0);
+    if (ctx->shm_ptr == MAP_FAILED) { ctx->shm_ptr=NULL; return -1; }
+    return 1;
 }
 
-/*
- * Receive the dmabuf set the consumer pushes onto the data channel right after the
- * fd handshake. Polls data_fd with a short timeout. On failure the caller releases
- * the partially-acquired consumer resources. Returns 0 / -1.
- */
 static int receive_dmabufs(display_ctx *ctx)
 {
-    if (ctx->buf_count > 0)
-        return 0;
-
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
-    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
-        return -1;
-    if (pfd.revents & (POLLHUP | POLLERR))
-        return -1;
-
-    struct data_msg dhdr;
-    int fds[MAX_BUFS];
-    int fd_count = 0;
-
-    int n = recv_fds(ctx->data_fd, &dhdr, sizeof(dhdr), fds, MAX_BUFS, &fd_count);
-    if (n < (int)sizeof(struct data_msg) || fd_count < 1) {
-        for (int i = 0; i < fd_count; i++)
-            close(fds[i]);
-        return -1;
+    if (ctx->buf_count > 0) return 1;
+    int rc=handshake_read(ctx->data_fd,&ctx->buffers,sizeof(struct data_msg));
+    if (rc != 1) return rc;
+    struct data_msg header;
+    memcpy(&header,ctx->buffers.bytes,sizeof(header));
+    if (header.type != DATA_MSG_BUFS_READY || header.size == 0 ||
+        header.size % sizeof(struct buf_info) ||
+        header.size > MAX_BUFS * sizeof(struct buf_info)) { errno=EPROTO; return -1; }
+    rc=handshake_read(ctx->data_fd,&ctx->buffers,sizeof(header)+header.size);
+    if (rc != 1) return rc;
+    int count=(int)(header.size/sizeof(struct buf_info));
+    if (count != ctx->buffers.fd_count) { errno=EPROTO; return -1; }
+    for (int i=0; i<count; ++i) {
+        ctx->dmabuf_fds[i]=ctx->buffers.fds[i];
+        memcpy(&ctx->dmabuf_infos[i],ctx->buffers.bytes+sizeof(header)+i*sizeof(struct buf_info),
+            sizeof(struct buf_info));
     }
-
-    if (dhdr.type != DATA_MSG_BUFS_READY) {
-        for (int i = 0; i < fd_count; i++)
-            close(fds[i]);
-        return -1;
-    }
-
-    if (dhdr.size == 0 || dhdr.size % sizeof(struct buf_info) != 0) {
-        for (int i = 0; i < fd_count; i++)
-            close(fds[i]);
-        return -1;
-    }
-
-    int count = dhdr.size / sizeof(struct buf_info);
-    if (count != fd_count || count > MAX_BUFS) {
-        for (int i = 0; i < fd_count; i++)
-            close(fds[i]);
-        return -1;
-    }
-
-    struct buf_info infos[MAX_BUFS];
-    if (recv_all(ctx->data_fd, infos, dhdr.size) < 0) {
-        for (int i = 0; i < fd_count; i++)
-            close(fds[i]);
-        return -1;
-    }
-
-    for (int i = 0; i < count; i++) {
-        ctx->dmabuf_fds[i] = fds[i];
-        ctx->dmabuf_infos[i] = infos[i];
-    }
-    ctx->buf_count = count;
-    return 0;
+    ctx->buffers.fd_count=0;
+    ctx->buf_count=count;
+    return 1;
 }
 
-int connect_to_deamon(display_ctx **out, const char *socket_path)
+/* Keep the daemon HELLO live while its display connector is absent. Partial
+ * screen-info bytes are owned here, never discarded/reinterpreted by a WM. */
+static int receive_screen_info(display_ctx *ctx, int timeout_ms)
+{
+    if (ctx->have_screen_info) return 1;
+    struct pollfd pfd = {.fd=ctx->ctrl_fd, .events=POLLIN};
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc < 0) return errno == EINTR ? 0 : -1;
+    if (rc == 0) return 0;
+    while (ctx->screen_used < sizeof(ctx->screen_bytes)) {
+        ssize_t n = recv(ctx->ctrl_fd, ctx->screen_bytes + ctx->screen_used,
+            sizeof(ctx->screen_bytes) - ctx->screen_used, MSG_DONTWAIT);
+        if (n > 0) {
+            ctx->screen_used += (size_t)n; continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        return -1;
+    }
+    struct ctrl_msg hdr;
+    struct screen_info si;
+    memcpy(&hdr, ctx->screen_bytes, sizeof(hdr));
+    memcpy(&si, ctx->screen_bytes + sizeof(hdr), sizeof(si));
+    if (hdr.type != CTRL_MSG_SCREEN_INFO || hdr.size != sizeof(si) ||
+        !si.width || !si.height) { errno=EPROTO; return -1; }
+    ctx->screen_w=si.width; ctx->screen_h=si.height;
+    ctx->pixel_format=si.format; ctx->refresh=si.refresh;
+    ctx->have_screen_info=true;
+    return 1;
+}
+
+static int connect_daemon(display_ctx **out, const char *socket_path, bool deferred)
 {
     display_ctx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx)
@@ -223,7 +279,7 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     ctx->ctrl_fd = connect_unix(socket_path);
     if (ctx->ctrl_fd < 0)
         goto fail;
-    // Handshake operations also have a finite per-syscall timeout.
+    // Bound HELLO writes only; readiness reads use poll + MSG_DONTWAIT.
     struct timeval io_timeout = {.tv_sec=0, .tv_usec=100000};
     if (setsockopt(ctx->ctrl_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout)) < 0 ||
         setsockopt(ctx->ctrl_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout)) < 0)
@@ -233,23 +289,13 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
         goto fail;
 
-    uint8_t buf[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
-    if (recv_all(ctx->ctrl_fd, buf, sizeof(buf)) < 0)
-        goto fail;
+    int ready;
+    do {
+        ready = receive_screen_info(ctx, deferred ? 0 : -1);
+    } while (!deferred && ready == 0);
+    if (ready < 0) goto fail;
 
-    struct ctrl_msg resp;
-    memcpy(&resp, buf, sizeof(resp));
-    if (resp.type != CTRL_MSG_SCREEN_INFO || resp.size != sizeof(struct screen_info))
-        goto fail;
-
-    struct screen_info si;
-    memcpy(&si, buf + sizeof(struct ctrl_msg), sizeof(si));
-    ctx->screen_w = si.width;
-    ctx->screen_h = si.height;
-    ctx->pixel_format = si.format;
-    ctx->refresh = si.refresh;
-
-    // Daemon handshake only: screen info is in hand, but the consumer fds and
+    // Daemon handshake only: geometry may be deferred; consumer fds and
     // dmabufs are deliberately left for try_exit_fallback() so the backend brings
     // the consumer up through the single reconnect path. Stay in fallback.
     *out = ctx;
@@ -260,6 +306,15 @@ fail:
         close(ctx->ctrl_fd);
     free(ctx);
     return -1;
+}
+
+int connect_to_deamon(display_ctx **out, const char *socket_path)
+{
+    return connect_daemon(out, socket_path, false);
+}
+int connect_to_deamon_deferred(display_ctx **out, const char *socket_path)
+{
+    return connect_daemon(out, socket_path, true);
 }
 
 void disconnect(display_ctx *ctx)
@@ -430,16 +485,28 @@ static int input_read(display_ctx *ctx, void *out, size_t size, int kind, int ti
     } while (true);
 }
 
+bool input_header_pending(const display_ctx *ctx)
+{
+    return ctx && !ctx->fallback && ctx->input_kind == 1 && ctx->input_used > 0;
+}
+
 int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
 {
     uint8_t bytes[sizeof(struct data_msg) + sizeof(struct InputEvent)];
-    int rc=input_read(ctx, bytes, sizeof(bytes), 1, timeout_ms);
+    int rc = input_read(ctx, bytes, sizeof(bytes), 1, timeout_ms);
     if (rc <= 0) return rc;
-    struct data_msg hdr; memcpy(&hdr,bytes,sizeof(hdr));
+    struct data_msg hdr; memcpy(&hdr, bytes, sizeof(hdr));
     if (hdr.type != DATA_MSG_INPUT_EVENT || hdr.size != sizeof(*event)) {
         enter_fallback(ctx); return -1;
     }
-    memcpy(event,bytes+sizeof(hdr),sizeof(*event)); return 1;
+    memcpy(event, bytes + sizeof(hdr), sizeof(*event));
+    /* SCREEN_INFO can precede Android's first refresh callback. Keep the
+     * consumer's later, validated display rate visible through get_screen_info
+     * without swallowing/reordering its input notification or payloads. */
+    if (event->type == INPUT_TYPE_DISPLAY_REFRESH &&
+        event->display.refresh_mhz > 0 && event->display.refresh_mhz <= INT32_MAX)
+        ctx->refresh = event->display.refresh_mhz;
+    return 1;
 }
 int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
                                 int *fd_count, int timeout_ms)
@@ -456,12 +523,100 @@ int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
     ctx->input_fd_count=0; return 1;
 }
 
+size_t pending_output_bytes(const display_ctx *ctx)
+{
+    return ctx && !ctx->fallback ? ctx->output_bytes : 0;
+}
+
+/* A work budget keeps even a constantly draining consumer from monopolising a
+ * compositor callback. Pending does not mean failure and never drops a session. */
+int flush_queued_output(display_ctx *ctx)
+{
+    if (!ctx || ctx->fallback) { errno = ENOTCONN; return -1; }
+    for (unsigned budget = 0; budget < 16 && ctx->output_head; ++budget) {
+        struct output_message *message = ctx->output_head;
+        ssize_t n = send(ctx->data_fd, message->bytes + message->offset,
+                         message->size - message->offset,
+                         MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (n > 0) {
+            message->offset += (size_t)n;
+            if (message->offset != message->size) continue;
+            ctx->output_bytes -= message->size;
+            ctx->output_head = message->next;
+            if (!ctx->output_head) ctx->output_tail = NULL;
+            free(message);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 1;
+        enter_fallback(ctx);
+        return -1;
+    }
+    return ctx->output_head ? 1 : 0;
+}
+
+int queue_output_event_with_length(display_ctx *ctx,
+                                  const struct OutputEvent *event,
+                                  const void *payload, size_t size)
+{
+    if (!ctx || ctx->fallback) { errno = ENOTCONN; return -1; }
+    if (!event || size > OUTPUT_PAYLOAD_MAX || (size && !payload) ||
+        (event->type == OUTPUT_TYPE_CLIPBOARD && event->clipboard.size != size) ||
+        (event->type != OUTPUT_TYPE_CLIPBOARD && size != 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    const size_t total = sizeof(struct data_msg) + sizeof(*event) + size;
+    if (total > OUTPUT_QUEUE_MAX - ctx->output_bytes) {
+        errno = ENOBUFS; /* Reject atomically: the existing queue remains valid. */
+        return -1;
+    }
+    struct output_message *message = malloc(sizeof(*message) + total);
+    if (!message) return -1;
+    message->next = NULL;
+    message->size = total;
+    message->offset = 0;
+    struct data_msg header = {.type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(*event)};
+    memcpy(message->bytes, &header, sizeof(header));
+    memcpy(message->bytes + sizeof(header), event, sizeof(*event));
+    if (size) memcpy(message->bytes + sizeof(header) + sizeof(*event), payload, size);
+    if (ctx->output_tail) ctx->output_tail->next = message;
+    else ctx->output_head = message;
+    ctx->output_tail = message;
+    ctx->output_bytes += total;
+    return 0;
+}
+
+int queue_clipboard(display_ctx *ctx, const void *text, size_t size)
+{
+    if (size > OUTPUT_PAYLOAD_MAX || (size && !text)) { errno = EINVAL; return -1; }
+    struct OutputEvent event;
+    memset(&event, 0, sizeof(event));
+    event.type = OUTPUT_TYPE_CLIPBOARD;
+    event.clipboard.size = (uint32_t)size;
+    return queue_output_event_with_length(ctx, &event, text, size);
+}
+
 // A bounded synchronous send preserves the existing API's completed-write
 // contract. On partial failure, detach: continuing would corrupt stream framing.
 static int output_send(display_ctx *ctx, const void *bytes, size_t size)
 {
     size_t offset=0;
     int64_t deadline=monotonic_ms()+10;
+    /* Existing complete-write APIs must not overtake an async message's prefix.
+     * Preserve their old deadline/error contract; async users drive flush alone. */
+    while (ctx->output_head) {
+        int rc = flush_queued_output(ctx);
+        if (rc < 0) return -1;
+        if (rc == 0) break;
+        int remaining = (int)(deadline - monotonic_ms());
+        struct pollfd pfd = {.fd = ctx->data_fd, .events = POLLOUT};
+        if (remaining <= 0 || poll(&pfd, 1, remaining) <= 0 ||
+            !(pfd.revents & POLLOUT)) {
+            enter_fallback(ctx);
+            return -1;
+        }
+    }
     while (offset < size) {
         if (monotonic_ms() >= deadline) { enter_fallback(ctx); return -1; }
         ssize_t n=send(ctx->data_fd,(const char *)bytes+offset,size-offset,MSG_NOSIGNAL | MSG_DONTWAIT);
@@ -574,10 +729,41 @@ bool is_daemon_alive(display_ctx *ctx)
     return !(pfd.revents & (POLLHUP | POLLERR | POLLNVAL));
 }
 
+int poll_buffer_ready(display_ctx *ctx, int timeout_ms)
+{
+    if (!ctx) { errno = EINVAL; return -1; }
+    if (ctx->fallback) return 0;
+    /* One poll serves both ACK/initial-target readiness and peer health.
+     * eventfd alone cannot report a consumer closing before its first target.
+     * Only poll socket hangups: never steal input or ancillary bytes. */
+    struct pollfd channels[] = {
+        {.fd = ctx->buf_ready_efd, .events = POLLIN},
+        {.fd = ctx->ctrl_fd, .events = POLLRDHUP},
+        {.fd = ctx->data_fd, .events = POLLRDHUP},
+    };
+    int rc = poll(channels, sizeof(channels) / sizeof(channels[0]), timeout_ms);
+    if (rc < 0 && errno == EINTR) return 0;
+    int error = rc < 0 ? errno : ECONNRESET;
+    bool lost = rc < 0;
+    for (size_t i = 0; i < sizeof(channels) / sizeof(channels[0]); ++i) {
+        lost |= channels[i].fd < 0 ||
+            (channels[i].revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0;
+    }
+    if (!lost) return (channels[0].revents & POLLIN) != 0;
+    enter_fallback(ctx);
+    errno = error;
+    return -1;
+}
 void force_fallback(display_ctx *ctx)
 {
-    if (!ctx || ctx->fallback)
+    if (!ctx) return;
+    if (ctx->fallback) {
+        /* An abandoned outstanding control response cannot become a new attempt. */
+        bool outstanding=ctx->data_fd < 0 && (ctx->pickup_sent || ctx->pickup.used);
+        release_consumer_resources(ctx);
+        if (outstanding && ctx->ctrl_fd >= 0) { close(ctx->ctrl_fd); ctx->ctrl_fd=-1; }
         return;
+    }
 
     ctx->fallback = true;
     if (ctx->pre_release_cb)
@@ -587,25 +773,30 @@ void force_fallback(display_ctx *ctx)
 
 int try_exit_fallback(display_ctx *ctx)
 {
-    if (!ctx->fallback)
-        return 0;
-
-    // Step 1: ask the daemon to hand over the consumer-side fds.
-    if (pickup_fds(ctx) < 0) {
-        release_consumer_resources(ctx);
-        return -1;
-    }
-
-    // Step 2: immediately pull the dmabuf set the consumer pushes right after the
-    // fd handshake. Only leave fallback once both fds and dmabufs are in hand, so
-    // the backend can import straight away.
-    if (receive_dmabufs(ctx) < 0) {
-        release_consumer_resources(ctx);
-        return -1;
-    }
-
-    ctx->fallback = false;
+    if (!ctx || ctx->ctrl_fd < 0) { errno=ENOTCONN; return -1; }
+    if (!ctx->fallback) return 0;
+    int rc=receive_screen_info(ctx,0);
+    if (rc < 0) goto control_failure;
+    if (!rc) { errno=EAGAIN; return -1; }
+    rc=pickup_fds(ctx);
+    if (rc < 0) goto control_failure;
+    if (!rc) { errno=EAGAIN; return -1; }
+    rc=receive_dmabufs(ctx);
+    if (rc < 0) goto consumer_failure;
+    if (!rc) { errno=EAGAIN; return -1; }
+    ctx->fallback=false;
     return 0;
+
+control_failure:
+    /* The protocol has no attempt ID. Closing an ambiguous control stream is
+     * mandatory: late bytes/fds must never be interpreted as the next pickup. */
+    if (ctx->ctrl_fd >= 0) { close(ctx->ctrl_fd); ctx->ctrl_fd=-1; }
+consumer_failure: {
+    int saved=errno;
+    release_consumer_resources(ctx);
+    errno=saved;
+    return -1;
+}
 }
 
 int get_data_fd(display_ctx *ctx)

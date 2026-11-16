@@ -52,6 +52,7 @@
 #define ANLAND_SCENE_LEGACY_H
 
 #include "anland_device.h"
+#include "anland_pacing.h"
 #include "anland_scene.h"
 
 #ifdef __cplusplus
@@ -64,6 +65,7 @@ typedef struct anland_scene_legacy anland_scene_legacy;
 /* Open the daemon connection (socket_path is a hint; NULL/"" probes the
  * well-known locations) and create the bound scene. Returns NULL on failure. */
 anland_scene_legacy *anland_scene_legacy_create(const char *socket_path);
+anland_scene_legacy *anland_scene_legacy_create_deferred(const char *socket_path);
 
 void anland_scene_legacy_destroy(anland_scene_legacy *b);
 
@@ -77,13 +79,18 @@ anland_device *anland_scene_legacy_device(anland_scene_legacy *b);
 
 /* True once a consumer session is up. */
 bool anland_scene_legacy_connected(anland_scene_legacy *b);
-/* False while a consumed ACK still owes slot retirement. Session may stay up. */
+/* False before the first real target signal or while ACK retirement is pending. */
 bool anland_scene_legacy_target_available(anland_scene_legacy *b);
+/* Stronger additive query: current slot is writable NOW, with no pending/inflight
+ * handoff. The previous query's meaning stays unchanged for existing WMs. */
+bool anland_scene_legacy_renderable(anland_scene_legacy *b);
 
 /* Attempt to leave fallback; returns 0 when connected. Safe to call repeatedly
  * (this is what a DE reconnect timer drives). On a successful transition any
- * in-flight commit is invalidated, OUTPUT_CHANGED is reported, and the first
- * RENDER_TARGET_READY is published so the DE can start its frame loop.
+ * in-flight commit is invalidated and OUTPUT_CHANGED is reported. The first
+ * RENDER_TARGET_READY waits indefinitely for a real buffer-ready signal via
+ * pump(); metadata alone never publishes the shared-page default slot. Each
+ * pump() still obeys the caller's timeout; no total consumer-arrival deadline.
  * Old release/outcome notifications must drain before a new handshake.
  * Returns -1 when the session cannot be used; the caller drains and retries. */
 int anland_scene_legacy_reconnect(anland_scene_legacy *b);
@@ -132,6 +139,8 @@ void anland_scene_legacy_output(anland_scene_legacy *b,
 uint64_t anland_scene_legacy_frames_flipped(const anland_scene_legacy *b);
 uint64_t anland_scene_legacy_frames_acked(const anland_scene_legacy *b);
 uint64_t anland_scene_legacy_reconnects(const anland_scene_legacy *b);
+void anland_scene_legacy_pacing(const anland_scene_legacy *b, anland_pacing *out);
+void anland_scene_legacy_note_refresh(anland_scene_legacy *b, uint64_t refresh_mhz);
 
 #ifdef __cplusplus
 }

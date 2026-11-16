@@ -1,45 +1,14 @@
 diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
---- a/src/backends/CMakeLists.txt	2026-07-14 18:56:10.000000000 +0800
-+++ b/src/backends/CMakeLists.txt	2026-07-21 18:56:06.449830469 +0800
+--- a/src/backends/CMakeLists.txt
++++ b/src/backends/CMakeLists.txt
 @@ -1,3 +1,4 @@
 +add_subdirectory(anland)
  add_subdirectory(drm)
  add_subdirectory(fakeinput)
  add_subdirectory(libinput)
-diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
---- a/src/inputmethod.cpp	2026-07-14 18:56:10.000000000 +0800
-+++ b/src/inputmethod.cpp	2026-07-21 18:11:01.669831501 +0800
-@@ -502,6 +502,16 @@
-     }
- }
- 
-+void InputMethod::commitText(const QString &text)
-+{
-+    if (text.isEmpty()) {
-+        return;
-+    }
-+
-+    // Use the same routing path as a real zwp_input_method_v1 commit_string.
-+    commitString(m_serial++, text);
-+}
-+
- void InputMethod::commitString(quint32 serial, const QString &text)
- {
-     if (auto t2 = waylandServer()->seat()->textInputV2(); t2 && t2->isEnabled()) {
-diff --git a/src/inputmethod.h b/src/inputmethod.h
---- a/src/inputmethod.h	2026-07-14 18:56:10.000000000 +0800
-+++ b/src/inputmethod.h	2026-07-21 18:10:47.537831507 +0800
-@@ -91,6 +91,7 @@
- 
-     RectF cursorRectangle() const;
- 
-+    void commitText(const QString &text);
- Q_SIGNALS:
-     void panelChanged();
-     void activeChanged(bool active);
 diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
---- a/src/main_wayland.cpp	2026-07-14 18:56:10.000000000 +0800
-+++ b/src/main_wayland.cpp	2026-07-21 21:22:59.025694334 +0800
+--- a/src/main_wayland.cpp
++++ b/src/main_wayland.cpp
 @@ -10,6 +10,7 @@
  
  #include "config-kwin.h"
@@ -48,7 +17,7 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
  #include "backends/drm/drm_backend.h"
  #include "backends/virtual/virtual_backend.h"
  #include "backends/wayland/wayland_backend.h"
-@@ -378,6 +379,7 @@
+@@ -402,6 +403,7 @@
                                       i18n("Exits this instance so it can be restarted by kwin_wayland_wrapper."));
  
      QCommandLineOption drmOption(QStringLiteral("drm"), i18n("Render through drm node."));
@@ -56,7 +25,7 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
      QCommandLineOption locale1Option(QStringLiteral("locale1"), i18n("Extract locale information from locale1 rather than the user's configuration"));
  
      QCommandLineParser parser;
-@@ -400,6 +402,7 @@
+@@ -426,6 +428,7 @@
      parser.addOption(heightOption);
      parser.addOption(scaleOption);
      parser.addOption(outputCountOption);
@@ -64,7 +33,7 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
      parser.addOption(drmOption);
      parser.addOption(locale1Option);
      parser.addOption(fullscreenOption);
-@@ -466,6 +469,7 @@
+@@ -490,6 +493,7 @@
          X11,
  #endif
          Wayland,
@@ -72,7 +41,7 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
          Virtual,
      };
  
-@@ -475,7 +479,9 @@
+@@ -499,7 +503,9 @@
      qreal outputScale = 1;
  
      // Decide what backend to use.
@@ -83,7 +52,7 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
          backendType = BackendType::Kms;
  #if KWIN_BUILD_X11
      } else if (parser.isSet(x11DisplayOption)) {
-@@ -533,6 +539,12 @@
+@@ -557,6 +563,12 @@
      }
  
      switch (backendType) {
@@ -99,17 +68,12 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
 diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
 --- a/src/wayland/transaction.cpp
 +++ b/src/wayland/transaction.cpp
-@@ -267,6 +267,17 @@ static FileDescriptor exportWaitSyncFile(const FileDescriptor &fileDescriptor)
+@@ -270,6 +270,12 @@
  void Transaction::watchDmaBuf(TransactionEntry *entry)
  {
  #if defined(Q_OS_LINUX)
-+    // The anland backend always composites client buffers with EGL; it never
-+    // scans them out directly. EGL's implicit dma-buf synchronization waits
-+    // before the texture is sampled, so exporting a sync_file and installing a
-+    // QSocketNotifier for every mailbox commit only duplicates that wait. On
-+    // fast clients this otherwise adds poll/ioctl/close work to every commit and
-+    // delays wl_buffer.release. Keep the generic KWin behavior unless the
-+    // anland-only startup flag explicitly opts into this composited fast path.
++    // EGL already waits for composited client buffers before sampling them.
++    // Keep the generic behavior unless the Anland launcher opts into this path.
 +    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
 +        return;
 +    }
@@ -117,16 +81,3 @@ diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
      const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
      if (!attributes) {
          return;
-diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
---- a/src/scene/surfaceitem.cpp
-+++ b/src/scene/surfaceitem.cpp
-@@ -135,2 +135,9 @@ void SurfaceItem::addDamage(const Region &region)
-     m_lastDamage = now;
-+    // Mailbox clients commonly replace a fully damaged buffer hundreds of times
-+    // before the next composite. The latest buffer still gets installed through
-+    // bufferChanged; repeating damage mapping and repaint propagation is redundant.
-+    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
-+    if (damageAlreadyPending) {
-+        return;
-+    }
-     m_damage += region;

@@ -178,6 +178,12 @@ impl Client {
         }
     }
 
+    pub fn reset_input(&mut self) {
+        // SAFETY: the bridge is a live single-threaded owner and only its
+        // partial tablet-frame assembler is cleared.
+        unsafe { ffi::anland_niri_reset_input(self.0.as_ptr()) }
+    }
+
     pub fn read_payload(&mut self, size: usize) -> io::Result<Vec<u8>> {
         const MAX_PAYLOAD: usize = 1024 * 1024;
         if size > MAX_PAYLOAD {
@@ -231,6 +237,20 @@ impl Client {
     pub fn request_resources(&mut self, service: u32) -> io::Result<()> {
         if unsafe { ffi::anland_niri_request_resources(self.0.as_ptr(), service) } < 0 {
             return Err(failed("resource request"));
+        }
+        Ok(())
+    }
+
+    pub fn set_consumer_var(&mut self, var: u32, value: u32) -> io::Result<()> {
+        if unsafe { ffi::anland_niri_set_consumer_var(self.0.as_ptr(), var, value) } < 0 {
+            return Err(failed("consumer variable update"));
+        }
+        Ok(())
+    }
+
+    pub fn scheduling(&mut self, pid: i32, flags: u8) -> io::Result<()> {
+        if unsafe { ffi::anland_niri_scheduling(self.0.as_ptr(), pid, flags) } < 0 {
+            return Err(failed("scheduling update"));
         }
         Ok(())
     }

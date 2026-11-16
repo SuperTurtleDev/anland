@@ -1,0 +1,774 @@
+Subject: Anland v5 hyprland native integration (Debian 13)
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -280,7 +280,7 @@ pkg_check_modules(
+   lcms2
+ )
+ 
+-pkg_search_module(LUA REQUIRED IMPORTED_TARGET GLOBAL lua55 lua5.5 lua-55 lua-5.5 lua>=5.5 lua<5.6)
++pkg_search_module(LUA REQUIRED IMPORTED_TARGET GLOBAL lua54 lua5.4 lua-5.4 lua>=5.4)
+ 
+ find_package(hyprwayland-scanner 0.3.10 REQUIRED)
+ 
+--- a/example/hyprland.lua
++++ b/example/hyprland.lua
+@@ -354,3 +354,60 @@ hl.window_rule({
+     move  = "20 monitor_h-120",
+     float = true,
+ })
++
++
++-- ANLAND HYPRGRASS DEFAULTS BEGIN
++-- Built and shipped with this Hyprland; no hyprpm download/rebuild at login.
++-- Plugin loading happens after the initial parse; the namespace guard is needed
++-- for the first pass. Hyprland reparses when the plugin becomes available.
++hl.plugin.load("/usr/lib64/hyprland-anland/lib/hyprland/plugins/libhyprgrass.so")
++
++-- Native touchpad gestures: preserve the existing 3-finger horizontal workspace
++-- gesture above, and enable the remaining actions without overlapping patterns.
++hl.config({ gestures = { workspace_swipe_touch = true, workspace_swipe_cancel_ratio = 0.15 } })
++hl.gesture({ fingers = 3, direction = "up", action = "fullscreen" })
++hl.gesture({ fingers = 3, direction = "down", action = "close" })
++hl.gesture({ fingers = 3, direction = "pinch", action = "cursor_zoom", zoom_level = "2" })
++hl.gesture({ fingers = 4, direction = "horizontal", action = "move" })
++hl.gesture({ fingers = 4, direction = "vertical", action = "float" })
++hl.gesture({ fingers = 4, direction = "pinch", action = "resize" })
++hl.gesture({ fingers = 5, direction = "up", action = "special", workspace_name = "magic" })
++hl.gesture({ fingers = 5, direction = "down", action = "resize" })
++hl.gesture({ fingers = 5, direction = "horizontal", action = "scroll_move" })
++hl.gesture({ fingers = 5, direction = "pinch", action = "resize" })
++
++if hl.plugin.hyprgrass then
++    hl.config({ plugin = { hyprgrass = {
++        sensitivity = 4.0,
++        long_press_delay = 400,
++        edge_margin = 20,
++        resize_on_border_long_press = true,
++        debug = { send_cancel = true },
++    } } })
++    local hg = hl.plugin.hyprgrass
++    -- Touchscreen multi-finger gestures (requires consumer forwarding contacts).
++    hg.gesture({ pattern = {kind = "swipe", fingers = 3, direction = "horizontal"}, action = "workspace" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 3, direction = "up"}, action = "fullscreen" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 3, direction = "down"}, action = "close" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 4, direction = "horizontal"}, action = "move" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 4, direction = "vertical"}, action = "float" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 5, direction = "up"}, action = "special", workspace_name = "magic" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 5, direction = "down"}, action = "resize" })
++    hg.gesture({ pattern = {kind = "swipe", fingers = 5, direction = "horizontal"}, action = "scroll_move" })
++    -- Edge gestures: bottom sideways = workspace; top down = special workspace.
++    hg.gesture({ pattern = {kind = "edge", origin = "down", direction = "horizontal"}, action = "workspace" })
++    hg.gesture({ pattern = {kind = "edge", origin = "up", direction = "down"}, action = "special", workspace_name = "magic" })
++    hg.bind({ pattern = {kind = "edge", origin = "left", direction = "right"}, action = hl.dsp.exec_cmd(menu) })
++    hg.bind({ pattern = {kind = "edge", origin = "right", direction = "left"}, action = hl.dsp.exec_cmd(terminal) })
++    -- Long-press drag: one finger moves; two fingers resize; borders also resize.
++    hg.gesture({ pattern = {kind = "longpress", fingers = 1, direction = "swipe"}, action = "move" })
++    hg.gesture({ pattern = {kind = "longpress", fingers = 2, direction = "swipe"}, action = "resize" })
++    -- Multi-tap and pinch binds, plus live pinch and touchpad emulation.
++    hg.bind({ pattern = {kind = "tap", fingers = 3}, action = hl.dsp.window.float() })
++    hg.bind({ pattern = {kind = "tap", fingers = 4}, action = hl.dsp.window.fullscreen() })
++    hg.gesture({ pattern = {kind = "pinch", fingers = 3, direction = "pinch"}, action = "cursor_zoom", zoom_level = "2" })
++    hg.bind({ pattern = {kind = "pinch", fingers = 4, direction = "pinchin"}, action = hl.dsp.window.float() })
++    hg.bind({ pattern = {kind = "pinch", fingers = 4, direction = "pinchout"}, action = hl.dsp.window.fullscreen() })
++    hg.gesture({ pattern = {kind = "pinch", fingers = 5, direction = "pinch"}, action = "emulate_touchpad" })
++end
++-- ANLAND HYPRGRASS DEFAULTS END
+--- a/hyprpm/CMakeLists.txt
++++ b/hyprpm/CMakeLists.txt
+@@ -11,21 +11,7 @@ set(CMAKE_CXX_STANDARD 23)
+ 
+ pkg_check_modules(hyprpm_deps REQUIRED IMPORTED_TARGET tomlplusplus hyprutils>=0.7.0)
+ 
+-find_package(glaze 7...<8 QUIET)
+-if (NOT glaze_FOUND)
+-    set(GLAZE_VERSION v7.2.0)
+-    message(STATUS "hyprpm: glaze dependency not found, retrieving ${GLAZE_VERSION} with FetchContent")
+-    include(FetchContent)
+-    FetchContent_Declare(
+-        glaze
+-        GIT_REPOSITORY https://github.com/stephenberry/glaze.git
+-        GIT_TAG ${GLAZE_VERSION}
+-        GIT_SHALLOW TRUE
+-        EXCLUDE_FROM_ALL
+-    )
+-    FetchContent_MakeAvailable(glaze)
+-endif()
+-
++find_package(glaze REQUIRED)
+ add_executable(hyprpm ${SRCFILES})
+ add_compile_definitions(LIBDIR="${CMAKE_INSTALL_FULL_LIBDIR}")
+ 
+--- a/src/Compositor.cpp
++++ b/src/Compositor.cpp
+@@ -1,3 +1,5 @@
++#include "anland/Bridge.hpp"
++#include <cstdlib>
+ #include <ranges>
+ #include <re2/re2.h>
+ 
+@@ -313,6 +315,11 @@ void CCompositor::initServer(std::string
+ 
+     std::vector<Aquamarine::SBackendImplementationOptions> implementations;
+     Aquamarine::SBackendImplementationOptions              option;
++    if (const auto value = getenv("ANLAND"); value && std::string_view(value) == "1") {
++        option.backendType = Aquamarine::AQ_BACKEND_ANLAND;
++        option.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_MANDATORY;
++        implementations.emplace_back(option);
++    } else {
+     option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_HEADLESS;
+     option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_MANDATORY;
+     implementations.emplace_back(option);
+@@ -323,6 +330,7 @@ void CCompositor::initServer(std::string
+     option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_FALLBACK;
+     implementations.emplace_back(option);
+ 
++    }
+     m_aqBackend = CBackend::create(implementations, options);
+ 
+     if (!m_aqBackend) {
+@@ -336,6 +344,7 @@ void CCompositor::initServer(std::string
+     // TODO: headless only
+ 
+     initAllSignals();
++    Anland::bind(m_aqBackend);
+ 
+     if (!m_aqBackend->start()) {
+         Log::logger->log(
+@@ -579,6 +588,7 @@ void CCompositor::cleanup() {
+ 
+     m_monitors.clear();
+ 
++    Anland::shutdownClipboard();
+     wl_display_destroy_clients(g_pCompositor->m_wlDisplay);
+     removeAllSignals();
+ 
+--- a/src/config/supplementary/executor/Executor.cpp
++++ b/src/config/supplementary/executor/Executor.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <hyprutils/string/String.hpp>
+ #include <chrono>
++#include <algorithm>
+ 
+ using namespace Config::Supplementary;
+ using namespace Hyprutils::String;
+@@ -26,7 +27,13 @@ CExecutor::CExecutor() {
+             return;
+ 
+         // update dbus env
+-        if (g_pCompositor->m_aqBackend->hasSession())
++        // Anland has no native DRM/seat session, but it is the desktop session.
++        // Publish the actual socket/desktop before portal activation can inherit
++        // a stale WAYLAND_DISPLAY from the user manager. Other nested backends
++        // retain their existing hasSession policy.
++        if (g_pCompositor->m_aqBackend->hasSession() ||
++            std::ranges::any_of(g_pCompositor->m_aqBackend->getImplementations(),
++                                [](const auto& impl) { return impl->type() == Aquamarine::AQ_BACKEND_ANLAND; }))
+             spawnRaw(
+ #ifdef USES_SYSTEMD
+                 "systemctl --user import-environment DISPLAY WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP QT_QPA_PLATFORMTHEME PATH XDG_DATA_DIRS && hash "
+--- a/src/config/supplementary/jeremy/Jeremy.cpp
++++ b/src/config/supplementary/jeremy/Jeremy.cpp
+@@ -32,7 +32,7 @@ std::expected<SConfigStateReply, std::st
+         else if (CONF_PATHS.first.has_value())
+             return SConfigStateReply{.path = CONF_PATHS.first.value(), .type = CONFIG_TYPE_REGULAR};
+         else if (LUA_PATHS.second.has_value()) {
+-            auto CONFIGPATH = Hyprutils::Path::fullConfigPath(LUA_PATHS.second.value(), ISDEBUG ? "hyprlandd" : "hyprland");
++            auto CONFIGPATH = Hyprutils::Path::fullConfigPath(LUA_PATHS.second.value(), ISDEBUG ? "hyprlandd" : "hyprland", "lua");
+             return SConfigStateReply{.path = CONFIGPATH, .type = CONFIG_TYPE_REGULAR};
+         } else
+             return std::unexpected("Neither HOME nor XDG_CONFIG_HOME are set in the environment. Could not find config in XDG_CONFIG_DIRS or /etc/xdg.");
+--- a/src/debug/log/Logger.cpp
++++ b/src/debug/log/Logger.cpp
+@@ -48,8 +48,9 @@ void CLogger::recheckCfg() {
+     static auto PENABLESTDOUT = CConfigValue<Config::INTEGER>("debug:enable_stdout_logs");
+     static auto PENABLECOLOR  = CConfigValue<Config::INTEGER>("debug:colored_stdout_logs");
+ 
+-    m_logger.setEnableStdout(!*PDISABLELOGS && *PENABLESTDOUT);
+-    m_logsEnabled = !*PDISABLELOGS;
++    const bool ANLAND_DIAGNOSTICS = Env::envEnabled("ANLAND") && Env::envEnabled("HYPRLAND_ANLAND_DIAGNOSTICS");
++    m_logger.setEnableStdout(ANLAND_DIAGNOSTICS || (!*PDISABLELOGS && *PENABLESTDOUT));
++    m_logsEnabled = ANLAND_DIAGNOSTICS || !*PDISABLELOGS;
+     m_logger.setTime(!*PDISABLETIME);
+     m_logger.setEnableColor(*PENABLECOLOR);
+ }
+--- a/src/desktop/state/FocusState.cpp
++++ b/src/desktop/state/FocusState.cpp
+@@ -1,3 +1,4 @@
++#include "../../anland/Bridge.hpp"
+ #include "FocusState.hpp"
+ #include "../view/Window.hpp"
+ #include "../../Compositor.hpp"
+@@ -243,6 +244,8 @@ void CFocusState::rawSurfaceFocus(SP<CWL
+         g_pEventManager->postEvent(SHyprIPCEvent{.event = "activewindowv2", .data = ""});
+         Event::bus()->m_events.input.keyboard.focus.emit(nullptr);
+         m_focusSurface.reset();
++        Anland::syncPointerCapture();
++        Anland::reportActiveClient(0);
+         return;
+     }
+ 
+@@ -267,6 +270,8 @@ void CFocusState::rawSurfaceFocus(SP<CWL
+ 
+     if (SURF && SURF->constraint())
+         SURF->constraint()->activate();
++    Anland::syncPointerCapture();
++    Anland::reportActiveClient(pWindowOwner ? pWindowOwner->getPID() : 0);
+ }
+ 
+ void CFocusState::rawMonitorFocus(PHLMONITOR pMonitor) {
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -1,3 +1,4 @@
++#include "../anland/Bridge.hpp"
+ #include "Monitor.hpp"
+ #include "MiscFunctions.hpp"
+ #include "../macros.hpp"
+@@ -107,6 +108,12 @@ void CMonitor::onConnect(bool noRule) {
+     m_listeners.needsFrame = m_output->events.needsFrame.listen([this] { g_pCompositor->scheduleFrameForMonitor(m_self.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME); });
+ 
+     m_listeners.presented = m_output->events.present.listen([this](const Aquamarine::IOutput::SPresentEvent& event) {
++        if (!event.presented) {
++            PROTO::presentation->onDiscarded(m_self.lock());
++            m_frameScheduler->onPresented();
++            g_pHyprRenderer->damageMonitor(m_self.lock());
++            return;
++        }
+         if (m_pendingDpmsAnimation) {
+             m_pendingDpmsAnimationCounter++;
+             // we give ourselves 5 frames of a buffer. The first presentation event still doesn't usually say that we actually
+@@ -643,8 +650,10 @@ bool CMonitor::applyMonitorRule(Config::
+ 
+     m_activeMonitorRule = std::move(pMonitorRule);
+ 
+-    if (m_forceSize.has_value())
++    if (m_forceSize.has_value()) {
+         m_activeMonitorRule.m_resolution = m_forceSize.value();
++        m_forceSize.reset();
++    }
+ 
+     const auto RULE = &m_activeMonitorRule;
+ 
+@@ -830,7 +839,13 @@ bool CMonitor::applyMonitorRule(Config::
+     m_customDrmMode = {};
+     m_currentMode   = nullptr;
+ 
+-    const auto initialFormat = m_drmFormat != DRM_FORMAT_INVALID ? m_drmFormat : DRM_FORMAT_XRGB8888;
++    // Fixed consumer targets cannot be reallocated in a requested native format.
++    // Select their real fourcc before the first mode/swapchain test, including
++    // reconnects whose format differs from the previous generation.
++    const auto fixedFormat = Anland::renderTargetFormat(m_output);
++    if (m_output->getBackend()->type() == Aquamarine::AQ_BACKEND_ANLAND && fixedFormat == DRM_FORMAT_INVALID)
++        return false;
++    const auto initialFormat = fixedFormat != DRM_FORMAT_INVALID ? fixedFormat : (m_drmFormat != DRM_FORMAT_INVALID ? m_drmFormat : DRM_FORMAT_XRGB8888);
+     m_output->state->setFormat(initialFormat);
+     m_prevDrmFormat = m_drmFormat;
+     m_drmFormat     = initialFormat;
+@@ -956,18 +971,25 @@ bool CMonitor::applyMonitorRule(Config::
+ 
+     bool set10bit = false;
+ 
+-    for (auto const& fmt : formats[sc<int>(!RULE->m_enable10bit)]) {
+-        m_output->state->setFormat(fmt.second);
+-        m_prevDrmFormat = m_drmFormat;
+-        m_drmFormat     = fmt.second;
++    if (fixedFormat != DRM_FORMAT_INVALID) {
++        // Keep the already-tested imported layout. A 10-bit rule cannot turn an
++        // 8-bit consumer image into a 10-bit one; do not lie about its format.
++        if (!m_state.test())
++            return false;
++    } else {
++        for (auto const& fmt : formats[sc<int>(!RULE->m_enable10bit)]) {
++            m_output->state->setFormat(fmt.second);
++            m_prevDrmFormat = m_drmFormat;
++            m_drmFormat     = fmt.second;
+ 
+-        if (!m_state.test()) {
+-            Log::logger->log(Log::ERR, "output {} failed basic test on format {}", m_name, fmt.first);
+-        } else {
+-            Log::logger->log(Log::DEBUG, "output {} succeeded basic test on format {}", m_name, fmt.first);
+-            if (RULE->m_enable10bit && fmt.first.contains("101010"))
+-                set10bit = true;
+-            break;
++            if (!m_state.test()) {
++                Log::logger->log(Log::ERR, "output {} failed basic test on format {}", m_name, fmt.first);
++            } else {
++                Log::logger->log(Log::DEBUG, "output {} succeeded basic test on format {}", m_name, fmt.first);
++                if (RULE->m_enable10bit && fmt.first.contains("101010"))
++                    set10bit = true;
++                break;
++            }
+         }
+     }
+ 
+@@ -1101,6 +1123,7 @@ bool CMonitor::applyMonitorRule(Config::
+     if (m_background && (OLDPIXELSIZE != m_pixelSize || OLDTRANSFORMEDSIZE != m_transformedSize)) {
+         Log::logger->log(Log::DEBUG, "{} reset BGTex: pixelSize {} -> {}, transformedSize {} -> {}", m_name, OLDPIXELSIZE, m_pixelSize, OLDTRANSFORMEDSIZE, m_transformedSize);
+         m_background.reset();
++        m_splash.reset();
+     }
+ 
+     g_pCompositor->scheduleMonitorStateRecheck();
+@@ -2505,6 +2528,11 @@ CMonitorState::CMonitorState(CMonitor* o
+ }
+ 
+ void CMonitorState::ensureBufferPresent() {
++    // Anland local modesets do not need a scanout placeholder. Acquiring one
++    // inside a frame callback would submit an unrendered consumer target.
++    if (m_owner->m_output->getBackend()->type() == Aquamarine::AQ_BACKEND_ANLAND)
++        return;
++
+     const auto& STATE = m_owner->m_output->state->state();
+     if (!STATE.enabled) {
+         Log::logger->log(Log::TRACE, "CMonitorState::ensureBufferPresent: Ignoring, monitor is not enabled");
+@@ -2553,13 +2581,15 @@ bool CMonitorState::updateSwapchain() {
+         return true;
+     }
+ 
+-    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize)
++    const auto LENGTH = Anland::swapchainLength(m_owner->m_output, 3);
++    if (!LENGTH) return false;
++    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == LENGTH && OPTIONS.size == MODE->pixelSize)
+         return true;
+ 
+     auto options    = OPTIONS;
+     options.format  = m_owner->m_drmFormat;
+     options.scanout = true;
+-    options.length  = 3;
++    options.length  = LENGTH;
+     options.size    = MODE->pixelSize;
+     return m_owner->m_output->swapchain->reconfigure(options);
+ }
+--- a/src/helpers/MonitorFrameScheduler.cpp
++++ b/src/helpers/MonitorFrameScheduler.cpp
+@@ -13,6 +13,7 @@ CMonitorFrameScheduler::CMonitorFrameSch
+ bool CMonitorFrameScheduler::newSchedulingEnabled() {
+     static auto PENABLENEW = CConfigValue<Config::INTEGER>("render:new_render_scheduling");
+ 
++    if (m_monitor && m_monitor->m_output->getBackend()->type() == Aquamarine::AQ_BACKEND_ANLAND) return false;
+     return *PENABLENEW && g_pHyprRenderer->explicitSyncSupported() && m_monitor && !m_monitor->m_directScanoutIsActive;
+ }
+ 
+--- a/src/managers/eventLoop/EventLoopManager.cpp
++++ b/src/managers/eventLoop/EventLoopManager.cpp
+@@ -63,7 +63,8 @@ static int timerWrite(int fd, uint32_t m
+ 
+ static int aquamarineFDWrite(int fd, uint32_t mask, void* data) {
+     auto POLLFD = sc<Aquamarine::SPollFD*>(data);
+-    POLLFD->onSignal();
++    auto callback = POLLFD->onSignal; // the callback may replace and destroy this watcher
++    callback();
+     return 0;
+ }
+ 
+@@ -267,7 +268,7 @@ void CEventLoopManager::syncPollFDs() {
+         auto const& [fd, eventSourceData] = item;
+ 
+         // If no pollFD has the same fd, remove this event source
+-        const bool shouldRemove = std::ranges::none_of(aqPollFDs, [&](const auto& pollFD) { return pollFD->fd == fd; });
++        const bool shouldRemove = std::ranges::none_of(aqPollFDs, [&](const auto& pollFD) { return pollFD.get() == eventSourceData.pollFD.get(); });
+ 
+         if (shouldRemove)
+             wl_event_source_remove(eventSourceData.eventSource);
+@@ -276,7 +277,7 @@ void CEventLoopManager::syncPollFDs() {
+     });
+ 
+     for (auto& fd : aqPollFDs | std::views::filter([&](SP<Aquamarine::SPollFD> fd) { return !m_aqEventSources.contains(fd->fd); })) {
+-        auto eventSource         = wl_event_loop_add_fd(m_wayland.loop, fd->fd, WL_EVENT_READABLE, aquamarineFDWrite, fd.get());
++        auto eventSource         = wl_event_loop_add_fd(m_wayland.loop, fd->fd, fd->events, aquamarineFDWrite, fd.get());
+         m_aqEventSources[fd->fd] = {.pollFD = fd, .eventSource = eventSource};
+     }
+ }
+--- a/src/managers/input/InputManager.cpp
++++ b/src/managers/input/InputManager.cpp
+@@ -1,4 +1,5 @@
+ #include "InputManager.hpp"
++#include "../../anland/Bridge.hpp"
+ #include "../../Compositor.hpp"
+ #include <aquamarine/output/Output.hpp>
+ #include <cstdint>
+@@ -1559,6 +1560,8 @@ void CInputManager::onKeyboardKey(const
+     if (!pKeyboard->m_enabled || !pKeyboard->m_allowed)
+         return;
+ 
++    Anland::beforeKeyboardEvent();
++
+     const bool           DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
+ 
+     const auto           IME    = m_relay.m_inputMethod.lock();
+@@ -1623,6 +1626,8 @@ void CInputManager::onKeyboardMod(SP<IKe
+     if (!pKeyboard->m_enabled)
+         return;
+ 
++    Anland::beforeKeyboardEvent();
++
+     const bool DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
+ 
+     const auto IME    = m_relay.m_inputMethod.lock();
+--- a/src/managers/input/InputMethodRelay.cpp
++++ b/src/managers/input/InputMethodRelay.cpp
+@@ -1,3 +1,4 @@
++#include "../../anland/Bridge.hpp"
+ #include "InputMethodRelay.hpp"
+ #include "../../desktop/state/FocusState.hpp"
+ #include "../../event/EventBus.hpp"
+@@ -23,6 +24,7 @@
+         return;
+     }
+ 
++    Anland::resetTextInput(); // Android yields before Linux IME takes ownership.
+     m_inputMethod = pIME;
+ 
+     m_listeners.commitIME = pIME->m_events.onCommit.listen([this] {
+@@ -64,6 +66,11 @@
+         else
+             ti->onEnabled(Desktop::focusState()->surface());
+     }
++
++    // Anland can enable an editor before any Linux IME exists. A same-surface
++    // enter is a no-op, so explicitly hand its current state to the new IME.
++    if (const auto input = getFocusedTextInput(); input && input->isV3() && input->isEnabled())
++        activateIME(input);
+ }
+ 
+ void CInputMethodRelay::removePopup(CInputPopup* pPopup) {
+@@ -131,9 +138,6 @@
+ }
+ 
+ void CInputMethodRelay::onKeyboardFocus(SP<CWLSurfaceResource> pSurface) {
+-    if (m_inputMethod.expired())
+-        return;
+-
+     if (pSurface == m_lastKbFocus)
+         return;
+ 
+--- a/src/managers/input/TextInput.cpp
++++ b/src/managers/input/TextInput.cpp
+@@ -1,3 +1,4 @@
++#include "../../anland/Bridge.hpp"
+ #include "TextInput.hpp"
+ #include "InputManager.hpp"
+ #include "../../protocols/TextInputV1.hpp"
+@@ -38,6 +39,7 @@ void CTextInput::initCallbacks() {
+ }
+ 
+ void CTextInput::destroy() {
++    Anland::resetTextInput(); // Cancel commits owned by a stale editor.
+     m_listeners.surfaceUnmap.reset();
+     m_listeners.surfaceDestroy.reset();
+ 
+@@ -50,10 +52,6 @@ void CTextInput::destroy() {
+ void CTextInput::onEnabled(SP<CWLSurfaceResource> surfV1) {
+     Log::logger->log(Log::DEBUG, "TI ENABLE");
+ 
+-    if (g_pInputManager->m_relay.m_inputMethod.expired()) {
+-        // Log::logger->log(Log::WARN,  "Enabling TextInput on no IME!");
+-        return;
+-    }
+ 
+     // v1 only, map surface to PTI
+     if (!isV3()) {
+@@ -63,14 +61,11 @@ void CTextInput::onEnabled(SP<CWLSurface
+         enter(surfV1);
+     }
+ 
+-    g_pInputManager->m_relay.activateIME(this);
++    if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.activateIME(this);
+ }
+ 
+ void CTextInput::onDisabled() {
+-    if (g_pInputManager->m_relay.m_inputMethod.expired()) {
+-        //  Log::logger->log(Log::WARN,  "Disabling TextInput on no IME!");
+-        return;
+-    }
++    Anland::resetTextInput(); // Cancel commits owned by a stale editor.
+ 
+     if (!isV3())
+         leave();
+@@ -85,10 +80,11 @@ void CTextInput::onDisabled() {
+     if (!PFOCUSEDTI || PFOCUSEDTI != this)
+         return;
+ 
+-    g_pInputManager->m_relay.deactivateIME(this);
++    if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.deactivateIME(this);
+ }
+ 
+ void CTextInput::onReset() {
++    Anland::resetTextInput(); // Cancel commits owned by a stale editor.
+     if (g_pInputManager->m_relay.m_inputMethod.expired())
+         return;
+ 
+@@ -100,21 +96,17 @@ void CTextInput::onReset() {
+         return;
+ 
+     g_pInputManager->m_relay.deactivateIME(this, false);
+-    g_pInputManager->m_relay.activateIME(this);
++    if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.activateIME(this);
+ }
+ 
+ void CTextInput::onCommit() {
+-    if (g_pInputManager->m_relay.m_inputMethod.expired()) {
+-        //   Log::logger->log(Log::WARN,  "Committing TextInput on no IME!");
+-        return;
+-    }
+ 
+     if (!(isV3() ? m_v3Input->m_current.enabled.value : m_v1Input->m_active)) {
+         Log::logger->log(Log::WARN, "Disabled TextInput commit?");
+         return;
+     }
+ 
+-    g_pInputManager->m_relay.commitIMEState(this);
++    if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.commitIMEState(this);
+ }
+ 
+ void CTextInput::setFocusedSurface(SP<CWLSurfaceResource> pSurface) {
+@@ -146,7 +138,7 @@ void CTextInput::setFocusedSurface(SP<CW
+         }
+ 
+         if (!g_pInputManager->m_relay.getFocusedTextInput())
+-            g_pInputManager->m_relay.deactivateIME(this);
++            if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.deactivateIME(this);
+     });
+ 
+     m_listeners.surfaceDestroy = pSurface->m_events.destroy.listen([this] {
+@@ -166,7 +158,7 @@ void CTextInput::setFocusedSurface(SP<CW
+         }
+ 
+         if (!g_pInputManager->m_relay.getFocusedTextInput())
+-            g_pInputManager->m_relay.deactivateIME(this);
++            if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.deactivateIME(this);
+     });
+ }
+ 
+@@ -217,7 +209,7 @@ void CTextInput::leave() {
+ 
+     setFocusedSurface(nullptr);
+ 
+-    g_pInputManager->m_relay.deactivateIME(this);
++    if (!g_pInputManager->m_relay.m_inputMethod.expired()) g_pInputManager->m_relay.deactivateIME(this);
+ }
+ 
+ SP<CWLSurfaceResource> CTextInput::focusedSurface() {
+@@ -307,3 +299,10 @@ CBox CTextInput::cursorBox() {
+ bool CTextInput::isEnabled() {
+     return isV3() ? m_v3Input->m_current.enabled.value : true;
+ }
++
++void CTextInput::commitStringFromConsumer(const std::string& text) {
++    if (!isEnabled() || text.empty() || text.size() > 4000 || text.find(char(0)) != std::string::npos ||
++        focusedSurface() != Desktop::focusState()->surface() || !g_pInputManager->m_relay.m_inputMethod.expired()) return;
++    if (isV3()) { if (auto input = m_v3Input.lock()) { input->commitString(text); input->sendDone(); } }
++    else if (auto input = m_v1Input.lock(); input && input->m_active) input->commitString(input->m_serial, text.c_str());
++}
+--- a/src/managers/input/TextInput.hpp
++++ b/src/managers/input/TextInput.hpp
+@@ -30,6 +30,7 @@ class CTextInput {
+     void                   onReset();
+ 
+     bool                   isEnabled();
++    void                   commitStringFromConsumer(const std::string& text);
+     bool                   hasCursorRectangle();
+     CBox                   cursorBox();
+ 
+--- a/src/managers/SeatManager.cpp
++++ b/src/managers/SeatManager.cpp
+@@ -1,3 +1,4 @@
++#include "../anland/Bridge.hpp"
+ #include "SeatManager.hpp"
+ #include "../protocols/core/Seat.hpp"
+ #include "../protocols/core/DataDevice.hpp"
+@@ -238,6 +239,7 @@
+     m_state.dndPointerFocus.reset();
+     m_state.pointerFocusResource.reset();
+     m_state.pointerFocus = surf;
++    Anland::syncPointerCapture();
+ 
+     if (!surf) {
+         sendPointerFrame(lastPointerFocusResource);
+@@ -570,6 +572,7 @@ void CSeatManager::setCurrentSelection(SP<IDataSource> source) {
+         PROTO::extDataDevice->setSelection(source, false);
+     }
+ 
++    Anland::selectionChanged(source);
+     m_events.setSelection.emit();
+ }
+ 
+@@ -603,6 +606,7 @@
+ }
+ 
+ void CSeatManager::setGrab(SP<CSeatGrab> grab) {
++    if (grab) Anland::resetTextInput();
+     if (m_seatGrab) {
+         auto oldGrab = m_seatGrab;
+ 
+--- a/src/protocols/core/Seat.cpp
++++ b/src/protocols/core/Seat.cpp
+@@ -1,3 +1,4 @@
++#include "../../anland/Bridge.hpp"
+ #include "Seat.hpp"
+ #include "Compositor.hpp"
+ #include "DataDevice.hpp"
+@@ -356,6 +357,7 @@ bool CWLKeyboardResource::good() {
+ }
+ 
+ void CWLKeyboardResource::sendKeymap(SP<IKeyboard> keyboard) {
++    keyboard = Anland::keyboardForClient(keyboard, m_resource->client());
+     if (!keyboard)
+         return;
+ 
+@@ -421,6 +423,7 @@ void CWLKeyboardResource::sendKey(uint32
+ }
+ 
+ void CWLKeyboardResource::sendMods(uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) {
++    if (Anland::keyboardForClient(nullptr, m_resource->client())) depressed = latched = locked = group = 0;
+     if (!m_owner || !m_currentSurface)
+         return;
+ 
+@@ -431,6 +434,7 @@ void CWLKeyboardResource::sendMods(uint3
+ }
+ 
+ void CWLKeyboardResource::repeatInfo(uint32_t rate, uint32_t delayMs) {
++    if (Anland::keyboardForClient(nullptr, m_resource->client())) rate = delayMs = 0;
+     if (!m_owner || m_resource->version() < 4 || (rate == m_lastRate && delayMs == m_lastDelayMs))
+         return;
+     m_lastRate    = rate;
+--- a/src/protocols/PointerConstraints.cpp
++++ b/src/protocols/PointerConstraints.cpp
+@@ -1,3 +1,4 @@
++#include "../anland/Bridge.hpp"
+ #include "PointerConstraints.hpp"
+ #include "../desktop/view/WLSurface.hpp"
+ #include "../desktop/state/FocusState.hpp"
+@@ -70,6 +71,8 @@ CPointerConstraint::CPointerConstraint(S
+ }
+ 
+ CPointerConstraint::~CPointerConstraint() {
++    m_active = false;
++    Anland::syncPointerCapture();
+     std::erase_if(g_pInputManager->m_constraints, [this](const auto& c) {
+         const auto SHP = c.lock();
+         return !SHP || SHP.get() == this;
+@@ -110,6 +113,7 @@ void CPointerConstraint::deactivate() {
+         m_resourceConfined->sendUnconfined();
+ 
+     m_active = false;
++    Anland::syncPointerCapture();
+ 
+     if (m_lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT) {
+         m_dead = true;
+@@ -140,6 +144,7 @@ void CPointerConstraint::activate() {
+         m_resourceConfined->sendConfined();
+ 
+     m_active = true;
++    Anland::syncPointerCapture();
+ 
+     g_pInputManager->simulateMouseMovement();
+ }
+--- a/src/protocols/PresentationTime.cpp
++++ b/src/protocols/PresentationTime.cpp
+@@ -5,6 +5,7 @@
+ #include "core/Compositor.hpp"
+ #include "core/Output.hpp"
+ #include <aquamarine/output/Output.hpp>
++#include <aquamarine/backend/Backend.hpp>
+ 
+ CQueuedPresentationData::CQueuedPresentationData(SP<CWLSurfaceResource> surf) : m_surface(surf) {
+     ;
+@@ -53,7 +54,7 @@ void CPresentationFeedback::sendQueued(W
+ 
+     if (data->m_wasPresented) {
+         uint32_t flags = 0;
+-        if (!data->m_monitor->m_tearingState.activelyTearing)
++        if (!data->m_monitor->m_tearingState.activelyTearing && data->m_monitor->m_output->getBackend()->type() != Aquamarine::AQ_BACKEND_ANLAND)
+             flags |= WP_PRESENTATION_FEEDBACK_KIND_VSYNC;
+         if (data->m_zeroCopy)
+             flags |= WP_PRESENTATION_FEEDBACK_KIND_ZERO_COPY;
+@@ -150,3 +151,18 @@ void CPresentationProtocol::queueData(UP
+ bool CPresentationProtocol::hasPendingFeedbacks() const {
+     return !m_feedbacks.empty();
+ }
++
++
++void CPresentationProtocol::onDiscarded(PHLMONITOR monitor) {
++    for (const auto& data : m_queue) {
++        if (data->m_monitor != monitor) continue;
++        data->discarded();
++        for (const auto& feedback : m_feedbacks) {
++            if (feedback->m_done || feedback->m_surface != data->m_surface) continue;
++            feedback->m_resource->sendDiscarded();
++            feedback->m_done = true;
++        }
++    }
++    std::erase_if(m_feedbacks, [](const auto& item) { return !item->m_surface || item->m_done; });
++    std::erase_if(m_queue, [monitor](const auto& item) { return !item->m_surface || item->m_monitor == monitor; });
++}
+--- a/src/protocols/PresentationTime.hpp
++++ b/src/protocols/PresentationTime.hpp
+@@ -54,6 +54,7 @@ class CPresentationProtocol : public IWa
+ 
+     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+ 
++    void         onDiscarded(PHLMONITOR pMonitor);
+     void         onPresented(PHLMONITOR pMonitor, const timespec& when, uint32_t untilRefreshNs, uint64_t seq, uint32_t reportedFlags);
+     void         queueData(UP<CQueuedPresentationData>&& data);
+     bool         hasPendingFeedbacks() const;
+--- a/src/render/gl/GLRenderbuffer.cpp
++++ b/src/render/gl/GLRenderbuffer.cpp
+@@ -19,8 +19,12 @@ CGLRenderbuffer::~CGLRenderbuffer() {
+ 
+     g_pHyprOpenGL->makeEGLCurrent();
+ 
+-    unbind();
+-    m_framebuffer->release();
++    // EGL import can fail before framebuffer construction. Still retire any
++    // partially-created image/RBO below, but never dereference a missing FB.
++    if (m_framebuffer) {
++        unbind();
++        m_framebuffer->release();
++    }
+ 
+     if (m_rbo)
+         glDeleteRenderbuffers(1, &m_rbo);
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -1,3 +1,4 @@
++#include "../anland/Bridge.hpp"
+ #include "Renderer.hpp"
+ #include "../Compositor.hpp"
+ #include "../helpers/math/Math.hpp"
+@@ -1721,6 +1722,8 @@ bool IHyprRenderer::beginRender(PHLMONIT
+ 
+     if (!initRenderBuffer(m_currentBuffer, pMonitor->m_output->state->state().drmFormat)) {
+         Log::logger->log(Log::ERR, "failed to start a render pass for output {}, no RBO could be obtained", pMonitor->m_name);
++        if (m_renderMode == RENDER_MODE_NORMAL)
++            Anland::renderImportFailed(pMonitor->m_output, m_currentBuffer);
+         return false;
+     }
+ 
+--- a/start/CMakeLists.txt
++++ b/start/CMakeLists.txt
+@@ -11,21 +11,8 @@ find_package(PkgConfig REQUIRED)
+ 
+ pkg_check_modules(starthyprland_deps REQUIRED IMPORTED_TARGET hyprutils>=0.10.3)
+ 
+-find_package(glaze 7...<8 QUIET)
+-if (NOT glaze_FOUND)
+-    set(GLAZE_VERSION v7.2.0)
+-    message(STATUS "start: glaze dependency not found, retrieving ${GLAZE_VERSION} with FetchContent")
+-    include(FetchContent)
+-    FetchContent_Declare(
+-        glaze
+-        GIT_REPOSITORY https://github.com/stephenberry/glaze.git
+-        GIT_TAG ${GLAZE_VERSION}
+-        GIT_SHALLOW TRUE
+-        EXCLUDE_FROM_ALL
+-    )
+-    FetchContent_MakeAvailable(glaze)
+-endif()
+-
++# Debian already supplies the headers. Never download at configure time.
++find_package(glaze REQUIRED)
+ file(GLOB_RECURSE SRCFILES CONFIGURE_DEPENDS "src/*.cpp")
+ 
+ add_executable(start-hyprland ${SRCFILES})

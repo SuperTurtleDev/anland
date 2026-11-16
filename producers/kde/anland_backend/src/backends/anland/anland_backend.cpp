@@ -70,6 +70,7 @@ static const int s_reconnectIntervalMs = 200;
  * backend does), then the standard render node — which on the kgsl/turnip stack
  * is the msm node exposed at /dev/dri/renderD128.
  */
+#ifndef ANLAND_KWIN_68
 #ifdef ANLAND_KWIN_67
 using AnlandRenderDevice = RenderDevice;
 #else
@@ -104,6 +105,7 @@ static std::unique_ptr<AnlandRenderDevice> openRenderDevice()
 
     return AnlandRenderDevice::open(QStringLiteral("/dev/dri/renderD128"));
 }
+#endif
 
 static void detachAudioBeforeConsumerRelease(void *)
 {
@@ -126,9 +128,10 @@ AnlandBackend::~AnlandBackend()
     if (m_reconnectTimer) {
         m_reconnectTimer->stop();
     }
+    releaseTabletTools();
+    m_inputDevice.reset();
     // m_outputs are QObject children of this backend; ~QObject deletes them.
     m_outputs.clear();
-    m_inputDevice.reset();
     // The presentation facade owns the scene/device. DE code only borrows them.
     if (m_presentBackend) {
         anland_de_backend_destroy(m_presentBackend);
@@ -211,6 +214,7 @@ bool AnlandBackend::initialize()
         return false;
     }
 
+#ifndef ANLAND_KWIN_68
     // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
     // setup; without a real device it segfaults. Open one up front.
 #ifdef ANLAND_KWIN_67
@@ -223,6 +227,7 @@ bool AnlandBackend::initialize()
         qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
         return false;
     }
+#endif
 
     m_inputDevice = std::make_unique<AnlandInputDevice>();
 
@@ -289,6 +294,13 @@ bool AnlandBackend::initialize()
     return true;
 }
 
+#ifdef ANLAND_KWIN_68
+std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend(RenderDevice *device)
+{
+    // KWin's GPU manager owns and selects the render device starting with 6.8.
+    return std::make_unique<AnlandEglBackend>(this, device);
+}
+#else
 #ifdef ANLAND_KWIN_66
 std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend()
 #else
@@ -297,6 +309,7 @@ std::unique_ptr<OpenGLBackend> AnlandBackend::createOpenGLBackend()
 {
     return std::make_unique<AnlandEglBackend>(this);
 }
+#endif
 
 std::unique_ptr<InputBackend> AnlandBackend::createInputBackend()
 {
@@ -324,6 +337,7 @@ Outputs AnlandBackend::outputs() const
     return ret;
 }
 
+#ifndef ANLAND_KWIN_68
 EglDisplay *AnlandBackend::sceneEglDisplayObject() const
 {
 #ifdef ANLAND_KWIN_67
@@ -346,6 +360,7 @@ void AnlandBackend::setEglDisplay(std::unique_ptr<EglDisplay> &&display)
 {
     m_eglDisplay = std::move(display);
 }
+#endif
 #endif
 
 bool AnlandBackend::presentFrame(int fenceFd)
@@ -569,6 +584,36 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
         return;
     }
 
+    if (anland_tablet_is_event(ev.type)) {
+        anland_tablet_sample previous{};
+        anland_tablet_sample sample{};
+        const int result = anland_tablet_feed(&m_tabletAssembler, &ev, &previous, &sample);
+        if (result < 0) {
+            releaseTabletTools();
+            qCWarning(KWIN_ANLAND) << "invalid native tablet event, dropping consumer session";
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
+        } else if (result == 1) {
+            const QPointF position = m_outputs.isEmpty()
+                ? QPointF(sample.x, sample.y)
+                : mapInputToLogical(QPointF(sample.x, sample.y));
+            m_inputDevice->tabletFrame(previous, sample, position);
+        }
+        return;
+    }
+
+    if (ev.type == ANLAND_DEVICE_IN_CLIPBOARD || ev.type == ANLAND_DEVICE_IN_TEXT_INPUT) {
+        const uint32_t size = ev.type == ANLAND_DEVICE_IN_CLIPBOARD ? ev.clipboard.size : ev.text_input.size;
+        if (size > ANLAND_DEVICE_MAX_PAYLOAD_SIZE) {
+            // Reject before allocating or narrowing to QByteArray's length type.
+            // The unread payload belongs to this session; never parse it as input.
+            qCWarning(KWIN_ANLAND) << "oversized input payload, dropping session:" << size;
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
+            return;
+        }
+    }
+
     switch (ev.type) {
     case ANLAND_DEVICE_IN_PTR_MOTION: {
         const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
@@ -633,28 +678,49 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
         }
         break;
     }
-    case ANLAND_DEVICE_IN_RESOURCE: {
+    case ANLAND_DEVICE_IN_RESOURCE:
+    case ANLAND_DEVICE_IN_RESOURCE_INVALID: {
         // The consumer is handing back the fds for a service we requested. The fdnum
         // fds follow as a separate DATA_MSG_INPUT_EXTEND_FDS message; receive them now
         // before the next poll_input_event() and route them to the owning engine.
         const uint32_t service = ev.resource.type;
         const uint32_t fdnum = ev.resource.fdnum;
         constexpr int kMaxFds = 1 + 8; // ctrl + up to MAX_CAMERAS streams
-        if (fdnum == 0 || fdnum > kMaxFds) {
+        if (fdnum == 0) {
+            if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+                anland_camera_clear();
+            }
+            break;
+        }
+        if (fdnum > kMaxFds) {
+            qCWarning(KWIN_ANLAND) << "oversized resource response, dropping session:" << fdnum;
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
             break;
         }
         int fds[kMaxFds];
         int got = 0;
         if (anland_device_read_fds(m_device, fds, static_cast<int>(fdnum), &got, 5000) != 1
-            || got < static_cast<int>(fdnum)) {
+            || got != static_cast<int>(fdnum)) {
             for (int i = 0; i < got; i++) {
                 ::close(fds[i]);
             }
+            if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+                anland_camera_clear();
+            }
+            qCWarning(KWIN_ANLAND) << "resource fd count mismatch, dropping session";
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
             break;
         }
-        if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+        if (ev.type == ANLAND_DEVICE_IN_RESOURCE && service == ANLAND_DEVICE_SERVICE_CAMERA && got >= 2) {
             // fds[0] = shared control socket, fds[1..] = per-camera stream sockets.
             anland_camera_set_resources(fds[0], &fds[1], got - 1);
+        } else if (service == ANLAND_DEVICE_SERVICE_CAMERA) {
+            for (int i = 0; i < got; i++) {
+                ::close(fds[i]);
+            }
+            anland_camera_clear();
         } else {
             for (int i = 0; i < got; i++) {
                 ::close(fds[i]);
@@ -702,6 +768,7 @@ void AnlandBackend::enterFallback()
     if (m_inputDevice) {
         m_inputDevice->touchCancel();
     }
+    releaseTabletTools();
 
     // A frame may be in flight awaiting a buffer-ready that will never come now;
     // fail it so the RenderLoop's frame accounting does not stall.
@@ -738,6 +805,23 @@ void AnlandBackend::enterFallback()
 
     if (m_reconnectTimer) {
         m_reconnectTimer->start();
+    }
+}
+
+void AnlandBackend::releaseTabletTools()
+{
+    unsigned cursor = 0;
+    anland_tablet_sample previous{};
+    anland_tablet_sample sample{};
+
+    while (anland_tablet_release_next(&m_tabletAssembler, &cursor, &previous, &sample)) {
+        if (!m_inputDevice) {
+            continue;
+        }
+        const QPointF position = m_outputs.isEmpty()
+            ? QPointF(sample.x, sample.y)
+            : mapInputToLogical(QPointF(sample.x, sample.y));
+        m_inputDevice->tabletFrame(previous, sample, position);
     }
 }
 
@@ -867,12 +951,23 @@ void AnlandBackend::updateMouseCaptureVar()
     if (surface != m_captureMouseSurface.data()) {
         QObject::disconnect(m_captureMouseSurfaceConn);
         m_captureMouseSurfaceConn = QMetaObject::Connection();
+#ifdef ANLAND_KWIN_68
+        QObject::disconnect(m_captureMouseSurfaceConfinedConn);
+        m_captureMouseSurfaceConfinedConn = QMetaObject::Connection();
+#endif
         m_captureMouseSurface = surface;
         if (surface) {
             // Fires when a lock is installed on / removed from this surface, so we
             // pick up a freshly created zwp_locked_pointer_v1 (and its later removal).
+#ifdef ANLAND_KWIN_68
+            m_captureMouseSurfaceConn = connect(surface, &SurfaceInterface::lockedPointerRegionChanged,
+                                                this, &AnlandBackend::updateMouseCaptureVar);
+            m_captureMouseSurfaceConfinedConn = connect(surface, &SurfaceInterface::confinedPointerRegionChanged,
+                                                        this, &AnlandBackend::updateMouseCaptureVar);
+#else
             m_captureMouseSurfaceConn = connect(surface, &SurfaceInterface::pointerConstraintsChanged,
                                                 this, &AnlandBackend::updateMouseCaptureVar);
+#endif
         }
     }
 
@@ -1183,7 +1278,11 @@ void AnlandBackend::sendTextInputToKWin(const QByteArray &text)
         // path. It submits through text-input v1/v2/v3 when available, and falls
         // back to keysym -> virtual keyboard events when the client has no
         // text-input protocol enabled.
+#ifdef ANLAND_KWIN_68
+        inputMethod->sendText(string);
+#else
         inputMethod->commitText(string);
+#endif
     }
 }
 

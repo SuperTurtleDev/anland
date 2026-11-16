@@ -109,8 +109,5 @@ android {
 }
 
 dependencies {
-    // The pure-logic pieces (Gold status parsing, node selection, source
-    // fallback, the key ledgers) are deliberately Android-free so they can be
-    // tested on the JVM without Robolectric.
     testImplementation 'junit:junit:4.13.2'
 }

@@ -1,0 +1,129 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -70,7 +70,8 @@
+   PUBLIC "./include"
+   PRIVATE "./src" "./src/include" "./protocols" "${CMAKE_BINARY_DIR}")
+ set_target_properties(aquamarine PROPERTIES VERSION ${AQUAMARINE_VERSION}
+-                                            SOVERSION 14)
++                                            SOVERSION 14
++                                            OUTPUT_NAME aquamarine-anland)
+ target_link_libraries(aquamarine OpenGL::EGL OpenGL::OpenGL PkgConfig::deps Threads::Threads)
+ 
+ check_include_file("sys/timerfd.h" HAS_TIMERFD)
+@@ -172,4 +173,8 @@
+ install(TARGETS aquamarine)
+ install(DIRECTORY "include/aquamarine" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ install(FILES ${CMAKE_BINARY_DIR}/aquamarine.pc
+-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
++        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
++        RENAME aquamarine-anland.pc)
++
++# Generated self-contained public overlay: never link a second producer copy.
++include(src/backend/anland/anland.cmake)
+--- a/aquamarine.pc.in
++++ b/aquamarine.pc.in
+@@ -2,9 +2,9 @@
+ includedir=@INCLUDE@
+ libdir=@LIBDIR@
+ 
+-Name: aquamarine
++Name: aquamarine-anland
+ URL: https://github.com/hyprwm/aquamarine
+ Description: A very light linux rendering backend library
+ Version: @AQUAMARINE_VERSION@
+ Cflags: -I${includedir}
+-Libs: -L${libdir} -laquamarine
++Libs: -L${libdir} -laquamarine-anland
+--- a/include/aquamarine/allocator/Allocator.hpp
++++ b/include/aquamarine/allocator/Allocator.hpp
+@@ -27,5 +27,7 @@
+         virtual int                                         drmFD()                                                                                                = 0;
+         virtual eAllocatorType                              type()                                                                                                 = 0;
+         virtual void                                        destroyBuffers();
++        virtual bool supportsBufferAge() { return true; }
++        virtual Hyprutils::Memory::CSharedPointer<IBuffer> nextBuffer(int* age) { return nullptr; }
+     };
+ };
+--- a/include/aquamarine/backend/Backend.hpp
++++ b/include/aquamarine/backend/Backend.hpp
+@@ -28,6 +28,7 @@
+         AQ_BACKEND_DRM,
+         AQ_BACKEND_HEADLESS,
+         AQ_BACKEND_NULL,
++        AQ_BACKEND_ANLAND,
+     };
+ 
+     enum eBackendGPUDriver : uint32_t {
+@@ -77,6 +78,7 @@
+     struct SPollFD {
+         int                       fd = -1;
+         std::function<void(void)> onSignal; /* call this when signaled */
++        uint32_t events = 1; // READABLE/WRITABLE mask
+     };
+ 
+     class IBackendImplementation {
+--- a/src/allocator/Swapchain.cpp
++++ b/src/allocator/Swapchain.cpp
+@@ -62,6 +62,9 @@
+ SP<IBuffer> Aquamarine::CSwapchain::next(int* age) {
+     if (!allocator || options.length <= 0)
+         return nullptr;
++
++    if (!allocator->supportsBufferAge())
++        return allocator->nextBuffer(age);
+ 
+     lastAcquired = (lastAcquired + 1) % options.length;
+ 
+--- a/src/backend/Backend.cpp
++++ b/src/backend/Backend.cpp
+@@ -3,6 +3,7 @@
+ #include <aquamarine/backend/Headless.hpp>
+ #include <aquamarine/backend/DRM.hpp>
+ #include <aquamarine/backend/Null.hpp>
++#include <aquamarine/backend/AnlandBackend.hpp>
+ #include <aquamarine/allocator/GBM.hpp>
+ #include <hyprutils/os/FileDescriptor.hpp>
+ #include <ranges>
+@@ -37,6 +38,7 @@
+ 
+ static const char* backendTypeToName(eBackendType type) {
+     switch (type) {
++        case AQ_BACKEND_ANLAND: return "anland";
+         case AQ_BACKEND_DRM: return "drm";
+         case AQ_BACKEND_HEADLESS: return "headless";
+         case AQ_BACKEND_WAYLAND: return "wayland";
+@@ -75,7 +77,11 @@
+     backend->log(AQ_LOG_DEBUG, "Creating an Aquamarine backend!");
+ 
+     for (auto const& b : backends) {
+-        if (b.backendType == AQ_BACKEND_WAYLAND) {
++        if (b.backendType == AQ_BACKEND_ANLAND) {
++            auto ref = SP<CAnlandBackend>(new CAnlandBackend(backend));
++            ref->self = ref;
++            backend->implementations.emplace_back(ref);
++        } else if (b.backendType == AQ_BACKEND_WAYLAND) {
+             auto ref = SP<CWaylandBackend>(new CWaylandBackend(backend));
+             backend->implementations.emplace_back(ref);
+             ref->self = ref;
+@@ -161,6 +167,7 @@
+ 
+     // TODO: obviously change this when (if) we add different allocators.
+     for (auto const& b : implementations) {
++        if (primaryAllocator) break;
+         if (b->drmFD() >= 0) {
+             auto fd = reopenDRMNode(b->drmFD());
+             if (fd < 0) {
+--- a/src/backend/anland/AnlandInput.cpp
++++ b/src/backend/anland/AnlandInput.cpp
+@@ -1,3 +1,4 @@
++#include <unistd.h>
+ #include <aquamarine/backend/AnlandBackend.hpp>
+ #include "AnlandOutput.hpp"
+ #include "AnlandInput.hpp"
+--- a/src/backend/anland/AnlandOutput.cpp
++++ b/src/backend/anland/AnlandOutput.cpp
+@@ -1,3 +1,4 @@
++#include <unistd.h>
+ #include "AnlandOutput.hpp"
+ #include <EGL/egl.h>
+ #include <EGL/eglext.h>

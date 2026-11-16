@@ -115,32 +115,28 @@ final class ImmersiveInputController {
     static final String KEY_AUTO_ENTER = "immersive_auto_enter";
 
     /**
-     * Enters immersive mode without a key press and without saying so.
-     *
-     * <p>Offered only for Gold keyboards. Touch, Android gestures and hardware
-     * buttons stay available, and the normal pause/lock teardown ends the grab.
-     *
-     * <p>Called on resume. Leaving and coming back is what re-arms it; the
-     * ordinary lifecycle teardown already ends the session on the way out.
+     * Attempts one automatic entry after the host has focus and a surface.
+     * False asks the host to retry: Gold may still be publishing its output, or
+     * the previous foreground session may still be releasing its helper.
+     * A submitted start is attempted only once; helper failures keep their normal
+     * diagnostics instead of producing a loop of root requests and toasts.
      */
-    void enterAutomatically() {
+    boolean enterAutomatically() {
         SharedPreferences prefs = prefs();
-        if (!prefs.getBoolean(ImmersiveMode.KEY_ENABLED, false))
-            return;
-        if (!prefs.getBoolean(KEY_AUTO_ENTER, false))
-            return;
         ImmersiveInputSource current = ImmersiveInputSource.read(prefs);
-        if (current != ImmersiveInputSource.EXISTING_UINPUT_BUS)
-            return;
-        // Silently, and without a message: this runs on every resume, and a
-        // toast each time would be noise about something the user did not ask
-        // for in that moment. The picker is where they find out.
-        if (!current.isAvailable(ctx))
-            return;
+        if (!AutomaticImmersiveEntry.enabledFor(
+                prefs.getBoolean(ImmersiveMode.KEY_ENABLED, false),
+                prefs.getBoolean(KEY_AUTO_ENTER, false), current))
+            return true;
+        if (direct.isStopping())
+            return false;
         if (isActive())
-            return;
+            return true;
+        if (!current.isAvailable(ctx))
+            return false;
         runningSource = current;
         direct.startWith(null, null, current);
+        return true;
     }
 
     ImmersiveInputSource source() {
@@ -153,6 +149,11 @@ final class ImmersiveInputController {
 
     boolean ownsGoldKeyboard() {
         return isActive() && runningSource.listensToGoldKeyboard();
+    }
+
+    /** Controllers in physical modes are already visible through desktop evdev. */
+    boolean usesDirectControllers() {
+        return isActive() && runningSource.takesDevices();
     }
 
     // ---- key routing -------------------------------------------------------
@@ -180,7 +181,7 @@ final class ImmersiveInputController {
             if (isActive()) {
                 stopSession();
             } else {
-                startSession(current);
+                startSession(current, direct.toggleScanCodeFor(event));
             }
         }
         return true;
@@ -189,7 +190,7 @@ final class ImmersiveInputController {
     /**
      * Start one helper with the selected source, then announce the session.
      */
-    private void startSession(ImmersiveInputSource source) {
+    private void startSession(ImmersiveInputSource source, int toggleScanCode) {
         // Checked again here, not just in the picker: the module can be removed
         // between choosing a source and using it, and a session that came up
         // with nothing to read from would look exactly like one that worked.
@@ -197,11 +198,11 @@ final class ImmersiveInputController {
             toast(R.string.immersive_source_unavailable);
             return;
         }
-        boolean started = source.takesDevices() ? startDirectNow(source)
-                : direct.startWith(null, null, source);
+        boolean started = source.takesDevices() ? startDirectNow(source, toggleScanCode)
+                : direct.startWith(null, null, source, toggleScanCode);
         if (!started)
             return;
-        toast(getString(R.string.immersive_entering_mode, sourceLabel(source)));
+        direct.announceWhenReady(getString(R.string.immersive_entering_mode, sourceLabel(source)));
     }
 
     /** The source's own name, the same words the picker lists it under. */
@@ -233,7 +234,7 @@ final class ImmersiveInputController {
      * on. The cache is refilled in the background instead, so the next press has
      * an answer without ever having paid for one here.
      */
-    private boolean startDirectNow(ImmersiveInputSource source) {
+    private boolean startDirectNow(ImmersiveInputSource source, int toggleScanCode) {
         SharedPreferences prefs = prefs();
         boolean automatic = ImmersiveInputSource.isAutomatic(prefs);
         Set<String> saved = ImmersiveInputSource.savedNodes(prefs);
@@ -274,7 +275,7 @@ final class ImmersiveInputController {
         // can still take Gold output. Keep the saved nonempty selection so the
         // helper does not interpret it as permission to auto-grab other nodes.
         boolean started = direct.startWith(selection.allFiltered ? saved : selection.selectedNodes,
-                selection.excludedNodes, source);
+                selection.excludedNodes, source, toggleScanCode);
 
         // Gold's answer for the next press, and for the settings page. Started
         // after the session is up so it cannot delay it.

@@ -1,0 +1,21 @@
+{
+  "niri": {
+    "method": "git",
+    "url": "https://github.com/niri-wm/niri.git",
+    "revision": "8ed0da44d974c32c6877d2f4630c314da0717ecb"
+  },
+  "smithay": {
+    "method": "git",
+    "url": "https://github.com/Smithay/smithay.git",
+    "revision": "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef"
+  },
+  "satellite": {
+    "method": "git",
+    "url": "https://github.com/Supreeeme/xwayland-satellite.git"
+  },
+  "patches": {
+    "niri.patch": "18b8a8deda908a227f11f7abcb82f48cea3de5195453fc7de071d0c8cbe4086f",
+    "smithay.patch": "d23e6ea89713aa98454fa8b63071b8abd2176bf7ede65c102c811590a33b6c63",
+    "xwayland.patch": "a71a000dbaa00ab122f7fa836e62c15c2bdf50d89803aa5d471210ed7515d41e"
+  }
+}

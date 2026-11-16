@@ -348,3 +348,17 @@ anland_present *anland_de_backend_present_object(anland_de_backend *backend)
 {
     return backend ? backend->present : NULL;
 }
+int anland_de_backend_get_writable_target(const anland_de_backend *backend,
+                                          anland_de_target_t *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!backend || !anland_present_renderable(backend->present) ||
+        anland_de_backend_get_target(backend, out) != 0) return -1;
+    anland_device *device = anland_present_device(backend->present);
+    if (!device || anland_device_current_fb_raw(device) != (int)out->index) {
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
+    return 0;
+}

@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
@@ -69,6 +71,14 @@ struct cam_stream_msg {
 
 #define MAX_CAMERAS 8
 #define RECONNECT_SECS 1
+#define CAM_MAX_DIM 16384U
+#define CAM_MAX_SLOT_BYTES ((uint64_t)CAM_MAX_DIM * CAM_MAX_DIM * 3 / 2)
+
+static bool valid_frame_size(uint32_t w, uint32_t h)
+{
+    return w > 0 && h > 0 && w <= CAM_MAX_DIM && h <= CAM_MAX_DIM &&
+           !(w & 1) && !(h & 1);
+}
 
 struct cam {
     struct anland_camera *owner;
@@ -238,7 +248,7 @@ static void on_process(void *data)
  * optimistically so this doesn't re-fire on every subsequent frame. */
 static void renegotiate_format(struct cam *cam, uint32_t w, uint32_t h, int fmt_code)
 {
-    if (!cam->node || w == 0 || h == 0)
+    if (!cam->node || !valid_frame_size(w, h))
         return;
     fprintf(stderr, "anland-camera: cam=%d renegotiate %ux%u/fmt%d -> %ux%u/fmt%d\n",
             cam->index, cam->fmt_w, cam->fmt_h, cam->fmt_code, w, h, fmt_code);
@@ -274,7 +284,20 @@ static void handle_stream_msg(struct cam *cam, const struct cam_stream_msg *m, i
         if (rfd < 0)
             return;
         size_t slot_bytes = m->a;
+        if (!slot_bytes || slot_bytes > CAM_MAX_SLOT_BYTES || slot_bytes > SIZE_MAX / CAMERA_SLOTS) {
+            close(rfd);
+            return;
+        }
         size_t total = (size_t)CAMERA_SLOTS * slot_bytes;
+        struct stat st;
+        if (fstat(rfd, &st) != 0) { close(rfd); return; }
+        /* memfd reports st_size; Android ashmem reports its size via ioctl. */
+        uint64_t backing = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+        if (!backing) {
+            const int ashmem_size = ioctl(rfd, _IO(0x77, 4)); /* ASHMEM_GET_SIZE */
+            if (ashmem_size > 0) backing = (uint64_t)ashmem_size;
+        }
+        if (backing < total) { close(rfd); return; }
         if (cam->shm)
             munmap(cam->shm, cam->shm_bytes);
         if (cam->shm_fd >= 0)
@@ -300,10 +323,16 @@ static void handle_stream_msg(struct cam *cam, const struct cam_stream_msg *m, i
         uint8_t slot = m->slot;
         uint32_t w = m->a, h = m->b;
         int fmt = m->fmt;
-        if (cam->shm && slot < CAMERA_SLOTS) {
+        if (slot >= CAMERA_SLOTS) return;
+        if (!valid_frame_size(w, h) ||
+            (fmt != CAM_FMT_I420 && fmt != CAM_FMT_NV12 && fmt != CAM_FMT_NV21) ||
+            !cam->shm || (uint64_t)w * h * 3 / 2 > cam->slot_bytes) {
+            cam->have_frame = false;
+            send_stream(cam, CAM_STREAM_DONE, slot);
+            return;
+        }
+        if (cam->shm) {
             size_t bytes = (size_t)w * h * 3 / 2;
-            if (bytes > cam->slot_bytes)
-                bytes = cam->slot_bytes;
             if (cam->frame_cap < bytes) {
                 uint8_t *nb = realloc(cam->frame, bytes);
                 if (nb) {
@@ -337,8 +366,14 @@ static void handle_stream_msg(struct cam *cam, const struct cam_stream_msg *m, i
 static void on_stream_readable(void *data, int fd, uint32_t mask)
 {
     struct cam *cam = data;
-    if (mask & (SPA_IO_ERR | SPA_IO_HUP))
+    if (fd != cam->stream_fd)
         return;
+    if (mask & (SPA_IO_ERR | SPA_IO_HUP)) {
+        /* Like the audio reader, detach on the loop thread and return without
+         * touching the destroyed I/O source again. Keep the virtual node alive. */
+        detach_fd(cam);
+        return;
+    }
     if (!(mask & SPA_IO_IN))
         return;
 
@@ -352,13 +387,36 @@ static void on_stream_readable(void *data, int fd, uint32_t mask)
         } cmsg;
         struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
                               .msg_control = cmsg.buf, .msg_controllen = sizeof(cmsg.buf) };
-        ssize_t n = recvmsg(fd, &msg, MSG_DONTWAIT);
-        if (n <= 0)
-            break;
-        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
-        if (c && c->cmsg_type == SCM_RIGHTS)
-            memcpy(&rfd, CMSG_DATA(c), sizeof(int));
-        if (n >= (ssize_t)sizeof(m))
+        ssize_t n = recvmsg(fd, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return;
+            detach_fd(cam);
+            return;
+        }
+        bool bad = msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC);
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+            if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
+            if (c->cmsg_len < CMSG_LEN(0)) { bad = true; break; }
+            const size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            for (size_t i = 0; i < count; ++i) {
+                int received;
+                memcpy(&received, (char*)CMSG_DATA(c) + i * sizeof(int), sizeof(int));
+                if (rfd < 0) rfd = received;
+                else { close(received); bad = true; }
+            }
+        }
+        if (n == 0) {
+            /* A zero-length SEQPACKET can still carry descriptors. Retire them
+             * before treating the closed/empty stream as disconnected. */
+            if (rfd >= 0)
+                close(rfd);
+            detach_fd(cam);
+            return;
+        }
+        if (!bad && n == (ssize_t)sizeof(m))
             handle_stream_msg(cam, &m, rfd);
         else if (rfd >= 0)
             close(rfd);
@@ -371,14 +429,16 @@ static void attach_fd(struct cam *cam, int fd)
 {
     struct pw_loop *loop = pw_thread_loop_get_loop(cam->owner->loop);
     if (cam->io) {
-        pw_loop_destroy_source(loop, cam->io);
+        struct spa_source *io = cam->io;
         cam->io = NULL;
+        pw_loop_destroy_source(loop, io);
     }
     if (cam->stream_fd >= 0)
         close(cam->stream_fd);
     cam->stream_fd = fd;
     unmap_shm(cam);                   /* re-requested on the new connection */
     cam->have_frame = false;          /* show blank until a fresh frame arrives */
+    cam->frame_size = 0;
     if (fd >= 0)
         cam->io = pw_loop_add_io(loop, fd, SPA_IO_IN, false, on_stream_readable, cam);
     update_recording(cam);            /* START + GET_SHM if an app is consuming */
@@ -444,10 +504,9 @@ static void on_param_changed(void *data, uint32_t id, const struct spa_pod *para
     spa_zero(raw);
     if (spa_format_video_raw_parse(param, &raw) < 0)
         return;
-    if (raw.size.width)
-        cam->fmt_w = raw.size.width;
-    if (raw.size.height)
-        cam->fmt_h = raw.size.height;
+    if (!valid_frame_size(raw.size.width, raw.size.height)) return;
+    cam->fmt_w = raw.size.width;
+    cam->fmt_h = raw.size.height;
 
     uint32_t frame_bytes = cam->fmt_w * cam->fmt_h * 3 / 2;
     fprintf(stderr, "anland-camera: cam=%d format negotiated %ux%u (%ub), declaring buffers\n",
@@ -636,21 +695,21 @@ static void on_reconnect_timer(void *data, uint64_t expirations)
 }
 
 /* Round-trip GET_INFO over the control socket to learn each camera's max sensor
- * resolution, used to seed the initial node format. Blocking with a short timeout;
- * called off the PipeWire loop thread (so it never stalls the RT loop). Fills
- * w[i]/h[i], left at 0 when unknown. */
+ * resolution, used to seed the initial node format. Best-effort nonblocking I/O
+ * with at most 10ms of poll waiting on the caller (possibly the WM thread).
+ * Fills w[i]/h[i], left at 0 when unknown; frames later supply the real size. */
 static void query_max_res(int ctrl_fd, uint32_t *w, uint32_t *h, int n)
 {
     struct camera_ctrl_msg req = { .type = CAMERA_CTRL_GET_INFO, .reserved = 0, .len = 0 };
-    if (send(ctrl_fd, &req, sizeof(req), MSG_NOSIGNAL) < 0)
+    if (send(ctrl_fd, &req, sizeof(req), MSG_NOSIGNAL | MSG_DONTWAIT) != (ssize_t)sizeof(req))
         return;
 
     struct pollfd pfd = { .fd = ctrl_fd, .events = POLLIN };
-    if (poll(&pfd, 1, 300) <= 0)
+    if (poll(&pfd, 1, 10) <= 0 || !(pfd.revents & POLLIN))
         return;
 
     uint8_t buf[sizeof(struct camera_ctrl_msg) + 1 + MAX_CAMERAS * 4];
-    ssize_t r = recv(ctrl_fd, buf, sizeof(buf), 0);
+    ssize_t r = recv(ctrl_fd, buf, sizeof(buf), MSG_DONTWAIT);
     if (r < (ssize_t)sizeof(struct camera_ctrl_msg))
         return;
     struct camera_ctrl_msg *hdr = (struct camera_ctrl_msg *)buf;
@@ -741,9 +800,9 @@ void anland_camera_set_resources(int ctrl_fd, const int *stream_fds, int num_cam
         cam->index = i;
         /* Seed a NEW node's format from the reported sensor max. For an existing node we
          * must not touch fmt_w/h -- it would desync on_process's stride from the node's
-         * live negotiated format. (No upper cap: we use the camera's real max; only a
-         * missing/zero reply leaves create_node's 720p default in place.) */
-        if (!cam->node && qw[i] >= 64 && qh[i] >= 64) {
+         * live negotiated format. Use only bounded, even YUV dimensions;
+         * an invalid/missing reply leaves create_node's 720p default in place. */
+        if (!cam->node && qw[i] >= 64 && qh[i] >= 64 && valid_frame_size(qw[i], qh[i])) {
             cam->fmt_w = qw[i];
             cam->fmt_h = qh[i];
         }

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# build.sh — build patched KWin RPMs (Fedora 43 / KWin 6.7.5).
+# build.sh — build patched KWin RPMs from the current Fedora SRPM.
 # BUILD_XWAYLAND=1 also rebuilds Xwayland; ANLAND_INSTALL=1 opts into installation.
 # ANLAND_LOCK_PACKAGES=1 explicitly opts into DNF exclusions after installation.
 # Default: JOBS=4, no package installation or compositor/session edits.
@@ -33,7 +33,7 @@ JOBS="${JOBS:-4}"
 ANLAND_INSTALL="${ANLAND_INSTALL:-0}"
 ANLAND_LOCK_PACKAGES="${ANLAND_LOCK_PACKAGES:-0}"
 BUILD_XWAYLAND="${BUILD_XWAYLAND:-0}"
-KWIN_SOURCE="${KWIN_SOURCE:-kwin-6.7.5-1.fc43}"
+KWIN_SOURCE="${KWIN_SOURCE:-kwin}"
 DNF_IGNORE_EXCLUDES_OPTS=(--setopt=exclude=)
 # The official Fedora container may not define this optional third-party repo;
 # DNF treats disabling an unknown repo ID as a fatal error.
@@ -75,15 +75,17 @@ dnf_lock_pkg() {
 
 build_pkg_rpm() {
     local src="$1" patch="$2" overlay_dir="$3" source="${4:-$1}"
-    local topdir="$WORKDIR/$src" download_dir
+    local download_dir topdir srpm source_name source_version source_release sourcepackage
     download_dir="$(mktemp -d "$WORKDIR/${src}-source.XXXXXX")" || die "mktemp failed"
 
     log "Installing build tools"
+    local dnf_plugin=dnf-plugins-core
+    command -v dnf5 >/dev/null 2>&1 && dnf_plugin=dnf5-plugins
     $SUDO dnf "${DNF_IGNORE_EXCLUDES_OPTS[@]}" install -y --setopt=install_weak_deps=False \
-        dnf-plugins-core rpmdevtools rpm-build patch tar xz ninja-build ccache \
+        "$dnf_plugin" rpmdevtools rpm-build patch tar xz ninja-build ccache \
         || die "build tools installation failed"
 
-    log "Fetching source for '$source'"
+    log "Fetching the current source for '$source'"
     local cached_srpm=""
     if [ "$src" = kwin ]; then
         cached_srpm="${KWIN_SRPM:-}"
@@ -98,12 +100,19 @@ build_pkg_rpm() {
             || die "dnf download --source $source failed"
     fi
 
-    local srpm
     local -a sources
     mapfile -t sources < <(find "$download_dir" -maxdepth 1 -name '*.src.rpm' -type f)
     [ "${#sources[@]}" -eq 1 ] || die "expected exactly one SRPM for $source"
     srpm="${sources[0]}"
     rpm -K "$srpm" || die "SRPM verification failed"
+    IFS='|' read -r source_name source_version source_release sourcepackage < <(
+        rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{SOURCEPACKAGE}\n' "$srpm"
+    ) || die "cannot inspect $srpm"
+    [ "$source_name" = "$src" ] && [ "$sourcepackage" = 1 ] \
+        || die "unexpected source package identity: $source_name-$source_version-$source_release"
+    LAST_BUILT_TOPDIR="$(mktemp -d "$WORKDIR/${src}-${source_version}-${source_release}.XXXXXX")" \
+        || die "cannot create SRPM build directory"
+    topdir="$LAST_BUILT_TOPDIR"
 
     log "Installing build dependencies for '$src'"
     $SUDO dnf "${DNF_IGNORE_EXCLUDES_OPTS[@]}" builddep -y "$srpm" \
@@ -111,13 +120,11 @@ build_pkg_rpm() {
 
     log "Unpacking SRPM: $srpm"
     mkdir -p "$topdir"/{SOURCES,SPECS,BUILD,BUILDROOT,RPMS,SRPMS} || die "mkdir failed"
-    rpm -ivh --define "_topdir $topdir" "$srpm" \
-        || die "rpm -ivh failed for $srpm"
+    rpm -ivh --define "_topdir $topdir" "$srpm" || die "rpm -ivh failed for $srpm"
 
     local spec="$topdir/SPECS/$src.spec"
     [ -f "$spec" ] || die "could not find $spec"
     log "Spec file: $spec"
-    # Only accept the layout reviewed for Fedora 43. Fail on a changed SRPM.
     if [ "$src" = kwin ]; then
         [ "$(grep -c '^%autosetup -p1$' "$spec")" = 1 ] || die "unsupported KWin %prep layout"
     else
@@ -136,25 +143,18 @@ build_pkg_rpm() {
         source_num=$(( ${source_num:-0} + 1 ))
         tar chf "$topdir/SOURCES/$overlay_tar" -C "$overlay_dir" . || die "packing overlay failed"
         sed -i "/^Source0:/a Source${source_num}: $overlay_tar" "$spec" || die "Source insertion failed"
-        # %autosetup already changed into the source root. RPM 6 adds another
-        # build-subdirectory level; do not reconstruct it from %{_builddir}.
         sed -i '/^%autosetup -p1$/a mkdir -p src/backends/anland \&\& tar xf %{_sourcedir}/anland-overlay.tar -C src/backends/anland' "$spec" || die "overlay insertion failed"
     fi
 
-    local first_source_line patch_num
-    first_source_line=$(grep -n "^Source0:" "$spec" | head -1 | cut -d: -f1)
-    if [ -n "$first_source_line" ]; then
-        # Fedora specs can already define Patch0 (Fedora 44 does), so append
-        # our patch at the next available numeric slot instead of colliding.
-        patch_num="$(sed -nE 's/^[[:space:]]*Patch[[:space:]]*([0-9]+)[[:space:]]*:.*/\1/p' "$spec" | sort -n | tail -n1)"
-        if [ -n "$patch_num" ]; then
-            patch_num=$((patch_num + 1))
-        else
-            patch_num=0
-        fi
-        log "Adding $patchbase as Patch$patch_num"
-        sed -i "${first_source_line}a Patch${patch_num}: $patchbase" "$spec"
-    fi
+    # Keep the distro patch series in %autosetup; apply Anland with GNU patch
+    # afterwards so git_am cannot require exact context for our patch.
+    local patch_source
+    patch_source="$(sed -nE 's/^[[:space:]]*Source([0-9]*):.*/\1/p' "$spec" | sort -n | tail -n1)"
+    patch_source=$(( ${patch_source:-0} + 1 ))
+    grep -q '^Source0:' "$spec" || die "missing Source0 in $spec"
+    sed -i "/^Source0:/a Source${patch_source}: $patchbase" "$spec" || die "patch source insertion failed"
+    sed -i "/^%autosetup/a patch --batch --forward --fuzz=2 --no-backup-if-mismatch -p1 < %{SOURCE${patch_source}}" "$spec" \
+        || die "patch application insertion failed"
 
     local rel_line
     rel_line="$(grep -m1 '^Release:' "$spec")"
@@ -174,16 +174,20 @@ build_pkg_rpm() {
     mapfile -t rpms < <(find "$topdir/RPMS" -name '*.rpm' -type f ! -name '*debug*' -newer "$stamp")
     [ "${#rpms[@]}" -gt 0 ] || die "no new .rpm produced for $src"
     printf '%s\n' "${rpms[@]}"
+    # Keep the public artifact layout stable for the package workflow.  The
+    # SRPM topdir has a random suffix and is an implementation detail; callers
+    # collect KWin packages from $WORKDIR/kwin/.
+    local artifact_dir="$WORKDIR/$src"
+    mkdir -p "$artifact_dir" || die "cannot create artifact directory"
     for rpm_file in "${rpms[@]}"; do
         rpm -K "$rpm_file" || die "RPM validation failed"
         cp "$rpm_file" "$topdir/" || die "RPM collection failed"
+        cp "$rpm_file" "$artifact_dir/" || die "RPM artifact collection failed"
     done
     sha256sum "${rpms[@]}" || die "hashing failed"
 
     if [ "$ANLAND_INSTALL" = 1 ]; then
         log "Installing built .rpm(s) for '$src' (explicitly requested)"
-        # dnf install may skip an RPM with an already installed identical NEVRA.
-        # Reinstall existing names so the newly built files are actually deployed.
         local -a installed_rpms=() fresh_rpms=()
         local rpm_file rpm_name
         for rpm_file in "${rpms[@]}"; do
@@ -196,22 +200,18 @@ build_pkg_rpm() {
             fi
         done
         if [ "${#fresh_rpms[@]}" -gt 0 ]; then
-            # One transaction keeps interdependent subpackages consistent.
-            $SUDO dnf "${DNF_IGNORE_EXCLUDES_OPTS[@]}" install -y "${rpms[@]}" \
+            $SUDO dnf "${DNF_IGNORE_EXCLUDES_OPTS[@]}" --setopt=excludepkgs= install -y "${rpms[@]}" \
                 || die "dnf install failed for $src"
         fi
         if [ "${#installed_rpms[@]}" -gt 0 ]; then
-            $SUDO dnf "${DNF_IGNORE_EXCLUDES_OPTS[@]}" reinstall -y "${installed_rpms[@]}" \
+            $SUDO dnf "${DNF_IGNORE_EXCLUDES_OPTS[@]}" --setopt=excludepkgs= reinstall -y "${installed_rpms[@]}" \
                 || die "dnf reinstall failed for $src"
         fi
-        if [ "$ANLAND_LOCK_PACKAGES" = 1 ]; then
-            dnf_lock_pkg "$src" || die "package locking failed"
-        fi
+        if [ "$ANLAND_LOCK_PACKAGES" = 1 ]; then dnf_lock_pkg "$src" || die "package locking failed"; fi
     else
         log "Build only: tools/build dependencies may change installed packages; DNF locks unchanged"
     fi
 }
-
 main() {
     [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
     mkdir -p "$WORKDIR" || die "cannot create WORKDIR"
@@ -231,7 +231,7 @@ main() {
         build_pkg_rpm xorg-x11-server-Xwayland "$xwl_patch" ""
         # Keep the historical artifact directory for explicit Xwayland builds.
         mkdir -p "$WORKDIR/xwayland" || die "mkdir failed"
-        find "$WORKDIR/xorg-x11-server-Xwayland" -maxdepth 1 -name '*.rpm' ! -name '*.src.*' -exec cp {} "$WORKDIR/xwayland/" \; || die "copy failed"
+        find "$LAST_BUILT_TOPDIR" -maxdepth 1 -name '*.rpm' ! -name '*.src.*' -exec cp {} "$WORKDIR/xwayland/" \; || die "copy failed"
     fi
 
     log "Done. Packages are under $WORKDIR/kwin/ (ANLAND_INSTALL=$ANLAND_INSTALL)."

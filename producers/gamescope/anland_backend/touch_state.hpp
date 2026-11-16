@@ -15,13 +15,15 @@ public:
         bool edge = false;
     };
 
-    Change down(int id, uint32_t button, bool trackpad = false) {
+    Change down(int id, uint32_t button, bool trackpad = false,
+                double sx = 1.0, double sy = 1.0,
+                double ox = 0.0, double oy = 0.0) {
         if (m_contacts.count(id))
             return {};
         bool held = false;
         for (const auto &contact : m_contacts)
             held |= contact.second.active && contact.second.button == button;
-        m_contacts.emplace(id, Contact{button, trackpad, true});
+        m_contacts.emplace(id, Contact{button, trackpad, true, sx, sy, ox, oy});
         return {true, button, button != 0 && button != Passthrough && !held};
     }
 
@@ -58,10 +60,22 @@ public:
         const auto it = m_contacts.find(id);
         return it != m_contacts.end() && it->second.trackpad;
     }
+    bool transform(int id, double &sx, double &sy, double &ox, double &oy) const {
+        const auto it = m_contacts.find(id);
+        if (it == m_contacts.end()) return false;
+        sx = it->second.sx; sy = it->second.sy;
+        ox = it->second.ox; oy = it->second.oy;
+        return true;
+    }
     int first() const { return m_contacts.begin()->first; }
     bool empty() const { return m_contacts.empty(); }
 
 private:
-    struct Contact { uint32_t button; bool trackpad; bool active; };
+    struct Contact {
+        uint32_t button;
+        bool trackpad;
+        bool active;
+        double sx, sy, ox, oy;
+    };
     std::map<int, Contact> m_contacts;
 };

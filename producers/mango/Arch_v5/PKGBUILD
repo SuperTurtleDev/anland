@@ -1,0 +1,137 @@
+# Run build.sh to resolve the checked local input archive.
+pkgname=mango-anland
+pkgver=0.17.5
+pkgrel=1
+pkgdesc='Mango compositor with Anland v5 and private patched wlroots/SceneFX'
+arch=(aarch64)
+url='https://github.com/DreamMaoMao/mango'
+license=(GPL-3.0-only MIT)
+depends=(bash glibc cairo pango 'pixman>=0.43' 'libdrm>=2.4.129' libinput seatd systemd-libs
+    'wayland>=1.24' 'libxkbcommon>=1.11' libxcb xcb-util-wm xcb-util-errors
+    mesa libglvnd libdisplay-info hwdata cjson libpipewire xorg-xwayland
+    xkeyboard-config procps-ng util-linux)
+makedepends=(base-devel patchelf cmake meson ninja pkgconf python git 'wayland-protocols>=1.47')
+optdepends=('mangobar: panel' 'xdg-desktop-portal-wlr: desktop portal')
+backup=(etc/mango-anland/config.conf)
+source=(
+    'mango::git+https://github.com/DreamMaoMao/mango.git'
+    'wlroots::git+https://gitlab.freedesktop.org/wlroots/wlroots.git#commit=d783533489e1f75d6886c2ab5c5960090ef268f8'
+    'scenefx::git+https://github.com/wlrfx/scenefx.git'
+    'anland-inputs.tar.gz'
+)
+
+pkgver() {
+    cd "$srcdir/mango"
+    local describe version commits hash
+    describe=$(git describe --tags --long --always)
+    describe=${describe#v}; describe=${describe#V}
+    if [[ $describe =~ ^([0-9]+\.[0-9]+(\.[0-9]+)?)(-([0-9]+)-g([0-9a-f]+))?$ ]]; then
+        version=${BASH_REMATCH[1]}; commits=${BASH_REMATCH[4]:-0}; hash=${BASH_REMATCH[5]:-}
+        if (( commits > 0 )); then printf '%s.r%s.g%s\n' "$version" "$commits" "$hash"; else printf '%s\n' "$version"; fi
+    else
+        printf '0.0.0.r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    fi
+}
+sha256sums=(
+    'SKIP'
+    'SKIP'
+    'SKIP'
+    '@INPUT_SHA256@'
+)
+
+_prefix=/usr/lib/mango-anland
+options=(!lto)
+_stage_env() {
+    export PATH="$srcdir/stage$_prefix/bin:$PATH"
+    export PKG_CONFIG_PATH="$srcdir/stage$_prefix/lib/pkgconfig:$srcdir/stage$_prefix/share/pkgconfig"
+    export CMAKE_PREFIX_PATH="$srcdir/stage$_prefix"
+    export LD_LIBRARY_PATH="$srcdir/stage$_prefix/lib"
+}
+_stage_pc() {
+    local file
+    while IFS= read -r -d '' file; do
+        sed -i "s|=\($_prefix\)|=$srcdir/stage\1|g" "$file"
+    done < <(find "$srcdir/stage$_prefix" -name '*.pc' -print0)
+}
+_cmake() {
+    local name=$1; shift
+    cmake -S "$srcdir/trees/$name" -B "$srcdir/build-$name" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$_prefix" \
+        -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_INCLUDEDIR=include \
+        -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DBUILD_TESTING=OFF \
+        -DCMAKE_BUILD_RPATH="$srcdir/stage$_prefix/lib" \
+        -DCMAKE_INSTALL_RPATH="$_prefix/lib" "$@"
+    cmake --build "$srcdir/build-$name" --parallel "${JOBS:-4}"
+    DESTDIR="$srcdir/stage" cmake --install "$srcdir/build-$name"
+    _stage_pc
+}
+_license() {
+    local file relative
+    install -Dm644 "$srcdir/anland-inputs/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/anland-LICENSE"
+    while IFS= read -r -d '' file; do
+        relative=${file#"$srcdir/trees/"}
+        install -Dm644 "$file" "$pkgdir/usr/share/licenses/$pkgname/$relative"
+    done < <(find -L "$srcdir/trees" -maxdepth 3 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print0)
+    install -Dm644 "$srcdir/anland-inputs/sources.json" "$pkgdir/usr/share/doc/$pkgname/sources.json"
+}
+
+prepare() {
+    mkdir -p "$srcdir/trees" "$srcdir/anland-inputs/public-build"
+    printf 'cmake_minimum_required(VERSION 3.19)\nproject(anland_public LANGUAGES C)\nadd_subdirectory(../libdisplay_producer producer)\n' > "$srcdir/anland-inputs/public-build/CMakeLists.txt"
+    for name in wlroots scenefx mango; do
+        [[ $(git -C "$srcdir/$name" rev-parse HEAD) =~ ^[0-9a-f]{40,64}$ ]] || return 1
+        patch --batch --forward --fuzz=2 --no-backup-if-mismatch -p1 \
+            -d "$srcdir/$name" -i "$srcdir/anland-inputs/patches/$name.patch" || return 1
+        ln -s "../$name" "$srcdir/trees/$name"
+    done
+    mkdir -p "$srcdir/mango/anland_backend"
+    cp -aL "$srcdir/anland-inputs/backend/." "$srcdir/mango/anland_backend/"
+    install -m755 "$srcdir/anland-inputs/startup.sh" "$srcdir/mango/scripts/mango-anland"
+}
+_meson() {
+    local name=$1; shift
+    meson setup "$srcdir/build-$name" "$srcdir/trees/$name" --prefix="$_prefix" \
+        --libdir=lib --buildtype=release --wrap-mode=nodownload "$@"
+    meson compile -C "$srcdir/build-$name" -j "${JOBS:-4}"
+    DESTDIR="$srcdir/stage" meson install -C "$srcdir/build-$name" --no-rebuild
+    _stage_pc
+}
+build() {
+    mkdir -p "$srcdir/stage"
+    _stage_env
+    cmake -S "$srcdir/anland-inputs/public-build" -B "$srcdir/build-public" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$_prefix" -DCMAKE_INSTALL_LIBDIR=lib
+    cmake --build "$srcdir/build-public" --parallel "${JOBS:-4}"
+    DESTDIR="$srcdir/stage" cmake --install "$srcdir/build-public"
+    _stage_pc
+    _meson wlroots -Dexamples=false -Dbackends=drm,libinput -Drenderers=gles2 \
+        -Dallocators=gbm -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled
+    _meson scenefx -Dexamples=false -Dcolor-management=disabled
+    _meson mango --sysconfdir=/etc/mango-anland -Danland=enabled -Dxwayland=enabled
+}
+package() {
+    DESTDIR="$pkgdir" cmake --install "$srcdir/build-public"
+    for name in wlroots scenefx mango; do DESTDIR="$pkgdir" meson install -C "$srcdir/build-$name" --no-rebuild; done
+    # Never ship the patch's legacy service/restart launcher.
+    rm -rf "$pkgdir$_prefix/lib/systemd" "$pkgdir$_prefix/share/wayland-sessions"
+    mv "$pkgdir/etc/mango-anland/mango/"* "$pkgdir/etc/mango-anland/"
+    rmdir "$pkgdir/etc/mango-anland/mango"
+    install -Dm755 "$srcdir/anland-inputs/startup.sh" "$pkgdir/usr/bin/mango-anland"
+    printf '#!/bin/sh\nexport LD_LIBRARY_PATH="%s/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec %s/bin/mmsg "$@"\n' "$_prefix" "$_prefix" > "$pkgdir/usr/bin/mmsg-anland"
+    chmod 755 "$pkgdir/usr/bin/mmsg-anland"
+    # Meson may embed staging build paths; set only the final private runtime directory.
+    while IFS= read -r -d '' file; do
+        if [[ $(head -c4 "$file") == $'\x7fELF' ]]; then patchelf --set-rpath "$_prefix/lib" "$file"; fi
+    done < <(find "$pkgdir$_prefix" -type f -print0)
+    _license
+    local file linkage
+    while IFS= read -r -d '' file; do
+        [[ $(head -c4 "$file") == $'\x7fELF' ]] || continue
+        readelf -h "$file" | grep -q 'Machine:.*AArch64' || return 1
+        linkage=$(env LD_LIBRARY_PATH="$pkgdir$_prefix/lib" ldd "$file") || return 1
+        [[ $linkage != *'not found'* ]] || { printf '%s\n' "$linkage" >&2; return 1; }
+        readelf -d "$file" | grep -E '(RPATH|RUNPATH)' | grep -F "$srcdir" && return 1
+        # Last grep normally returns 1 (no cache path), not a package failure.
+        :
+    done < <(find "$pkgdir$_prefix" -type f -print0)
+}
