@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="settings_short_label">Configurações</string>
-
     <!-- Titles / section headers -->
     <string name="settings_title">Configurações</string>
     <string name="section_virtual_keyboard">Tecla de Alternância do Teclado Virtual</string>
     <string name="section_connection">Conexão</string>
     <string name="section_resolution">Resolução da Tela</string>
     <string name="section_notification">Configuração da Notificação</string>
-
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ Voltar</string>
     <string name="cat_keyboard_title">Teclado e Teclas</string>
@@ -19,7 +17,6 @@
     <string name="cat_resolution_subtitle">Resolução de saída e presets</string>
     <string name="cat_general_title">Geral</string>
     <string name="cat_general_subtitle">Orientação da tela e notificação das configurações</string>
-
     <!-- Screen orientation -->
     <string name="section_orientation">Orientação da Tela</string>
     <string name="orientation_label">Forçar orientação da tela</string>
@@ -28,7 +25,6 @@
         <item>Forçar paisagem</item>
         <item>Forçar retrato</item>
     </string-array>
-
     <!-- Bind key -->
     <string name="bind_key_button">Mapear Tecla de Alternância do Teclado Virtual</string>
     <string name="raise_desktop_for_soft_keyboard">Elevar o desktop ao abrir o teclado virtual</string>
@@ -39,11 +35,12 @@
     <string name="status_current_no_scancode">Atual: %1$s — essa tecla não reporta um scan code, então o modo imersivo não pode usá-la. Mapeie uma tecla física como Aumentar Volume.</string>
     <string name="keycode_unknown">Keycode %1$d</string>
     <string name="scancode_unknown">Scan code %1$d</string>
-
     <!-- Immersive mode -->
     <string name="section_immersive">Modo Imersivo</string>
     <string name="immersive_switch">Ativar Modo Imersivo</string>
     <string name="immersive_hint">Envia toque, teclado e mouse diretamente para o desktop Linux, mantendo os gestos do Android fora do caminho. Precisa de root. Defina uma tecla de alternância abaixo: pressione uma vez para entrar e novamente para sair. O modo também termina quando você troca de app.</string>
+    <string name="immersive_oplus_refresh_rate_switch">Manter fixa a taxa de atualização em dispositivos OnePlus</string>
+    <string name="immersive_oplus_refresh_rate_hint">Evita quedas na taxa de atualização em alguns dispositivos OnePlus quando não são recebidos eventos de entrada.</string>
     <string name="immersive_hud_touch_switch">Tocar controles da HUD no modo imersivo</string>
     <string name="immersive_hud_touch_hint">Mantém as teclas, o direcional e o touchpad da HUD funcionando enquanto a tela está capturada. Desligue para enviar todo toque direto ao desktop, deixando a HUD apenas visível.</string>
     <string name="bind_immersive_key_button">Mapear Tecla do Modo Imersivo</string>
@@ -52,16 +49,58 @@
     <string name="immersive_failed">Não foi possível iniciar o modo imersivo: root foi negado ou está indisponível</string>
     <string name="immersive_no_devices">Não foi possível iniciar o modo imersivo: nenhum dispositivo de entrada pôde ser assumido</string>
     <string name="immersive_interrupted">Modo imersivo encerrado; a entrada voltou para o Android</string>
+    <string name="immersive_entering_mode">Modo imersivo ativado: %1$s</string>
+    <string name="immersive_gold_unknown">Não foi possível verificar quais dispositivos estão ocupados pelo Gold; iniciando sem reservar nenhum deles.</string>
+    <string name="immersive_selection_invalid">A seleção de dispositivos salva é inválida; corrija-a nas configurações de entrada imersiva.</string>
+    <string name="immersive_selection_filtered">Todos os dispositivos selecionados estão ocupados pelo Gold; não há dispositivos disponíveis para assumir.</string>
+    <!-- Immersive input sources -->
+    <string name="cat_immersive_title">Modo imersivo</string>
+    <string name="cat_immersive_subtitle">Controle de entrada em tela cheia, tecla de alternância e fonte de entrada</string>
+    <string name="immersive_inputs_title">Entrada imersiva</string>
+    <string name="immersive_inputs_subtitle">Escolha de onde o modo imersivo recebe a entrada</string>
+    <string name="section_immersive_inputs_source">Fonte de entrada</string>
+    <string name="section_immersive_inputs_direct">Dispositivos de eventos a assumir</string>
+    <string name="section_immersive_inputs_scope">O que este modo abrange</string>
+    <string name="immersive_inputs_direct_blurb">Atualmente: o Anland assume diretamente os dispositivos físicos de eventos, que ficam inacessíveis ao Android enquanto isso. Requer root.</string>
+    <string name="immersive_inputs_bus_hint">O Gold remapeia o teclado; o Anland assume exclusivamente sua saída e a envia diretamente ao desktop.</string>
+    <string name="immersive_inputs_combined_hint">O Anland assume o toque e os ponteiros junto com a saída do teclado remapeado pelo Gold.</string>
+    <string name="immersive_inputs_bus_scope">Requer root e o módulo Gold Keyboard Remaps. Todas as teclas remapeadas, incluindo Meta e atalhos do sistema, vão para o desktop durante a sessão. Toque, mouse e gestos do Android continuam disponíveis. Sair do aplicativo ou bloquear a tela libera o teclado.</string>
+    <string name="immersive_inputs_direct_hint">Somente os dispositivos marcados abaixo serão assumidos. Dispositivos que o Gold confirmou estar usando aparecem, mas não podem ser selecionados.</string>
+    <string name="immersive_inputs_auto">Escolher dispositivos automaticamente</string>
+    <string-array name="immersive_source_options">
+        <item>Anland assume os dispositivos (direto)</item>
+        <item>Teclado Gold diretamente para o desktop</item>
+        <item>Toque e ponteiros diretos + teclado Gold</item>
+    </string-array>
+    <string name="immersive_source_unavailable">Requer o módulo Gold Keyboard Remaps, que não está instalado ou em execução.</string>
+    <string name="immersive_auto_enter">Entrar automaticamente no modo imersivo</string>
+    <string name="immersive_auto_enter_hint">Envia automaticamente o teclado Gold para o desktop quando o aplicativo volta ao primeiro plano. Toque e gestos do Android continuam disponíveis.</string>
+    <string name="immersive_inputs_loading">Verificando dispositivos…</string>
+    <string name="immersive_inputs_found">Os dispositivos ocupados pelo Gold aparecem, mas não podem ser selecionados.</string>
+    <string name="immersive_inputs_unknown">Não foi possível identificar quais dispositivos estão sendo usados pelo Gold. Nenhum foi marcado como ocupado, mas não é possível garantir que estejam disponíveis.</string>
+    <string name="immersive_inputs_occupied">✕ %1$s — ocupado pelo Gold</string>
     <string name="immersive_inputs_system_power">✕ %1$s — mantido no Android para preservar o controle do botão liga/desliga</string>
-
+    <string name="device_class_keyboard">Teclado</string>
+    <string name="device_class_keys">Dispositivo de botões</string>
+    <string name="device_class_mouse">Mouse</string>
+    <string name="device_class_touchpad">Touchpad</string>
+    <string name="device_class_touchscreen">Tela sensível ao toque</string>
+    <string name="bus_usb">USB</string>
+    <string name="bus_bluetooth">Bluetooth</string>
+    <string name="bus_builtin">Integrado</string>
+    <string name="bus_virtual">Virtual</string>
+    <string name="bus_i2c">I2C</string>
+    <string name="bus_spi">SPI</string>
+    <string name="bus_other">Barramento %1$s</string>
+    <string name="immersive_inputs_remembered">Salvos: %1$s. Utilizáveis agora: %2$s.</string>
+    <string name="immersive_inputs_all_filtered">Todos os dispositivos salvos estão ocupados pelo Gold. O modo imersivo não iniciará até que isso mude; sua seleção foi mantida.</string>
+    <string name="immersive_inputs_none">Nenhum dispositivo de entrada encontrado.</string>
+    <string name="immersive_inputs_unavailable">Não foi possível listar os dispositivos de entrada: root negado ou indisponível.</string>
     <!-- Accessibility -->
     <string name="accessibility_switch">Interceptação das Teclas via Acessibilidade</string>
     <string name="accessibility_hint">Intercepta as teclas de função (Fn, F1-F12 etc.) via AccessibilityService e converte o Voltar do teclado de tablet/Voltar do navegador em ESC. Ative isso se combinações Fn ou o ESC de um teclado externo não estiverem chegando corretamente ao desktop. Requer a permissão de Acessibilidade concedida em Configurações do sistema &gt; Acessibilidade (uma única vez).</string>
-
     <!-- Extra keys bar -->
-
     <!-- Custom layout editor -->
-
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">Modo Touchpad (movimento relativo)</string>
     <string name="touchpad_hint">Ativado: dedo move o cursor do mouse (relativo). Desativado: touch é mapeado direto para a tela (absoluto).</string>
@@ -76,7 +115,7 @@
     <string name="scroll_speed_value">%1$.2f</string>
     <string name="threshold_factor_value">%1$.2f× tolerância de toque</string>
     <string name="scroll_threshold_label">Limite de detecção de rolagem</string>
-    <string name="scroll_threshold_hint">Até onde um dedo precisa se mover para contar como movimento. Diminua isso se um pinça estiver sendo tratado como rolagem.</string>
+    <string name="scroll_threshold_hint">Até onde um dedo precisa se mover para contar como movimento. Diminua isso se uma pinça estiver sendo tratada como rolagem.</string>
     <string name="move_threshold_label">Limite de confirmação de gesto</string>
     <string name="move_threshold_hint">Até onde o dedo principal precisa se mover antes que um gesto ambíguo de dois dedos seja resolvido. Diminua isso se a rolagem demorar para começar.</string>
     <string name="gesture_scale_label">Magnitude do gesto</string>
@@ -84,13 +123,12 @@
     <string name="gesture_scale_hint">Gestos encaminhados como toque (pinça, três ou mais dedos) são mapeados em um quadrado deste tamanho centralizado no ponteiro. Valores maiores fazem o mesmo movimento do dedo percorrer mais distância.</string>
     <string name="disable_multi_finger_switch">Desativar gestos de pinça e multitoque</string>
     <string name="disable_multi_finger_hint">Ativado: gestos de pinça/zoom com dois dedos e gestos com três ou mais dedos são bloqueados e nunca chegam ao desktop; a rolagem com dois dedos e o clique direito com dois dedos continuam funcionando. Desativado: os gestos de pinça e multitoque são encaminhados ao desktop como toque.</string>
-
     <!-- Connection -->
     <string name="socket_path_label">Caminho do socket do daemon</string>
     <string name="second_window_label">Abrir uma segunda janela (daemon e título próprios)</string>
     <string name="second_window_name_hint">Nome da Janela (ex: meu workspace)</string>
     <string name="second_window_open">Abrir uma segunda janela</string>
-    <string name="root_switch">Conecta com root (Helper)</string>
+    <string name="root_switch">Conectar como root (auxiliar)</string>
     <string name="root_hint">Executa um helper root (su) que conecta no socket e passa a conexão de volta para o app. Faz efeito na próxima sessão (Reabra o app).</string>
     <string name="topapp_switch">Ativar escalonamento em primeiro plano (root)</string>
     <string name="topapp_hint">Dá ao desktop Linux prioridade de CPU de primeiro plano do Android. Selecione o escopo de escalonamento abaixo; as mudanças têm efeito na próxima conexão.</string>
@@ -112,27 +150,23 @@
     <string name="audio_latency_title">Latência do Áudio</string>
     <string name="latency_speaker_label">Som (Desktop → Dispositivo)</string>
     <string name="latency_mic_label">Microfone (Dispositivo → Desktop)</string>
-    <string name="latency_hint">Presets mais baixos reduzem a latência, mas causa ruídos e falhas em dispositivos mais sobrecarregados. Faz efeito na próxima sessão do app.</string>
-
+    <string name="latency_hint">Presets mais baixos reduzem a latência, mas podem causar ruídos e falhas em dispositivos mais sobrecarregados. Faz efeito na próxima sessão do app.</string>
     <!-- Resolution -->
     <string name="width_hint">Largura (ex: 1920)</string>
     <string name="height_hint">Altura (ex: 1080)</string>
     <string name="resolution_hint">Escolha um preset ou coloque a resolução manualmente. Coloque 0 para a resolução nativa. \"Tela ×\" ajusta a escala do painel do dispositivo (paisagem). Faz efeito na próxima sessão do app.</string>
     <string name="auto_stretch_switch">Esticar exibição automaticamente</string>
     <string name="auto_stretch_hint">Quando ativado, a exibição preenche a tela (esticada se necessário). Quando desativado, a exibição mantém a proporção da resolução personalizada com barras pretas (letterboxing). As coordenadas de entrada são mapeadas automaticamente.</string>
-
     <!-- Settings notification -->
     <string name="notification_switch">Mostrar a notificação de abrir as configurações</string>
-    <string name="notification_hint">Mostra uma notificação persistente enquanto o app está aberto; apertando-o abre as configurações. Desative para esconder. Faz efeito na próxima sessão do app.</string>
+    <string name="notification_hint">Mostra uma notificação persistente enquanto o app está aberto; tocá-la abre as configurações. Desative para esconder. Faz efeito na próxima sessão do app.</string>
     <string name="notification_channel_name">Anland</string>
     <string name="notification_channel_desc">Acesso Rápido do Anland</string>
     <string name="notification_title">Anland</string>
     <string name="notification_text">Clique para abrir as configurações</string>
-
     <!-- Toasts -->
     <string name="toast_no_picker">Nenhum app de arquivos encontrado</string>
     <string name="toast_read_failed">Não foi possível ler o arquivo</string>
-
     <!-- Hardware key names -->
     <string name="key_volume_up">Aumentar Volume</string>
     <string name="key_volume_down">Diminuir Volume</string>
@@ -147,7 +181,6 @@
     <string name="key_brightness_down">Diminuir Brilho</string>
     <string name="key_home">Home</string>
     <string name="key_back">Voltar</string>
-
     <!-- Audio latency presets -->
     <string-array name="latency_labels">
         <item>Auto (padrão do motor)</item>
@@ -157,7 +190,6 @@
         <item>Seguro (~10 ms)</item>
         <item>Tranquilo (~20 ms)</item>
     </string-array>
-
     <!-- Resolution presets -->
     <string-array name="res_preset_labels">
         <item>Preset…</item>
@@ -262,56 +294,9 @@
     <string name="hud_overlay_label_touchpad">TOUCHPAD</string>
     <string name="hud_overlay_label_scroll">ROLAGEM</string>
     <string name="hud_overlay_label_dpad">D-PAD</string>
-    <string name="immersive_oplus_refresh_rate_switch">Manter taxa de atualização fixa em OnePlus</string>
-    <string name="immersive_oplus_refresh_rate_hint">Evita quedas na taxa de atualização em alguns dispositivos OnePlus quando eventos de entrada não são recebidos.</string>
     <string name="immersive_controller_failed">Não foi possível iniciar o modo imersivo: falha ao suprimir o controlador Android; a captura de entrada foi cancelada</string>
     <string name="immersive_controller_interrupted">Modo imersivo encerrado: a supressão do controlador Android foi perdida; a captura de entrada foi liberada</string>
-    <string name="immersive_entering_mode">Modo imersivo ativado: %1$s</string>
-    <string name="immersive_gold_unknown">Não foi possível verificar quais dispositivos o Gold mantém; iniciando sem deixar nenhum deles livre</string>
-    <string name="immersive_selection_invalid">A seleção de dispositivos salva não é válida; corrija-a nas configurações de entrada imersiva</string>
-    <string name="immersive_selection_filtered">Todos os dispositivos selecionados estão com o Gold, então não sobrou nada para capturar</string>
-    <string name="cat_immersive_title">Modo Imersivo</string>
-    <string name="cat_immersive_subtitle">Controle de entrada em tela cheia, tecla de alternância e fonte de entrada</string>
-    <string name="immersive_inputs_title">Entrada imersiva</string>
-    <string name="immersive_inputs_subtitle">Escolha de onde o modo imersivo obtém a entrada</string>
-    <string name="section_immersive_inputs_source">Fonte de entrada</string>
-    <string name="section_immersive_inputs_direct">Nós de evento a capturar</string>
-    <string name="section_immersive_inputs_scope">O que isto abrange</string>
-    <string name="immersive_inputs_direct_blurb">Atualmente: o Anland captura os nós de evento físicos, e o Android não consegue vê-los enquanto isso. Precisa de root.</string>
-    <string name="immersive_inputs_bus_hint">O Gold remapeia o teclado; o Anland captura sua saída exclusivamente e a envia direto para o desktop.</string>
-    <string name="immersive_inputs_combined_hint">O Anland captura toque, ponteiros e gamepads junto com a saída de teclado remapeada do Gold.</string>
-    <string name="immersive_inputs_bus_scope">Precisa de root e do módulo Gold Keyboard Remaps. Todas as teclas remapeadas, incluindo Meta e atalhos do sistema, vão para o desktop durante a sessão. Toque, mouse e gestos do Android continuam disponíveis. Sair do app ou bloquear a tela libera o teclado.</string>
-    <string name="immersive_inputs_direct_hint">Apenas os dispositivos marcados abaixo são capturados, incluindo gamepads. Dispositivos que o Gold confirmou manter aparecem, mas não podem ser selecionados. Gamepads apenas pausam a entrada do Android; o desktop Linux os lê diretamente pelo /dev/input montado.</string>
-    <string name="immersive_inputs_auto">Escolher dispositivos automaticamente</string>
-    <string-array name="immersive_source_options">
-        <item>Anland captura os dispositivos (direto)</item>
-        <item>Teclado Gold direto para o desktop</item>
-        <item>Toque, ponteiros e gamepads diretos + teclado Gold</item>
-    </string-array>
-    <string name="immersive_source_unavailable">Precisa do módulo Gold Keyboard Remaps, que não está instalado ou não está em execução</string>
-    <string name="immersive_auto_enter">Entrar no modo imersivo automaticamente</string>
-    <string name="immersive_auto_enter_hint">Envia automaticamente o teclado Gold para o desktop quando este app volta ao primeiro plano. Toque e gestos do Android continuam disponíveis.</string>
-    <string name="immersive_inputs_loading">Verificando dispositivos…</string>
-    <string name="immersive_inputs_found">Os dispositivos ocupados pelo Gold aparecem, mas não podem ser selecionados.</string>
-    <string name="immersive_inputs_unknown">Não foi possível verificar quais dispositivos o Gold mantém, então nenhum está marcado como ocupado. Nada aqui é sabidamente livre.</string>
-    <string name="immersive_inputs_occupied">✕ %1$s — mantido pelo Gold</string>
-    <string name="device_class_keyboard">Teclado</string>
-    <string name="device_class_keys">Nó de botões</string>
-    <string name="device_class_mouse">Mouse</string>
     <string name="device_class_gamepad">Gamepad / joystick</string>
-    <string name="device_class_touchpad">Touchpad</string>
-    <string name="device_class_touchscreen">Tela sensível ao toque</string>
-    <string name="bus_usb">USB</string>
-    <string name="bus_bluetooth">Bluetooth</string>
-    <string name="bus_builtin">Integrado</string>
-    <string name="bus_virtual">Virtual</string>
-    <string name="bus_i2c">I2C</string>
-    <string name="bus_spi">SPI</string>
-    <string name="bus_other">Barramento %1$s</string>
-    <string name="immersive_inputs_remembered">Salvos: %1$s. Utilizáveis agora: %2$s.</string>
-    <string name="immersive_inputs_all_filtered">Todos os dispositivos que você salvou estão com o Gold. O modo imersivo não iniciará até que isso mude; sua seleção foi mantida como está.</string>
-    <string name="immersive_inputs_none">Nenhum dispositivo de entrada encontrado.</string>
-    <string name="immersive_inputs_unavailable">Não foi possível listar os dispositivos de entrada: root foi negado ou está indisponível.</string>
     <string name="pad_tap">Touchpad externo: cliques sintéticos</string>
     <string name="pad_tip">Controla toques com um e dois dedos, além de arrastar com toque longo, em touchpads externos capturados e no modo imersivo. Os botões físicos continuam funcionando quando desativado. O touchpad na tela não muda.</string>
     <string name="pad_guard">Ignorar toques do touchpad externo por %1$d ms após rolar (0 = desligado)</string>
@@ -385,4 +370,5 @@
     <string name="hud_combo_clear_all">LIMPAR TUDO</string>
     <string name="hud_combo_apply">APLICAR COMBO</string>
     <string name="hud_combo_empty">(vazio)</string>
+    <!-- Legacy custom layout editor -->
 </resources>
