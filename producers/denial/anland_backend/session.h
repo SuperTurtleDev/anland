@@ -44,6 +44,7 @@ void ad_drop(ad_session *session);
 int ad_get_fds(ad_session *session, ad_fds *out); /* borrowed; refresh on reconnect */
 int ad_get_output(ad_session *session, ad_output *out);
 uint32_t ad_hdr_sdr_white_nits(ad_session *session);
+uint32_t ad_hdr_content_gain_percent(ad_session *session);
 int ad_writable(ad_session *session, ad_target *out);
 int ad_import(ad_session *session, uint64_t generation, uint32_t index, ad_image *out);
 /* Fence is borrowed. Acceptance and handoff MUST remain separate calls so the

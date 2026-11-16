@@ -52,6 +52,7 @@ public final class Native {
     public void setCustomResolution(int width, int height) { nativeSetCustomResolution(handle, width, height); }
     public void setScreenSize(int width, int height) { nativeSetScreenSize(handle, width, height); }
     public void setHdrSdrWhiteNits(int nits) { nativeSetHdrSdrWhiteNits(handle, nits); }
+    public void setHdrContentGainPercent(int percent) { nativeSetHdrContentGainPercent(handle, percent); }
     public void sendTouch(int action, float x, float y, int pointerId) { nativeSendTouch(handle, action, x, y, pointerId); }
     public void sendTouchFrame() { nativeSendTouchFrame(handle); }
     public void sendKey(int action, int keycode) { nativeSendKey(handle, action, keycode); }
@@ -95,6 +96,7 @@ public final class Native {
     private static native void nativeSetCustomResolution(long handle, int width, int height);
     private static native void nativeSetScreenSize(long handle, int width, int height);
     private static native void nativeSetHdrSdrWhiteNits(long handle, int nits);
+    private static native void nativeSetHdrContentGainPercent(long handle, int percent);
     private static native void nativeSendTouch(long handle, int action, float x, float y, int pointerId);
     private static native void nativeSendTouchFrame(long handle);
     private static native void nativeSendKey(long handle, int action, int keycode);

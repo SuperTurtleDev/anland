@@ -1,12 +1,42 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "anland_color.h"
+#include "anland_hdr_gain.h"
 #include "opengl/glutils.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
 namespace KWin
 {
+
+void anlandApplyHdrContentGain(GLShader *shader, const AnlandColorDescription &source,
+                               const AnlandColorDescription &target, RenderingIntent intent)
+{
+    const double gain = anlandHdrContentGainForSurface(source, target);
+    if (gain == 1.0) {
+        return; // Keep all native uniforms and the exact original 1x path.
+    }
+    const auto &src = anlandColorDescriptionValue(source);
+    const auto &dst = anlandColorDescriptionValue(target);
+    QMatrix4x4 multiplier;
+    multiplier.scale(gain);
+    shader->setUniform(GLShader::Mat4Uniform::ColorimetryTransformation, multiplier * src.toOther(dst, intent));
+
+    // Gain belongs before tone mapping. Retune its source peak too, otherwise
+    // the native source clamp can discard a gain above 1. Unknown HDR mastering
+    // peaks use our existing output target, not the SDR reference white.
+    const double destinationPeak = std::min<double>(dst.maxHdrLuminance().value_or(ANLAND_HDR_PEAK_NITS), ANLAND_HDR_PEAK_NITS);
+    const double referenceScale = dst.referenceLuminance() / src.referenceLuminance();
+    const double sourcePeak = src.maxHdrLuminance().value_or(destinationPeak / referenceScale) * referenceScale * gain;
+    const bool tonemap = intent == RenderingIntent::Perceptual
+        && qEnvironmentVariableIntValue("KWIN_DISABLE_TONEMAPPING") != 1;
+    // Equal peaks select native clipping instead of the tone mapper. In both
+    // cases the adjusted surface remains bounded by the unchanged output peak.
+    shader->setUniform(GLShader::FloatUniform::MaxTonemappingLuminance,
+        static_cast<float>(tonemap ? sourcePeak : destinationPeak));
+    shader->setUniform(GLShader::FloatUniform::MaxDestinationLuminance, static_cast<float>(destinationPeak));
+}
 
 AnlandHdrEncoder::AnlandHdrEncoder() = default;
 

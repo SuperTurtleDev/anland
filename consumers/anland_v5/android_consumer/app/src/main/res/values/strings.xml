@@ -421,4 +421,10 @@
     <string name="hdr_brightness_hint">Adjust SDR reference white from 80 to 500 nit (default 203). Try 300 or 400 nit if the whole desktop looks dim. Changes are saved and applied immediately to open HDR windows with updated backends. This changes desktop brightness, not black level or the 1000-nit HDR peak.</string>
     <string name="hdr_brightness_value">%1$d nit</string>
     <string name="hdr_brightness_reset">Restore 203 nit</string>
+    <string name="hdr_content_gain_button">HDR brightness gain · %1$.2f×</string>
+    <string name="hdr_content_gain_accessibility">HDR content brightness gain: %1$.2f times. Adjust gain</string>
+    <string name="hdr_content_gain_title">HDR brightness gain</string>
+    <string name="hdr_content_gain_hint">Adjust native HDR content from 0.5× to 2.0× (default 1.0×). SDR desktop brightness stays unchanged. Changes are saved and applied immediately with updated backends. Highlights remain limited by the output peak; menus or subtitles drawn inside an HDR surface also change.</string>
+    <string name="hdr_content_gain_value">%1$.2f×</string>
+    <string name="hdr_content_gain_reset">Restore 1.0×</string>
 </resources>

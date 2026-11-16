@@ -49,6 +49,7 @@ AnlandEglLayer::AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend)
     , m_output(output)
     , m_device(backend->device())
 {
+    connect(m_output, &AnlandOutput::hdrContentGainChanged, this, &AnlandEglLayer::onOutputColorDescriptionChanged);
     // React to runtime orientation changes through the output's transformChanged
     // signal instead of polling the transform in the per-frame render path.
 #ifdef ANLAND_KWIN_66
@@ -261,7 +262,8 @@ bool AnlandEglLayer::importBuffers(int count)
     // Only publish the new color mode after the complete buffer set and its
     // render resources are usable. A failed reconnect keeps the last valid
     // output state while rendering remains inhibited.
-    m_output->setConsumerHdrMode(consumerHdr, anland_device_hdr_sdr_white_nits(m_device));
+    m_output->setConsumerHdrMode(consumerHdr, anland_device_hdr_sdr_white_nits(m_device),
+        anland_device_hdr_content_gain_percent(m_device));
     // Color/capability notifications can synchronously reapply output layout.
     // Keep the imported slots in sync even though m_bufCount is still zero and
     // transformChanged() could not visit them during that notification.

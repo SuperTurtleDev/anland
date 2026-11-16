@@ -191,6 +191,7 @@ struct Active {
 #[cfg(feature = "anland-runtime-v2")]
 struct PendingHdrColor {
     white_nits: u32,
+    content_gain_percent: u32,
     since: Instant,
     completion: std::sync::mpsc::Receiver<denial_flutter_engine::RenderOperationResult>,
 }
@@ -203,6 +204,7 @@ fn synchronize_hdr_brightness(
     active: &mut Active,
     events: &mut RuntimeState,
     white_nits: u32,
+    content_gain_percent: u32,
     now: Instant,
 ) -> Result<bool, Box<dyn Error>> {
     if !active._imports.hdr || active.driver.stopped() {
@@ -212,6 +214,7 @@ fn synchronize_hdr_brightness(
         match poll_replacement(Some(&update.completion), update.since, now)? {
             ReplacementProgress::Completed => {
                 active._imports.sdr_white_nits = update.white_nits;
+                active._imports.hdr_content_gain_percent = update.content_gain_percent;
                 active.hdr_update = None;
                 active.hdr_update_since = None;
                 let textures = active.runtime.finish_external_hdr_update()?;
@@ -231,7 +234,10 @@ fn synchronize_hdr_brightness(
             ReplacementProgress::Pending => {}
         }
     }
-    if active.hdr_update.is_none() && active._imports.sdr_white_nits == white_nits {
+    if active.hdr_update.is_none()
+        && active._imports.sdr_white_nits == white_nits
+        && active._imports.hdr_content_gain_percent == content_gain_percent
+    {
         active.hdr_update_since = None;
         active.driver.set_geometry_pending(false);
         return Ok(false);
@@ -257,9 +263,11 @@ fn synchronize_hdr_brightness(
                 color: Some(hdr.output_color()),
             },
             hdr,
+            content_gain_percent,
         )?;
         active.hdr_update = Some(PendingHdrColor {
             white_nits,
+            content_gain_percent,
             since,
             completion,
         });
@@ -1018,6 +1026,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                         a,
                         &mut events,
                         client.as_ref().unwrap().hdr_sdr_white_nits(),
+                        client.as_ref().unwrap().hdr_content_gain_percent(),
                         drive_now,
                     )?
                 } else {
@@ -1647,6 +1656,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                                     imported.identity.output,
                                                     imported.hdr,
                                                     imported.sdr_white_nits,
+                                                    imported.hdr_content_gain_percent,
                                                 );
                                             }
                                             parked

@@ -244,7 +244,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 
      m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
 +        if (event.size == Vector2D{} && Anland::outputHdrMode(m_output).value_or(false)) {
-+            // Consumer SDR-white action: update only native color state. Do not
++            // Consumer HDR control: update only native color state. Do not
 +            // modeset or replace the fixed 10-bit targets during an input poll.
 +            Anland::configureColorRule(m_output, m_activeMonitorRule);
 +            m_sdrMinLuminance = m_activeMonitorRule.m_sdrMinLuminance;
@@ -886,3 +886,82 @@ Subject: Anland v5 hyprland native integration (Debian 13)
 
          struct SRectRenderData {
              const CRegion* damage        = nullptr;
+
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -9,6 +9,8 @@
+ #include <random>
+ #include <pango/pangocairo.h>
+ #include "OpenGL.hpp"
++#include "../anland/Bridge.hpp"
++#include "../anland/ContentGain.hpp"
+ #include "Renderer.hpp"
+ #include "../Compositor.hpp"
+ #include "../helpers/MiscFunctions.hpp"
+@@ -1140,8 +1142,6 @@
+     scissor(nullptr);
+ }
+ 
+-static std::map<std::pair<uint32_t, uint32_t>, std::array<GLfloat, 9>> primariesConversionCache;
+-
+ void CHyprOpenGLImpl::passCMUniforms(WP<CShader> shader, const NColorManagement::PImageDescription imageDescription,
+                                      const NColorManagement::PImageDescription targetImageDescription, bool modifySDR, float sdrMinLuminance, int sdrMaxLuminance,
+                                      const SCMSettings& settings) {
+@@ -1157,17 +1157,15 @@
+     shader->setUniformFloat(SHADER_SDR_BRIGHTNESS, settings.sdrBrightnessMultiplier);
+ 
+     if (!targetImageDescription->value().icc.present) {
+-        const auto cacheKey = std::make_pair(imageDescription->id(), targetImageDescription->id());
+-        if (!primariesConversionCache.contains(cacheKey)) {
+-            const auto&                  mat             = settings.convertMatrix;
+-            const std::array<GLfloat, 9> glConvertMatrix = {
+-                mat[0][0], mat[1][0], mat[2][0], //
+-                mat[0][1], mat[1][1], mat[2][1], //
+-                mat[0][2], mat[1][2], mat[2][2], //
+-            };
+-            primariesConversionCache.insert(std::make_pair(cacheKey, glConvertMatrix));
+-        }
+-        shader->setUniformMatrix3fv(SHADER_CONVERT_MATRIX, 1, false, primariesConversionCache[cacheKey]);
++        // CM settings can now carry a per-client HDR gain. Description IDs
++        // alone cannot key that matrix: upload the current value each draw.
++        const auto& conversion = settings.convertMatrix;
++        const std::array<GLfloat, 9> glConvertMatrix = {
++            conversion[0][0], conversion[1][0], conversion[2][0],
++            conversion[0][1], conversion[1][1], conversion[2][1],
++            conversion[0][2], conversion[1][2], conversion[2][2],
++        };
++        shader->setUniformMatrix3fv(SHADER_CONVERT_MATRIX, 1, false, glConvertMatrix);
+ 
+         const auto                   mat                  = settings.dstPrimaries2XYZ;
+         const std::array<GLfloat, 9> glTargetPrimariesXYZ = {
+@@ -1349,9 +1347,15 @@
+     if (data.discardActive)
+         shaderFeatures |= SH_FEAT_DISCARD;
+ 
++    const bool anlandHdrSurface = surface.valid() && surface->m_colorManagement.valid() && surface->m_colorManagement->isHDR();
++    const bool anlandOriginalImage = anlandHdrSurface &&
++        SOURCE_IMAGE_DESCRIPTION->id() == CImageDescription::from(surface->m_colorManagement->imageDescription())->id();
++    const float anlandHdrGain = Anland::clientHdrGain(anlandHdrSurface, anlandOriginalImage, data.finalMonitorCM, data.cmBackToSRGB,
++                                                     Anland::hdrContentGain(g_pHyprRenderer->m_renderData.pMonitor->m_output));
++
+     const bool skipCM = !*PENABLECM || !m_cmSupported                   /* CM unsupported or disabled */
+         || g_pHyprRenderer->m_renderData.pMonitor->doesNoShaderCM()     /* no shader needed */
+-        || !SOURCE_IMAGE_DESCRIPTION->needsCM(TARGET_IMAGE_DESCRIPTION) /* Source and target have matching image descriptions */
++        || (anlandHdrGain == 1.0f && !SOURCE_IMAGE_DESCRIPTION->needsCM(TARGET_IMAGE_DESCRIPTION)) /* Source and target have matching image descriptions */
+         ;
+ 
+     if (g_pHyprRenderer->m_renderData.pMonitor->needsACopyFB())
+@@ -1365,10 +1369,10 @@
+         shaderFeatures |= SH_FEAT_ROUNDING;
+ 
+     if (!skipCM) {
+-        const auto settings =
+-            g_pHyprRenderer->getCMSettings(SOURCE_IMAGE_DESCRIPTION, TARGET_IMAGE_DESCRIPTION, surface.valid() ? surface.lock() : nullptr, true,
++        auto settings = g_pHyprRenderer->getCMSettings(SOURCE_IMAGE_DESCRIPTION, TARGET_IMAGE_DESCRIPTION, surface.valid() ? surface.lock() : nullptr, true,
+                                            g_pHyprRenderer->m_renderData.pMonitor->m_sdrMinLuminance, g_pHyprRenderer->m_renderData.pMonitor->m_sdrMaxLuminance, true);
++        Anland::applyHdrContentGain(settings, anlandHdrGain);
+ 
+         shaderFeatures |= SH_FEAT_CM;
+ 
+         if (TARGET_IMAGE_DESCRIPTION->value().icc.present)

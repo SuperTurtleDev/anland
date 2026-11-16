@@ -1501,7 +1501,7 @@ diff --git a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs b/comp
 index 7cfa290..392a096 100644
 --- a/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
 +++ b/compositor/src/bin/deniald/flutter_runtime/output_runtime.rs
-@@ -211,6 +211,128 @@ impl FlutterRuntime {
+@@ -211,6 +211,129 @@ impl FlutterRuntime {
          })
      }
  
@@ -1535,6 +1535,7 @@ index 7cfa290..392a096 100644
 +        &self,
 +        pool: ExternalPoolDescriptor,
 +        hdr: crate::output_color::HdrOutput,
++        content_gain_percent: u32,
 +    ) -> Result<
 +        std::sync::mpsc::Receiver<denial_flutter_engine::RenderOperationResult>,
 +        Box<dyn Error>,
@@ -1543,7 +1544,7 @@ index 7cfa290..392a096 100644
 +        // Only owned values cross runners. The caller pauses authorization and
 +        // drains old raster work before posting this color-only transaction.
 +        self.host()
-+            .post_render_operation(move || handler.update_external_hdr_on_render_thread(pool, hdr))
++            .post_render_operation(move || handler.update_external_hdr_on_render_thread(pool, hdr, content_gain_percent))
 +    }
 +
 +    #[cfg(feature = "external-output")]
@@ -1630,7 +1631,7 @@ index 7cfa290..392a096 100644
      pub fn publish_output(&self, output: &ReadyOutputFrame) -> Result<(), Box<dyn Error>> {
          self.handler.publish_output(output).map_err(Into::into)
      }
-@@ -385,23 +507,42 @@ impl FlutterRuntime {
+@@ -385,23 +508,42 @@ impl FlutterRuntime {
          Ok(true)
      }
  
@@ -1677,7 +1678,7 @@ index 7cfa290..392a096 100644
          }
          let completion_id = self
              .host
-@@ -418,7 +559,7 @@ impl FlutterRuntime {
+@@ -418,7 +560,7 @@ impl FlutterRuntime {
              completion_id,
          );
          if self.render_view_scratch.is_empty() {
@@ -1686,7 +1687,7 @@ index 7cfa290..392a096 100644
          }
  
          let flutter_tick = flutter_output.and_then(|output_id| {
-@@ -477,7 +618,7 @@ impl FlutterRuntime {
+@@ -477,7 +619,7 @@ impl FlutterRuntime {
              let Some(baton) = baton else {
                  self.handler
                      .cancel_output_authorizations(&self.render_view_scratch);
@@ -1695,7 +1696,7 @@ index 7cfa290..392a096 100644
              };
              Some(baton)
          } else {
-@@ -573,7 +714,10 @@ impl FlutterRuntime {
+@@ -573,7 +715,10 @@ impl FlutterRuntime {
                  .cancel_output_authorizations(&self.render_view_scratch);
              return Err(error.into());
          }
@@ -2172,7 +2173,7 @@ index 5ab657d..78fe8fb 100644
                  return Err(error.into());
              }
          };
-@@ -576,75 +668,179 @@ impl FlutterGlHandler {
+@@ -576,75 +668,183 @@ impl FlutterGlHandler {
              render_modifier = ?offscreen_blit.then_some(Modifier::Linear),
              "imported native output pools into Flutter EGL context"
          );
@@ -2201,12 +2202,14 @@ index 5ab657d..78fe8fb 100644
 +        &self,
 +        expected: ExternalPoolDescriptor,
 +        hdr: crate::output_color::HdrOutput,
++        content_gain_percent: u32,
 +    ) -> denial_flutter_engine::RenderOperationResult {
 +        use denial_flutter_engine::RenderOperationResult::{Busy, Completed, Rejected, Uncertain};
 +        if self.shutdown_started.load(Ordering::Acquire) {
 +            return Uncertain;
 +        }
-+        if !hdr.white.is_finite() || !(80.0..=500.0).contains(&hdr.white) {
++        if !hdr.white.is_finite() || !(80.0..=500.0).contains(&hdr.white)
++            || !(50..=200).contains(&content_gain_percent) {
 +            return Rejected;
 +        }
 +        let mut broker = lock(&self.broker);
@@ -2249,6 +2252,8 @@ index 5ab657d..78fe8fb 100644
 +        {
 +            return Rejected;
 +        }
++        #[cfg(feature = "anland")]
++        crate::anland_backend::hdr::set_content_gain_percent(content_gain_percent);
 +        let color = hdr.output_color();
 +        for target in resident {
 +            target.pq_white = color.pq_white;
@@ -2419,7 +2424,7 @@ index 5ab657d..78fe8fb 100644
      }
  
      pub(in crate::flutter_runtime) fn take_ready_frame(
-@@ -707,6 +903,43 @@ impl FlutterGlHandler {
+@@ -707,6 +907,43 @@ impl FlutterGlHandler {
          lock(&self.broker).cancel_authorizations(render_view_ids);
      }
  
@@ -5859,3 +5864,18 @@ index 4d5f522..ace4801 100755
    package_dependencies="$(dpkg-deb --field "$package" Depends)"
    package_provides="$(dpkg-deb --field "$package" Provides 2>/dev/null || true)"
    payload_listing="$(dpkg-deb --fsys-tarfile "$package" | bsdtar -tf -)"
+diff --git a/compositor/src/bin/deniald/color_space.rs b/compositor/src/bin/deniald/color_space.rs
+--- a/compositor/src/bin/deniald/color_space.rs
++++ b/compositor/src/bin/deniald/color_space.rs
+@@ -492,7 +492,10 @@
+     /// scene encoding; then only a non-default alpha mode needs a pass.
+     pub(crate) fn transform(&self, scene: SceneEncoding) -> Option<SurfaceTransform> {
+         let (record, intent) = self.description.as_ref()?;
+-        record.description.transform(*intent, scene)
++        let mut transform = record.description.transform(*intent, scene)?;
++        #[cfg(feature = "anland")]
++        crate::anland_backend::hdr::apply_content_gain(&record.description, scene, &mut transform);
++        Some(transform)
+     }
+ }
+ 

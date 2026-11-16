@@ -627,7 +627,7 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
 +	// Anland HAL43 is a PQ consumer, even when every client currently uses SDR.
 +	if ( gamescope::AnlandOutputHDRMode().value_or( false ) )
 +	{
-+		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending, gamescope::AnlandOutputSDRWhiteNits() );
++		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending, gamescope::AnlandOutputSDRWhiteNits(), gamescope::AnlandOutputHDRContentGain() );
 +	}
  
  	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(
@@ -653,11 +653,12 @@ diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
 diff --git a/src/color_helpers.h b/src/color_helpers.h
 --- a/src/color_helpers.h
 +++ b/src/color_helpers.h
-@@ -283,6 +283,7 @@
+@@ -283,6 +283,8 @@
  struct tonemapping_t
  {
  	bool bUseShaper = true;
 +	bool bNormalizeShaper = false; // matched full-range shaper for fixed consumer output
++	float contentGainPeakNits = 0.f; // optional linear-nit ceiling for non-unity HDR gain
  	float g22_luminance = 1.f; // what luminance should be applied for g22 EOTF conversions?
  	ETonemapOperator eOperator = ETonemapOperator_None;
  	eetf_2390_t eetf2390;
@@ -699,3 +700,42 @@ diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
  
          // Avoid roundoff when the output encoding is already native.
          glm::mat3 dest_from_native( 1.f );
+
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -431,6 +431,12 @@
+ 				buildPQColorimetry( &inputColorimetry, &colorMapping, displayColorimetry );
+ 			}
+ 
++			// SDR retains its own LUT and reference white. Do not raise the
++			// fixed consumer peak when boosting PQ/scRGB source content.
++			if ( inputEOTF == EOTF_PQ && newColorMgmt.flHDRInputGain != 1.f &&
++			     gamescope::AnlandOutputHDRMode().value_or( false ) )
++				tonemapping.contentGainPeakNits = ANLAND_HDR_PEAK_NITS;
++
+ 			// Software backlight dim, only ever != 1 on PQ outputs.
+ 			flGain *= newColorMgmt.flBacklightLutGain;
+ 
+
+diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
+--- a/src/color_helpers.cpp
++++ b/src/color_helpers.cpp
+@@ -680,6 +680,8 @@
+ 
+     T flLinear = flGain * calcEOTFToLinear( input, source, tonemapping );
+     flLinear = tonemapping.apply( flLinear );
++    if ( tonemapping.contentGainPeakNits > 0.f )
++        flLinear = glm::clamp( flLinear, T( 0.f ), T( tonemapping.contentGainPeakNits ) );
+ 
+     return calcLinearToEOTF( flLinear, g_bUseSourceEOTFForShaper ? source : dest, tonemapping );
+ }
+@@ -813,6 +815,8 @@
+ 
+                     // Apply tonemapping
+                     destColorLinear = tonemapping.apply( destColorLinear );
++                    if ( tonemapping.contentGainPeakNits > 0.f )
++                        destColorLinear = glm::clamp( destColorLinear, glm::vec3( 0.f ), glm::vec3( tonemapping.contentGainPeakNits ) );
+ 
+                     // Hue preservation
+                     if ( g_bHuePreservationWhenClipping )

@@ -81,3 +81,14 @@ diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
      const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
      if (!attributes) {
          return;
+diff --git a/src/scene/itemrenderer_opengl.cpp b/src/scene/itemrenderer_opengl.cpp
+--- a/src/scene/itemrenderer_opengl.cpp
++++ b/src/scene/itemrenderer_opengl.cpp
+@@ -7,2 +7,3 @@
+ #include "scene/itemrenderer_opengl.h"
++#include "backends/anland/anland_hdr_gain.h"
+ #include "core/colorpipeline.h"
+@@ -504,2 +505,3 @@
+             shader->setColorspaceUniforms(renderNode.colorDescription, renderTarget.colorDescription(), renderNode.renderingIntent);
++            anlandApplyHdrContentGain(shader, renderNode.colorDescription, renderTarget.colorDescription(), renderNode.renderingIntent);
+         }

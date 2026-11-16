@@ -114,6 +114,7 @@ struct consumer_state {
     bool cfg_hdr_enabled;
     bool cfg_hdr10_supported;
     int cfg_hdr_sdr_white_nits;
+    int cfg_hdr_content_gain_percent;
     char cfg_helper_path[512];
     char cfg_bridge_path[512];
     int  cfg_custom_width;
@@ -224,6 +225,30 @@ static void send_hdr_sdr_white_locked(struct consumer_state *s)
     };
     if (push_input_event(s->ctx, &event) < 0)
         LOGE("could not send HDR SDR reference white: %d nit", nits);
+}
+
+static void send_hdr_content_gain_locked(struct consumer_state *s)
+{
+    if (!s->ctx || !s->input_hdr_enabled)
+        return;
+    pthread_mutex_lock(&s->cfg_lock);
+    int percent = s->cfg_hdr_content_gain_percent;
+    pthread_mutex_unlock(&s->cfg_lock);
+    struct InputEvent event = {
+        .type = INPUT_TYPE_ACTION,
+        .input_action = {
+            .action = ANLAND_HDR_ACTION_CONTENT_GAIN,
+            .value = percent,
+        },
+    };
+    if (push_input_event(s->ctx, &event) < 0)
+        LOGE("could not send HDR content gain: %d percent", percent);
+}
+
+static void send_hdr_controls_locked(struct consumer_state *s)
+{
+    send_hdr_sdr_white_locked(s);
+    send_hdr_content_gain_locked(s);
 }
 
 static uint64_t monotonic_now_ns(void)
@@ -1031,7 +1056,7 @@ static int do_connect(struct consumer_state *s)
                     s->dmabuf_infos[0].format, s->refresh_mhz);
     push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
     s->input_hdr_enabled = hdr_enabled;
-    send_hdr_sdr_white_locked(s);
+    send_hdr_controls_locked(s);
 
     /* Register the camera service only when it was initialised (i.e. the user
      * enabled it in settings and granted CAMERA). The service_info lives in this
@@ -1136,7 +1161,7 @@ static void on_exit_fallback(void *userdata)
     // The display library suppresses input while waiting for a producer. Seed
     // the preference again after every producer reconnect, including the first.
     pthread_mutex_lock(&s->input_lock);
-    send_hdr_sdr_white_locked(s);
+    send_hdr_controls_locked(s);
     pthread_mutex_unlock(&s->input_lock);
 
     JNIEnv *env = NULL;
@@ -1311,6 +1336,7 @@ Java_com_anland_consumer_Native_nativeCreate(JNIEnv *env, jclass clazz)
     pthread_mutex_init(&s->topapp_lock, NULL);
     s->cfg_topapp_mode = 1;
     s->cfg_hdr_sdr_white_nits = (int)ANLAND_HDR_SDR_WHITE_NITS;
+    s->cfg_hdr_content_gain_percent = (int)ANLAND_HDR_CONTENT_GAIN_DEFAULT_PERCENT;
     for (int i = 0; i < MAX_COLLECT_BUFS; i++)
         s->dmabuf_fds[i] = -1;
     strncpy(s->cfg_socket_path, "/data/local/tmp/display_daemon.sock",
@@ -1445,6 +1471,26 @@ Java_com_anland_consumer_Native_nativeSetHdrSdrWhiteNits(
     pthread_mutex_unlock(&s->cfg_lock);
     pthread_mutex_lock(&s->input_lock);
     send_hdr_sdr_white_locked(s);
+    pthread_mutex_unlock(&s->input_lock);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSetHdrContentGainPercent(
+    JNIEnv *env, jclass clazz, jlong handle, jint percent)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    if (percent < (int)ANLAND_HDR_CONTENT_GAIN_MIN_PERCENT)
+        percent = (int)ANLAND_HDR_CONTENT_GAIN_MIN_PERCENT;
+    if (percent > (int)ANLAND_HDR_CONTENT_GAIN_MAX_PERCENT)
+        percent = (int)ANLAND_HDR_CONTENT_GAIN_MAX_PERCENT;
+    pthread_mutex_lock(&s->cfg_lock);
+    s->cfg_hdr_content_gain_percent = percent;
+    pthread_mutex_unlock(&s->cfg_lock);
+    pthread_mutex_lock(&s->input_lock);
+    send_hdr_content_gain_locked(s);
     pthread_mutex_unlock(&s->input_lock);
 }
 

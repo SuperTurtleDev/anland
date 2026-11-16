@@ -170,6 +170,11 @@ uint32_t ad_hdr_sdr_white_nits(ad_session *s)
     return s ? anland_device_hdr_sdr_white_nits(device(s))
              : (uint32_t)ANLAND_HDR_SDR_WHITE_NITS;
 }
+uint32_t ad_hdr_content_gain_percent(ad_session *s)
+{
+    return s ? anland_device_hdr_content_gain_percent(device(s))
+             : ANLAND_HDR_CONTENT_GAIN_DEFAULT_PERCENT;
+}
 int ad_writable(ad_session *s, ad_target *out)
 {
     if (!out) return -EINVAL;

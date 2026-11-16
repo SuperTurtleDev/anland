@@ -100,6 +100,43 @@ int main()
     GLuint output = framebuffer(outputTexture, 10, GL_UNSIGNED_NORMALIZED);
     glViewport(0, 0, 1, 1);
     glDisable(GL_DITHER);
+    // Isolate input sampling from inverse PQ, matrix arithmetic and the FP16
+    // scene attachment. A low/medium precision sampler can truncate even an
+    // RGBA32F source before any of those stages, magnifying the error in PQ.
+    GLuint samplingTexture = texture(GL_RGBA32F);
+    GLuint sampling = framebuffer(samplingTexture, 32, GL_FLOAT);
+    GLint precisionRange[2] = {}, highpPrecision = 0;
+    glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, precisionRange, &highpPrecision);
+    require(highpPrecision > 0, "fragment highp precision is unavailable");
+    glUniform1i(uniform("convert"), 0);
+    glUniform1i(uniform("correct_gamut"), 0);
+    glUniform1f(uniform("pq_white"), 0.0f);
+    double samplingError = 0.0;
+    const std::array<std::array<float, 4>, 3> samples = {{
+        {float(pq(1000)), float(pq(0.005)), 0.5f, 1.0f},
+        {-0.0312345f, 1.0007324f, 2.0643084f, 1.0f},
+        {0.0001234567f, 0.1f, 0.9f, 1.0f},
+    }};
+    for (const auto &sample : samples) {
+        glBindTexture(GL_TEXTURE_2D, input);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, sample.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, sampling);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        std::array<float, 4> actual{};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, actual.data());
+        require(glGetError() == GL_NO_ERROR, "source sampling precision readback failed");
+        for (int channel = 0; channel < 4; ++channel) {
+            const double error = std::abs(double(actual[channel]) - sample[channel]);
+            const double tolerance = std::ldexp(std::max(1.0, std::abs(double(sample[channel]))), 1 - highpPrecision);
+            samplingError = std::max(samplingError, error);
+            if (error > tolerance)
+                std::fprintf(stderr, "source sample channel=%d input=%.12g actual=%.12g error=%.9g bound=%.9g\n",
+                    channel, double(sample[channel]), double(actual[channel]), error, tolerance);
+            require(error <= tolerance, "source texture was sampled below fragment highp precision");
+        }
+    }
+    glDeleteFramebuffers(1, &sampling);
+    glDeleteTextures(1, &samplingTexture);
     // Column-major native linear sRGB <-> BT.2020 primaries, D65.
     const GLfloat to2020[] = {0.6274039f, 0.0690973f, 0.0163914f, 0.3292830f, 0.9195404f, 0.0880133f, 0.0433131f, 0.0113623f, 0.8955953f};
     const GLfloat toSrgb[] = {1.6604910f, -0.1245505f, -0.0181508f, -0.5876411f, 1.1328999f, -0.1005789f, -0.0728499f, -0.0083494f, 1.1187297f};
@@ -202,6 +239,7 @@ int main()
             }
     }
     std::printf("Native Denial HDR GLES shader passed: FP16 content conversion + real RGB10 PQ encoder, SDR white 80/203/300/400/500/203 nit; encoder error %.3f codes (%s)\n", maximumError, glGetString(GL_RENDERER));
+    std::printf("Native source sampling: max error %.9g, fragment highp precision %d bits\n", samplingError, highpPrecision);
     std::printf("Native signed-gamma sRGB FP16 limitation: ideal input round-trip max %.3f codes; zero-channel gamut cross-talk %.6f nit\n", idealMaximumError, maximumBlackLeakNits);
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(display, context);

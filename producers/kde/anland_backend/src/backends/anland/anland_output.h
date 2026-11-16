@@ -62,10 +62,12 @@ public:
     // forbid HDR; a successful buffer import commits the corresponding mode.
     bool hdrAllowed() const;
     bool hdrEnabled() const;
-    void setConsumerHdrMode(bool hdr, unsigned int sdrWhiteNits = 203);
+    void setConsumerHdrMode(bool hdr, unsigned int sdrWhiteNits = 203, unsigned int contentGainPercent = 100);
     // Changes SDR reference white only; never enables HDR for an SDR session.
     bool setHdrSdrWhiteNits(unsigned int nits);
     unsigned int hdrSdrWhiteNits() const;
+    bool setHdrContentGainPercent(unsigned int percent);
+    unsigned int hdrContentGainPercent() const;
     const AnlandColorDescription &renderColorDescription() const;
     const AnlandColorDescription &wireColorDescription() const;
 
@@ -122,6 +124,9 @@ public:
 #endif
     AnlandEglLayer *eglLayer() const;
 
+Q_SIGNALS:
+    void hdrContentGainChanged();
+
 private:
     void completeFrame();
 
@@ -131,6 +136,7 @@ private:
     const bool m_hdrAllowed;
     bool m_hdrEnabled = false;
     unsigned int m_hdrSdrWhiteNits = 203;
+    unsigned int m_hdrContentGainPercent = 100;
     AnlandColorDescription m_wireColorDescription;
     AnlandColorDescription m_renderColorDescription;
 #ifndef ANLAND_KWIN_68

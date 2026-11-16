@@ -18,10 +18,11 @@ static inline uint32_t anland_gamescope_drm_format(uint32_t format)
 
 namespace gamescope {
 template<typename ColorMgmt>
-inline void AnlandConfigureHDRColorMgmt(ColorMgmt &color, float sdrWhiteNits = ANLAND_HDR_SDR_WHITE_NITS)
+inline void AnlandConfigureHDRColorMgmt(ColorMgmt &color, float sdrWhiteNits = ANLAND_HDR_SDR_WHITE_NITS, float contentGain = 1.f)
 {
     color.enabled = true;
     color.flSDROnHDRBrightness = sdrWhiteNits;
+    color.flHDRInputGain = contentGain;
     // Gamescope's automatic setting expands SDR to the panel gamut. This
     // virtual BT.2020 container has no panel primaries; preserve Rec.709 SDR.
     if (color.sdrGamutWideness < 0.f)
@@ -41,4 +42,5 @@ inline void AnlandNativeColorimetry(bool hdr, bool hdr10,
 /* A consumer owns its output encoding. Other backends retain the native toggle. */
 std::optional<bool> AnlandOutputHDRMode();
 float AnlandOutputSDRWhiteNits();
+float AnlandOutputHDRContentGain();
 }

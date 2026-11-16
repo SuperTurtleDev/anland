@@ -1445,11 +1445,20 @@ public class SettingsActivity extends Activity {
         brightness.setOnClickListener(view -> showHdrBrightnessDialog(brightness, prefs));
         row.addView(brightness, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button contentGain = new Button(this);
+        contentGain.setTextSize(14);
+        contentGain.setAllCaps(false);
+        updateHdrContentGainButton(contentGain, prefs);
+        contentGain.setEnabled(hdrSwitch.isChecked());
+        contentGain.setOnClickListener(view -> showHdrContentGainDialog(contentGain, prefs));
         hdrSwitch.setOnCheckedChangeListener((view, checked) -> {
             prefs.edit().putBoolean(MainActivity.KEY_EXPERIMENTAL_HDR, checked).apply();
             brightness.setEnabled(checked);
+            contentGain.setEnabled(checked);
         });
         root.addView(row);
+        root.addView(contentGain, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView hint = new TextView(this);
         hint.setText(R.string.hdr_hint);
@@ -1457,6 +1466,80 @@ public class SettingsActivity extends Activity {
         hint.setTextColor(Color.GRAY);
         hint.setPadding(0, dp(4), 0, dp(12));
         root.addView(hint);
+    }
+
+    private void updateHdrContentGainButton(Button button, SharedPreferences prefs) {
+        int percent = HdrContentGain.clamp(prefs.getInt(
+                HdrContentGain.KEY_PERCENT, HdrContentGain.DEFAULT_PERCENT));
+        button.setText(getString(R.string.hdr_content_gain_button, percent / 100.0f));
+        button.setContentDescription(getString(
+                R.string.hdr_content_gain_accessibility, percent / 100.0f));
+    }
+
+    private void showHdrContentGainDialog(Button button, SharedPreferences prefs) {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(24), dp(12), dp(24), 0);
+        TextView explanation = new TextView(this);
+        explanation.setText(R.string.hdr_content_gain_hint);
+        explanation.setTextSize(14);
+        content.addView(explanation);
+
+        TextView value = new TextView(this);
+        value.setTextSize(20);
+        value.setPadding(0, dp(16), 0, dp(8));
+        content.addView(value);
+        SeekBar seek = new SeekBar(this);
+        seek.setContentDescription(getString(R.string.hdr_content_gain_title));
+        seek.setMax((HdrContentGain.MAX_PERCENT - HdrContentGain.MIN_PERCENT)
+                / HdrContentGain.STEP_PERCENT);
+        int current = HdrContentGain.clamp(prefs.getInt(
+                HdrContentGain.KEY_PERCENT, HdrContentGain.DEFAULT_PERCENT));
+        seek.setProgress((current - HdrContentGain.MIN_PERCENT) / HdrContentGain.STEP_PERCENT);
+        value.setText(getString(R.string.hdr_content_gain_value, current / 100.0f));
+        seek.setStateDescription(value.getText());
+        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                int percent = HdrContentGain.MIN_PERCENT + progress * HdrContentGain.STEP_PERCENT;
+                value.setText(getString(R.string.hdr_content_gain_value, percent / 100.0f));
+                seek.setStateDescription(value.getText());
+                prefs.edit().putInt(HdrContentGain.KEY_PERCENT, percent).apply();
+                updateHdrContentGainButton(button, prefs);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) { }
+            @Override public void onStopTrackingTouch(SeekBar bar) { }
+        });
+        content.addView(seek, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout presets = new LinearLayout(this);
+        for (int percent : new int[] {50, 100, 150, 200}) {
+            Button preset = new Button(this);
+            preset.setText(getString(R.string.hdr_content_gain_value, percent / 100.0f));
+            preset.setTextSize(12);
+            preset.setAllCaps(false);
+            preset.setMinWidth(0);
+            preset.setMinimumWidth(0);
+            preset.setPadding(dp(4), 0, dp(4), 0);
+            preset.setOnClickListener(view -> seek.setProgress(
+                    (percent - HdrContentGain.MIN_PERCENT) / HdrContentGain.STEP_PERCENT));
+            presets.addView(preset, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        }
+        content.addView(presets);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.hdr_content_gain_title)
+                .setView(scroll)
+                .setNeutralButton(R.string.hdr_content_gain_reset, null)
+                .setPositiveButton(android.R.string.ok, null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+                .setOnClickListener(view -> seek.setProgress(
+                        (HdrContentGain.DEFAULT_PERCENT - HdrContentGain.MIN_PERCENT)
+                                / HdrContentGain.STEP_PERCENT)));
+        dialog.show();
     }
 
     private void updateHdrBrightnessButton(Button button, SharedPreferences prefs) {

@@ -4,6 +4,7 @@
 #include "anland_color.h"
 #include "anland_damage.h"
 #include "anland_format.h"
+#include "anland_hdr_gain.h"
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include <QCoreApplication>
@@ -324,6 +325,139 @@ static void testDamageMapping()
     }
 }
 
+static void testHdrContentGain()
+{
+    // Two actual input surfaces share one scene: SDR on the left and native
+    // HDR on the right. Check source conversion, scene storage, and final PQ.
+    const QSize size(6, 1);
+    const std::array<double, 3> levels = {200, 600, 1000};
+    std::array<float, 24> sdrPixels{}, hdrPixels{};
+    for (int x = 0; x < size.width(); ++x) {
+        const float gray = x == 0 ? 0 : (x == 1 ? 0.5f : 1.0f);
+        for (int channel = 0; channel < 3; ++channel) {
+            sdrPixels[x * 4 + channel] = gray;
+        }
+        sdrPixels[x * 4 + 3] = 1;
+    }
+    Texture sdr(GL_RGBA32F, size, sdrPixels.data()), scene(GL_RGBA16F, size), output(GL_RGB10_A2, size);
+    auto sceneColor = std::make_shared<ColorDescription>(Colorimetry::BT2020,
+        TransferFunction(TransferFunction::gamma22, 0, 1000), 203, 0, 1000, 1000);
+    AnlandHdrEncoder encoder;
+    check(encoder.init(), "HDR gain test uses the unchanged production PQ encoder");
+    auto draw = [&](Texture &source, const AnlandColorDescription &sourceColor, int left, int width, bool gain) {
+        GLFramebuffer::pushFramebuffer(scene.fbo.get());
+        glDisable(GL_BLEND);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(left, 0, width, 1);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        {
+            ShaderBinder shader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
+            const auto intent = anlandIsNativeHdrContent(sourceColor)
+                ? RenderingIntent::RelativeColorimetric : RenderingIntent::Perceptual;
+            shader.shader()->setColorspaceUniforms(sourceColor, sceneColor, intent);
+            if (gain) {
+                anlandApplyHdrContentGain(shader.shader(), sourceColor, sceneColor, intent);
+            }
+            shader.shader()->setUniform(GLShader::IntUniform::Sampler, 0);
+            QMatrix4x4 matrix;
+            matrix.scale(1, -1);
+            matrix.ortho(QRectF(QPointF(), size));
+            shader.shader()->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, matrix);
+            source.texture->bind();
+            source.texture->render(QSizeF(size));
+            source.texture->unbind();
+        }
+        glDisable(GL_SCISSOR_TEST);
+        GLFramebuffer::popFramebuffer();
+    };
+    for (const bool scrgb : {false, true}) {
+        auto inputColor = std::make_shared<ColorDescription>(scrgb ? Colorimetry::BT709 : Colorimetry::BT2020,
+            TransferFunction(scrgb ? TransferFunction::linear : TransferFunction::PerceptualQuantizer,
+                0, scrgb ? 80 : 10000), 203, 0, 1000, 1000);
+        for (int x = 0; x < size.width(); ++x) {
+            const double nits = levels[x % 3];
+            for (int channel = 0; channel < 3; ++channel) {
+                hdrPixels[x * 4 + channel] = scrgb ? nits / 80 : pq(nits);
+            }
+            hdrPixels[x * 4 + 3] = 1;
+        }
+        Texture hdr(GL_RGBA32F, size, hdrPixels.data());
+        std::array<uint32_t, 6> original{};
+        std::array<uint32_t, 3> originalSdr{};
+        bool firstFrame = true;
+        // Include changes in both directions and reset, not just startup gain.
+        for (unsigned int percent : {100u, 50u, 150u, 200u, 100u}) {
+            anlandRegisterHdrGainTarget(&encoder, sceneColor, percent, true);
+            draw(sdr, ColorDescription::sRGB, 0, 3, true);
+            draw(hdr, inputColor, 3, 3, true);
+            const bool encoded = encoder.encode(scene.texture.get(), output.fbo.get(), QRegion(QRect(QPoint(), size)));
+            GLFramebuffer::pushFramebuffer(output.fbo.get());
+            std::array<uint32_t, 6> packed{};
+            glReadPixels(0, 0, size.width(), 1, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, packed.data());
+            GLFramebuffer::popFramebuffer();
+            const std::array<double, 6> expected = {0, std::pow(0.5, 2.2) * 203, 203,
+                std::min(200.0 * percent / 100, 1000.0), std::min(600.0 * percent / 100, 1000.0),
+                std::min(1000.0 * percent / 100, 1000.0)};
+            double maximumError = 0;
+            for (int pixel = 0; pixel < size.width(); ++pixel) {
+                const double nits = expected[pixel];
+                for (int channel = 0; channel < 3; ++channel) {
+                    maximumError = std::max(maximumError,
+                        std::abs(double((packed[pixel] >> (channel * 10)) & 1023) - pq(nits) * 1023));
+                }
+            }
+            if (percent == 100) {
+                // Default gain must be exactly the native path, without even
+                // an extra matrix multiply or altered tone mapper uniforms.
+                original = packed;
+                draw(sdr, ColorDescription::sRGB, 0, 3, false);
+                draw(hdr, inputColor, 3, 3, false);
+                encoder.encode(scene.texture.get(), output.fbo.get(), QRegion(QRect(QPoint(), size)));
+                GLFramebuffer::pushFramebuffer(output.fbo.get());
+                glReadPixels(0, 0, size.width(), 1, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, packed.data());
+                GLFramebuffer::popFramebuffer();
+            }
+            if (firstFrame) {
+                std::copy_n(packed.begin(), 3, originalSdr.begin());
+                firstFrame = false;
+            }
+            const bool sdrUnchanged = std::equal(originalSdr.begin(), originalSdr.end(), packed.begin());
+            char label[220];
+            if (maximumError > 1.6) {
+                for (int pixel = 0; pixel < size.width(); ++pixel) {
+                    std::printf("gain pixel %d: code %u expected %.3f\n", pixel, packed[pixel] & 1023, pq(expected[pixel]) * 1023);
+                }
+            }
+            std::snprintf(label, sizeof(label),
+                "%s HDR input at %.2fx: independent SDR black/gray/white, 1000 nit clip, native 1x identity, max error %.3f codes",
+                scrgb ? "scRGB" : "PQ", percent / 100.0, maximumError);
+            check(encoded && maximumError < 1.6 && sdrUnchanged
+                    && (percent != 100 || original == packed) && glGetError() == GL_NO_ERROR, label);
+        }
+        // The source's alpha must remain intact in its premultiplied scene
+        // conversion. Only RGB is changed by the existing matrix uniform.
+        for (int x = 0; x < size.width(); ++x) {
+            const float alpha = 0.5;
+            for (int channel = 0; channel < 3; ++channel) {
+                hdrPixels[x * 4 + channel] = (scrgb ? 200.0 / 80 : pq(200)) * alpha;
+            }
+            hdrPixels[x * 4 + 3] = alpha;
+        }
+        Texture translucent(GL_RGBA32F, size, hdrPixels.data());
+        anlandRegisterHdrGainTarget(&encoder, sceneColor, 100, true);
+        draw(translucent, inputColor, 0, size.width(), true);
+        const auto originalAlphaScene = readFloat(scene);
+        anlandRegisterHdrGainTarget(&encoder, sceneColor, 200, true);
+        draw(translucent, inputColor, 0, size.width(), true);
+        const auto gainAlphaScene = readFloat(scene);
+        const double lightRatio = std::pow(gainAlphaScene[0] / originalAlphaScene[0], 2.2);
+        check(std::abs(gainAlphaScene[3] - 0.5) < 0.001 && gainAlphaScene[3] == originalAlphaScene[3]
+                && std::abs(lightRatio - 2) < 0.01,
+            "2x HDR gain doubles translucent RGB linear light and preserves premultiplied surface alpha");
+    }
+    anlandUnregisterHdrGainTarget(&encoder);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv);
@@ -491,6 +625,7 @@ int main(int argc, char** argv)
     testPremultipliedAlpha();
     testDamageMapping();
     testAdjustableReferenceWhite();
+    testHdrContentGain();
     std::printf("RESULT %s failures=%d\n", failures ? "FAIL" : "PASS", failures);
     context->doneCurrent();
     return failures ? 1 : 0;

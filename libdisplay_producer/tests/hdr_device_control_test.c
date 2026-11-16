@@ -52,16 +52,26 @@ static void input(anland_device *dev, uint32_t type, uint32_t action, int32_t va
 int main(void)
 {
     _Static_assert(sizeof(struct InputEvent) == 20, "existing input wire size");
-    anland_device dev = {.hdr_sdr_white_nits = 203, .format = 43};
+    anland_device dev = {.hdr_sdr_white_nits = 203, .hdr_content_gain_percent = 100, .format = 43};
     assert(anland_device_hdr_sdr_white_nits(NULL) == 203);
+    assert(anland_device_hdr_content_gain_percent(NULL) == 100);
     input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_SDR_WHITE, 400);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 400);
     assert(dev.format == 43);
+    input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_CONTENT_GAIN, 150);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 150);
+    assert(anland_device_hdr_sdr_white_nits(&dev) == 400);
+    input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_CONTENT_GAIN, INT_MIN);
+    input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_CONTENT_GAIN, 49);
+    input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_CONTENT_GAIN, 201);
+    input(&dev, INPUT_TYPE_DISPLAY_REFRESH, ANLAND_HDR_ACTION_CONTENT_GAIN, 200);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 150);
     input(&dev, INPUT_TYPE_ACTION, 123, 300);
     input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_SDR_WHITE, INT_MIN);
     input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_SDR_WHITE, 501);
     input(&dev, INPUT_TYPE_DISPLAY_REFRESH, ANLAND_HDR_ACTION_SDR_WHITE, 300);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 400);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 150);
     transport_input_result = 0;
     anland_device_input_t delivered;
     assert(anland_device_poll_input(&dev, &delivered, 0) == 0);
@@ -72,14 +82,21 @@ int main(void)
     transport_connect_result = 0;
     assert(anland_device_connect(&dev) == 0);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 400);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 150);
     // An automatically detected disconnect gets a fresh default on reconnect.
     transport_fallback = true;
     assert(anland_device_connect(&dev) == 0);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 203);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 100);
+    input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_CONTENT_GAIN, 50);
+    input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_SDR_WHITE, 300);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 50);
+    assert(anland_device_hdr_sdr_white_nits(&dev) == 300);
     input(&dev, INPUT_TYPE_ACTION, ANLAND_HDR_ACTION_SDR_WHITE, 80);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 80);
     anland_device_force_fallback(&dev);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 203);
+    assert(anland_device_hdr_content_gain_percent(&dev) == 100);
     transport_connect_result = -1;
     assert(anland_device_connect(&dev) == -1);
     assert(anland_device_hdr_sdr_white_nits(&dev) == 203);

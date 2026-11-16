@@ -10,12 +10,27 @@
 #define ANLAND_HDR_SDR_WHITE_NITS 203.0f
 #define ANLAND_HDR_SDR_WHITE_MIN_NITS 80u
 #define ANLAND_HDR_SDR_WHITE_MAX_NITS 500u
+#define ANLAND_HDR_CONTENT_GAIN_DEFAULT_PERCENT 100u
+#define ANLAND_HDR_CONTENT_GAIN_MIN_PERCENT 50u
+#define ANLAND_HDR_CONTENT_GAIN_MAX_PERCENT 200u
 #define ANLAND_HDR_PEAK_NITS 1000.0f
 #define ANLAND_HDR_PQ_SCALE_NITS 10000.0f
 
 /* Existing INPUT_TYPE_ACTION payload, not a new message or wire layout.
  * Old producers ignore this optional action; the daemon forwards it unchanged. */
 #define ANLAND_HDR_ACTION_SDR_WHITE 0x48445257u /* HDRW */
+#define ANLAND_HDR_ACTION_CONTENT_GAIN 0x48445247u /* HDRG, integer percent */
+
+static inline bool anland_hdr_content_gain_from_action(uint32_t action, int32_t value,
+                                                       uint32_t *gain_percent)
+{
+    if (action != ANLAND_HDR_ACTION_CONTENT_GAIN || !gain_percent ||
+        value < (int32_t)ANLAND_HDR_CONTENT_GAIN_MIN_PERCENT ||
+        value > (int32_t)ANLAND_HDR_CONTENT_GAIN_MAX_PERCENT)
+        return false;
+    *gain_percent = (uint32_t)value;
+    return true;
+}
 
 static inline bool anland_hdr_sdr_white_from_action(uint32_t action, int32_t value,
                                                    uint32_t *white_nits)

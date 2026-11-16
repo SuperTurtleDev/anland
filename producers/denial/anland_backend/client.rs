@@ -115,6 +115,10 @@ impl Client {
         // SAFETY: the live session is exclusively owned by this compositor thread.
         unsafe { ffi::ad_hdr_sdr_white_nits(self.session.as_ptr()) }.clamp(80, 500)
     }
+    pub fn hdr_content_gain_percent(&self) -> u32 {
+        // SAFETY: the live session is exclusively owned by this compositor thread.
+        unsafe { ffi::ad_hdr_content_gain_percent(self.session.as_ptr()) }.clamp(50, 200)
+    }
     pub fn writable(&self) -> io::Result<Option<Target>> {
         let mut out = Target::default();
         // SAFETY: initialized output storage and live session.
