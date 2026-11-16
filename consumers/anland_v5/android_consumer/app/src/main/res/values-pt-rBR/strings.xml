@@ -77,7 +77,7 @@
     <string name="immersive_auto_enter_hint">Envia automaticamente o teclado Gold para o desktop quando o aplicativo volta ao primeiro plano. Toque e gestos do Android continuam disponíveis.</string>
     <string name="immersive_inputs_loading">Verificando dispositivos…</string>
     <string name="immersive_inputs_found">Os dispositivos ocupados pelo Gold aparecem, mas não podem ser selecionados.</string>
-    <string name="immersive_inputs_unknown">Não foi possível verificar quais dispositivos o Gold ocupa; nenhum foi marcado como ocupado. Não há confirmação de que algum esteja livre.</string>
+    <string name="immersive_inputs_unknown">Não foi possível identificar quais dispositivos estão sendo usados pelo Gold. Nenhum foi marcado como ocupado, mas não é possível garantir que estejam disponíveis.</string>
     <string name="immersive_inputs_occupied">✕ %1$s — ocupado pelo Gold</string>
     <string name="immersive_inputs_system_power">✕ %1$s — mantido no Android para preservar o controle do botão liga/desliga</string>
     <string name="device_class_keyboard">Teclado</string>
