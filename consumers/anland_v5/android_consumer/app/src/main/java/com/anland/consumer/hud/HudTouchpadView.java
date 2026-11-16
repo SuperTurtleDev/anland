@@ -2,6 +2,7 @@ package com.anland.consumer.hud;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Handler;
@@ -16,9 +17,9 @@ import android.view.View;
  * Features:
  * - High-precision 1-finger relative cursor movement
  * - Quick single-finger tap = Left Click (BTN_LEFT 0x110)
- * - Quick double tap = Double Click (nhấp đúp 2 lần)
- * - Double tap + drag = Mouse Drag (giữ chuột trái kéo rê)
- * - Hold (nhấn giữ) = Right Click (BTN_RIGHT 0x111)
+ * - Quick double tap = Double Click
+ * - Double tap + drag = Mouse Drag
+ * - Hold = Right Click (BTN_RIGHT 0x111)
  * - Two-finger vertical/horizontal drag = Wheel Scroll
  * - Subtle haptic pulse feedback when gliding across the trackpad surface
  */
@@ -117,42 +118,61 @@ public final class HudTouchpadView extends View {
 
         // 1. Steam Deck Square Matte Surface with Rounded Corners
         mPaint.setStyle(Paint.Style.FILL);
-        int baseBg = mModel.bgColor != 0 ? mModel.bgColor : 0xF0161822;
-        mPaint.setColor(mIsTouching ? 0xF024283A : baseBg);
-        mPaint.setAlpha(Math.round(mModel.opacity * 255));
+        int baseBg = mModel.bgColor != 0 ? mModel.bgColor : 0xFF424242;
+        int variant = mModel.styleVariant; // 0=Precision Matte, 1=Laptop Trackpad, 2=Glass Outline
+
+        if (variant == 2) {
+            mPaint.setColor(0x00000000);
+        } else {
+            int targetCol = mIsTouching ? 0xFFA39CB8 : baseBg;
+            int origAlpha = (targetCol >>> 24);
+            int finalAlpha = Math.round(mModel.opacity * origAlpha);
+            mPaint.setColor((targetCol & 0x00FFFFFF) | (finalAlpha << 24));
+        }
         canvas.drawRoundRect(mBounds, corner, corner, mPaint);
 
-        // 2. Outer Steam Deck Border Stroke (Accent Glow on touch)
-        mPaint.setStyle(Paint.Style.STROKE);
-        mPaint.setStrokeWidth(Math.max(1, Math.round(1.5f * density)));
-        int activeAccent = mModel.activeColor != 0 ? mModel.activeColor : 0xFF80DEEA;
-        mPaint.setColor(mIsTouching ? activeAccent : 0x7780DEEA);
-        canvas.drawRoundRect(mBounds, corner, corner, mPaint);
+        // 2. Outer Border Stroke
+        if (mModel.borderStrokeWidthDp > 0) {
+            mPaint.setStyle(Paint.Style.STROKE);
+            mPaint.setStrokeWidth(Math.max(1, Math.round(mModel.borderStrokeWidthDp * density)));
+            mPaint.setColor(mModel.borderColor);
+            canvas.drawRoundRect(mBounds, corner, corner, mPaint);
+        }
 
-        // 3. Inner Tactile Recessed Boundary (authentic Steam Deck recessed bevel)
-        float inset = 6f * density;
-        RectF innerBounds = new RectF(mBounds.left + inset, mBounds.top + inset, mBounds.right - inset, mBounds.bottom - inset);
-        float innerCorner = Math.max(4f * density, corner - inset * 0.7f);
-        mPaint.setStyle(Paint.Style.STROKE);
-        mPaint.setStrokeWidth(Math.max(1, Math.round(1.0f * density)));
-        mPaint.setColor(mIsTouching ? 0x5580DEEA : 0x2280DEEA);
-        canvas.drawRoundRect(innerBounds, innerCorner, innerCorner, mPaint);
+        // 3. Inner Tactile Recessed Boundary (Only in Precision Matte)
+        if (variant == 0) {
+            float inset = 6f * density;
+            RectF innerBounds = new RectF(mBounds.left + inset, mBounds.top + inset, mBounds.right - inset, mBounds.bottom - inset);
+            float innerCorner = Math.max(4f * density, corner - inset * 0.7f);
+            mPaint.setStyle(Paint.Style.STROKE);
+            mPaint.setStrokeWidth(Math.max(1, Math.round(1.0f * density)));
+            mPaint.setColor(mIsTouching ? 0x55A39CB8 : 0x22FFFFFF);
+            canvas.drawRoundRect(innerBounds, innerCorner, innerCorner, mPaint);
+        }
 
-        // 4. Center Precision Tactile Crosshair
+        // 4. Center Icon or Precision Crosshair
         float cx = w * 0.5f;
         float cy = h * 0.5f;
-        float armLen = 7f * density;
-        float gap = 2.5f * density;
-        mPaint.setStyle(Paint.Style.STROKE);
-        mPaint.setStrokeWidth(1.2f * density);
-        mPaint.setColor(mIsTouching ? activeAccent : 0x8880DEEA);
-        canvas.drawLine(cx - armLen, cy, cx - gap, cy, mPaint);
-        canvas.drawLine(cx + gap, cy, cx + armLen, cy, mPaint);
-        canvas.drawLine(cx, cy - armLen, cx, cy - gap, mPaint);
-        canvas.drawLine(cx, cy + gap, cx, cy + armLen, mPaint);
+
+        if (variant == 1) {
+            // Laptop Style: Draw clean Mouse icon in center
+            mPaint.setColor(Color.WHITE);
+            HudVectorIcons.drawIcon(canvas, HudVectorIcons.ICON_MOUSE_L, cx, cy, 26f * density, mPaint);
+        } else {
+            // Precision Crosshair
+            float armLen = 7f * density;
+            float gap = 2.5f * density;
+            mPaint.setStyle(Paint.Style.STROKE);
+            mPaint.setStrokeWidth(1.2f * density);
+            mPaint.setColor(0xFFFFFFFF);
+            canvas.drawLine(cx - armLen, cy, cx - gap, cy, mPaint);
+            canvas.drawLine(cx + gap, cy, cx + armLen, cy, mPaint);
+            canvas.drawLine(cx, cy - armLen, cx, cy - gap, mPaint);
+            canvas.drawLine(cx, cy + gap, cx, cy + armLen, mPaint);
+        }
 
         // 5. Center Touchpad Label
-        mTextPaint.setColor(mIsTouching ? 0xFF80DEEA : 0xAA80DEEA);
+        mTextPaint.setColor(Color.WHITE);
         mTextPaint.setTextSize(Math.max(8 * density, 9.5f * density));
         mTextPaint.setTextAlign(Paint.Align.CENTER);
         mTextPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
@@ -256,7 +276,7 @@ public final class HudTouchpadView extends View {
                             mHandler.removeCallbacks(mHoldRunnable);
                         }
 
-                        // Double tap + vuốt = Mouse DRAG (giữ chuột trái kéo rê)!
+                        // Double tap + drag = Mouse DRAG
                         if (mIsDoubleTapCandidate && mHasMoved && !mIsDraggingLeftButton) {
                             mIsDraggingLeftButton = true;
                             mDispatcher.onPointerButton(1, true); // Press left button down!

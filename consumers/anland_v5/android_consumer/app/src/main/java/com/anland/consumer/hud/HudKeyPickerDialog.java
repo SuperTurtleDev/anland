@@ -6,11 +6,13 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
@@ -75,14 +77,18 @@ public final class HudKeyPickerDialog {
 
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16));
-        root.setBackground(M3.shape(context, M3.RADIUS_CARD, M3.COLOR_SURFACE, M3.COLOR_BORDER_STRONG, 1.0f));
+        root.setPadding(dp(context, 16), dp(context, 14), dp(context, 16), dp(context, 14));
+        GradientDrawable rootBg = new GradientDrawable();
+        rootBg.setCornerRadius(dp(context, 20));
+        rootBg.setColor(0xFF484848); // Charcoal Alight Motion
+        rootBg.setStroke(dp(context, 1), 0x33FFFFFF);
+        root.setBackground(rootBg);
 
-        // Header Row: Back Button on left + Title
+        // Header Row: Back Button on left + Tabs in the middle + Title/Slots
         LinearLayout headerRow = new LinearLayout(context);
         headerRow.setOrientation(LinearLayout.HORIZONTAL);
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
-        headerRow.setPadding(0, 0, 0, dp(context, 10));
+        headerRow.setPadding(0, 0, 0, dp(context, 8));
 
         AlertDialog dialog = builder.setView(root).create();
         if (dialog.getWindow() != null) {
@@ -92,70 +98,85 @@ public final class HudKeyPickerDialog {
         LinearLayout btnBack = new LinearLayout(context);
         btnBack.setOrientation(LinearLayout.HORIZONTAL);
         btnBack.setGravity(Gravity.CENTER_VERTICAL);
-        btnBack.setBackground(M3.createRippleDrawable(context, M3.RADIUS_CHIP, M3.COLOR_SURFACE_HIGHEST, 0x44FFFFFF, M3.COLOR_BORDER_SUBTLE));
+        GradientDrawable backBg = new GradientDrawable();
+        backBg.setCornerRadius(dp(context, 10));
+        backBg.setColor(0xFF3A3A3A);
+        backBg.setStroke(dp(context, 1), 0x33FFFFFF);
+        btnBack.setBackground(backBg);
         btnBack.setPadding(dp(context, 8), dp(context, 4), dp(context, 10), dp(context, 4));
         btnBack.setClickable(true);
         btnBack.setOnClickListener(v -> dialog.dismiss());
 
         M3.BackArrowView backArrow = new M3.BackArrowView(context);
+        backArrow.setColor(Color.WHITE);
         btnBack.addView(backArrow);
 
         TextView backText = new TextView(context);
         backText.setText(context.getString(R.string.hud_picker_back));
         backText.setTextSize(11.5f);
         backText.setTypeface(Typeface.DEFAULT_BOLD);
-        backText.setTextColor(M3.COLOR_PRIMARY);
+        backText.setTextColor(Color.WHITE);
         backText.setPadding(dp(context, 6), 0, 0, 0);
         btnBack.addView(backText);
 
         headerRow.addView(btnBack);
 
-        TextView title = new TextView(context);
-        title.setText(context.getString(R.string.hud_picker_title));
-        title.setTextColor(M3.COLOR_TEXT_PRIMARY);
-        title.setTextSize(16);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(dp(context, 10), 0, 0, 0);
-        headerRow.addView(title);
-        root.addView(headerRow);
-
-        // Tab Navigation Bar (wrapped in HorizontalScrollView so the labels
-        // never get squeezed on narrow portrait phones).
+        // Tab Navigation Bar directly on the header row!
         HorizontalScrollView tabScroller = new HorizontalScrollView(context);
         tabScroller.setHorizontalScrollBarEnabled(false);
         tabScroller.setFillViewport(true);
         LinearLayout tabRow = new LinearLayout(context);
         tabRow.setOrientation(LinearLayout.HORIZONTAL);
         tabRow.setGravity(Gravity.CENTER_VERTICAL);
-        tabRow.setPadding(dp(context, 4), 0, dp(context, 4), dp(context, 8));
+        tabRow.setPadding(dp(context, 10), 0, dp(context, 4), 0);
         tabScroller.addView(tabRow, new HorizontalScrollView.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(tabScroller, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        headerRow.addView(tabScroller, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        root.addView(headerRow);
+
+        // Sub-header Row: Search filter input OR 3-Slot Row for Combo
+        FrameLayout subHeader = new FrameLayout(context);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 32));
+        subLp.setMargins(0, 0, 0, dp(context, 6));
+        subHeader.setLayoutParams(subLp);
 
         // Search filter input
         EditText searchInput = new EditText(context);
-        M3.styleInput(searchInput);
         searchInput.setHint(context.getString(R.string.hud_picker_search));
         searchInput.setHintTextColor(0xFF888888);
+        searchInput.setTextColor(Color.WHITE);
+        searchInput.setTextSize(12);
         searchInput.setSingleLine(true);
-        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        searchLp.setMargins(0, 0, 0, dp(context, 8));
-        searchInput.setLayoutParams(searchLp);
-        root.addView(searchInput);
+        GradientDrawable sBg = new GradientDrawable();
+        sBg.setCornerRadius(dp(context, 8));
+        sBg.setColor(0xFF3A3A3A);
+        sBg.setStroke(dp(context, 1), 0x33FFFFFF);
+        searchInput.setBackground(sBg);
+        searchInput.setPadding(dp(context, 10), dp(context, 4), dp(context, 10), dp(context, 4));
+        subHeader.addView(searchInput, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Combo 3-Slots Container (Takes exact place and size of search bar)
+        LinearLayout slotContainer = new LinearLayout(context);
+        slotContainer.setVisibility(View.GONE);
+        subHeader.addView(slotContainer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        root.addView(subHeader);
 
         boolean isLandscape = context.getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
 
         int screenW = context.getResources().getDisplayMetrics().widthPixels;
         int screenH = context.getResources().getDisplayMetrics().heightPixels;
-        final int dialogW = isLandscape ? Math.min(dp(context, 540), screenW - dp(context, 32))
-                                        : Math.min(dp(context, 360), screenW - dp(context, 20));
+        final int dialogW = isLandscape ? Math.min(dp(context, 620), screenW - dp(context, 24))
+                                        : Math.min(dp(context, 380), screenW - dp(context, 16));
         final int dialogH = isLandscape ? Math.min(dp(context, 560), screenH - dp(context, 24))
-                                        : Math.min(dp(context, 520), screenH - dp(context, 64));
+                                        : Math.min(dp(context, 540), screenH - dp(context, 48));
         root.setLayoutParams(new ViewGroup.LayoutParams(dialogW, dialogH));
 
         // Content Container
@@ -172,9 +193,9 @@ public final class HudKeyPickerDialog {
         tabRow.addView(btnTabMods);
         tabRow.addView(btnTabCombo);
 
-        // KEYS is dense 4-column (6 in landscape); MODS & SYS is 3-column (4 in landscape)
-        final int colsKeys = isLandscape ? 6 : computeColumnCount(context, 4);
-        final int colsLong = isLandscape ? 4 : 3;
+        // All tabs standardized to 5 columns in landscape (aligned with MODS & SYS)
+        final int colsKeys = isLandscape ? 5 : 3;
+        final int colsLong = isLandscape ? 5 : 3;
 
         final int[] activeTab = {0};
         final Runnable refreshCurrentTab = () -> {
@@ -207,25 +228,24 @@ public final class HudKeyPickerDialog {
         selectTab[0] = () -> {
             activeTab[0] = 0;
             searchInput.setVisibility(View.VISIBLE);
+            slotContainer.setVisibility(View.GONE);
             highlightTab(tabRow, 0);
             refreshCurrentTab.run();
         };
         selectTab[1] = () -> {
             activeTab[0] = 1;
             searchInput.setVisibility(View.VISIBLE);
+            slotContainer.setVisibility(View.GONE);
             highlightTab(tabRow, 1);
             refreshCurrentTab.run();
         };
-        // The COMBO tab inlines the combo builder so the user does not get a
-        // second nested dialog. Tapping APPLY calls onComboBuilt which
-        // dismisses the outer dialog and forwards the new HudAction.combo
-        // to the caller's onActionSelected (via the default in
-        // OnActionSelectedListener).
+        // COMBO tab inlines the combo builder
         selectTab[2] = () -> {
             activeTab[0] = 2;
             searchInput.setVisibility(View.GONE);
+            slotContainer.setVisibility(View.VISIBLE);
             highlightTab(tabRow, 2);
-            showComboTab(context, contentContainer, listener, dialog);
+            showComboTab(context, contentContainer, listener, dialog, slotContainer);
         };
 
         btnTabKeys.setOnClickListener(v -> selectTab[0].run());
@@ -249,22 +269,33 @@ public final class HudKeyPickerDialog {
     // chosen action through onComboBuilt.
     private static void showComboTab(final Context ctx, final LinearLayout container,
                                     final OnActionSelectedListener listener,
-                                    final AlertDialog dialog) {
+                                    final AlertDialog dialog,
+                                    final LinearLayout slotContainer) {
         container.removeAllViews();
-        new ComboBuilderView().showInline(ctx, container, combo -> {
+        new ComboBuilderView().showInline(ctx, container, slotContainer, combo -> {
             dialog.dismiss();
             if (listener != null) listener.onComboBuilt(ctx, combo);
         });
     }
 
+    private static void resetTabRowToNormal(LinearLayout tabRow, Context context) {
+    }
+
     private static Button createTabButton(Context ctx, String text) {
         Button b = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
         b.setText(text);
-        b.setTextSize(12);
-        b.setTextColor(0xFF888888);
-        b.setPadding(dp(ctx, 14), dp(ctx, 6), dp(ctx, 14), dp(ctx, 6));
+        b.setTextSize(11.5f);
+        b.setTextColor(0xFFC3C3CD);
+        b.setPadding(dp(ctx, 4), dp(ctx, 4), dp(ctx, 4), dp(ctx, 4));
         b.setBackgroundColor(Color.TRANSPARENT);
         b.setAllCaps(true);
+        b.setSingleLine(true);
+        b.setGravity(Gravity.CENTER);
+        b.setMinHeight(0);
+        b.setMinWidth(0);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(ctx, 92), dp(ctx, 32));
+        lp.rightMargin = dp(ctx, 6);
+        b.setLayoutParams(lp);
         return b;
     }
 
@@ -272,11 +303,14 @@ public final class HudKeyPickerDialog {
         for (int i = 0; i < tabRow.getChildCount(); i++) {
             Button b = (Button) tabRow.getChildAt(i);
             if (i == activeIdx) {
-                b.setTextColor(M3.COLOR_PRIMARY);
+                b.setTextColor(Color.WHITE);
                 b.setTypeface(Typeface.DEFAULT_BOLD);
-                b.setBackground(M3.shape(b.getContext(), M3.RADIUS_CHIP, M3.COLOR_PRIMARY_CONTAINER, M3.COLOR_PRIMARY, 1.0f));
+                GradientDrawable tabBg = new GradientDrawable();
+                tabBg.setCornerRadius(dp(b.getContext(), 12));
+                tabBg.setColor(0xFFA39CB8); // Lilac pastel Alight Motion
+                b.setBackground(tabBg);
             } else {
-                b.setTextColor(M3.COLOR_TEXT_MUTED);
+                b.setTextColor(0xFFC3C3CD);
                 b.setTypeface(Typeface.DEFAULT);
                 b.setBackgroundColor(Color.TRANSPARENT);
             }
@@ -299,12 +333,24 @@ public final class HudKeyPickerDialog {
         // labels because each cell is given equal share of the width via
         // LayoutParams weight=1.
         ScrollView scroll = new ScrollView(ctx);
+        scroll.setVerticalScrollBarEnabled(true);
+        scroll.setScrollbarFadingEnabled(false);
+        scroll.setScrollBarStyle(View.SCROLLBARS_INSIDE_INSET);
+
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setShape(GradientDrawable.RECTANGLE);
+        thumb.setCornerRadius(dp(ctx, 4));
+        thumb.setColor(0xFFA39CB8); // Lilac pastel
+        thumb.setSize(dp(ctx, 4), dp(ctx, 36));
+        scroll.setVerticalScrollbarThumbDrawable(thumb);
+
         LinearLayout grid = new LinearLayout(ctx);
         grid.setOrientation(LinearLayout.VERTICAL);
-        int hSpacing = dp(ctx, 6);
-        int vSpacing = dp(ctx, 6);
-        int sidePad = dp(ctx, 4);
-        grid.setPadding(sidePad, dp(ctx, 6), sidePad, dp(ctx, 8));
+        boolean isLandscape = ctx.getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        int hSpacing = dp(ctx, isLandscape ? 4 : 6);
+        int vSpacing = dp(ctx, isLandscape ? 4 : 6);
+        grid.setPadding(dp(ctx, 2), dp(ctx, 4), dp(ctx, 12), dp(ctx, 6)); // Right padding 12dp to make room for scrollbar
 
         for (int row = 0; row < entries.size(); row += columns) {
             LinearLayout rowView = new LinearLayout(ctx);
@@ -329,19 +375,18 @@ public final class HudKeyPickerDialog {
                 Button btn = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
                 btn.setText(entry.label);
                 btn.setTextColor(Color.WHITE);
-                btn.setBackground(M3.createRippleDrawable(ctx, M3.RADIUS_CHIP, M3.COLOR_SURFACE_HIGHEST, 0x44FFFFFF, M3.COLOR_BORDER_SUBTLE));
-                btn.setPadding(dp(ctx, 4), dp(ctx, 6), dp(ctx, 4), dp(ctx, 6));
-                btn.setMinHeight(dp(ctx, 44));
-                btn.setMaxLines(2);
-                btn.setSingleLine(false);
+                GradientDrawable btnBg = new GradientDrawable();
+                btnBg.setCornerRadius(dp(ctx, 8));
+                btnBg.setColor(0xFF484848); // Charcoal button matching modifier
+                btnBg.setStroke(dp(ctx, 1), 0x33FFFFFF);
+                btn.setBackground(btnBg);
+                btn.setPadding(dp(ctx, 4), dp(ctx, 2), dp(ctx, 4), dp(ctx, 2));
+                btn.setMinHeight(dp(ctx, isLandscape ? 30 : 38));
+                btn.setSingleLine(true);
                 btn.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 btn.setGravity(Gravity.CENTER);
                 btn.setIncludeFontPadding(false);
-                if (entry.label.length() > 9) {
-                    btn.setTextSize(10.5f);
-                } else {
-                    btn.setTextSize(12.5f);
-                }
+                btn.setTextSize(isLandscape ? 11f : 12f);
                 LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
                 if (col > 0) btnLp.leftMargin = hSpacing;

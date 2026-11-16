@@ -2,14 +2,16 @@ diff --git a/debian/libmutter-18-0.symbols b/debian/libmutter-18-0.symbols
 index a52ba2e15e..960620b838 100644
 --- a/debian/libmutter-18-0.symbols
 +++ b/debian/libmutter-18-0.symbols
-@@ -2046,10 +2046,13 @@ libmutter-clutter-18.so.0 libmutter-18-0 #MINVER#
+@@ -2046,10 +2046,15 @@ libmutter-clutter-18.so.0 libmutter-18-0 #MINVER#
   clutter_stage_view_notify_presented@Base 43.0
   clutter_stage_view_notify_ready@Base 43.0
   clutter_stage_view_peek_scanout@Base 43.0
 + clutter_stage_view_present@Base 50.1
++ clutter_stage_view_queue_anland_hdr_copy@Base 50.1
 + clutter_stage_view_replace_framebuffer@Base 50.1
   clutter_stage_view_schedule_update@Base 43.0
   clutter_stage_view_schedule_update_now@Base 44.0
++ clutter_stage_view_set_anland_hdr_copy_func@Base 50.1
   clutter_stage_view_set_color_state@Base 47.0
   clutter_stage_view_set_output_color_state@Base 47.0
 + clutter_stage_view_set_present_func@Base 50.1
@@ -1031,3 +1033,212 @@ index 535cb57112..e5e1d6f504 100644
        manager->private_connection.name =
          g_strdup_printf ("unix:%s%d", X11_TMP_UNIX_PATH,
                           manager->private_connection.display_index);
+diff --git a/src/backends/meta-color-device.c b/src/backends/meta-color-device.c
+--- a/src/backends/meta-color-device.c
++++ b/src/backends/meta-color-device.c
+@@ -19,6 +19,10 @@
+  */
+
+ #include "config.h"
++
++#ifdef HAVE_ANLAND
++#include "backends/anland/meta-backend-anland.h"
++#endif
+
+ #include "backends/meta-color-device.h"
+
+@@ -756,6 +760,15 @@
+   ClutterLuminance luminance;
+   UpdateResult result = 0;
+
++#ifdef HAVE_ANLAND
++  if (META_IS_BACKEND_ANLAND (backend))
++    {
++      color_state = meta_backend_anland_create_output_color_state (
++        META_BACKEND_ANLAND (backend));
++      goto apply_color_state;
++    }
++#endif
++
+   get_color_metadata_from_monitor (monitor, &colorimetry, &eotf);
+
+   if (meta_debug_control_is_hdr_forced (debug_control))
+@@ -774,6 +787,9 @@
+                                                                 eotf,
+                                                                 luminance);
+
++#ifdef HAVE_ANLAND
++apply_color_state:
++#endif
+   if (!color_device->color_state ||
+       !clutter_color_state_equals (color_device->color_state, color_state))
+     {
+diff --git a/src/backends/meta-renderer-view.c b/src/backends/meta-renderer-view.c
+--- a/src/backends/meta-renderer-view.c
++++ b/src/backends/meta-renderer-view.c
+@@ -30,6 +30,10 @@
+
+ #include "config.h"
+
++#ifdef HAVE_ANLAND
++#include "backends/anland/meta-backend-anland.h"
++#endif
++
+ #include "backends/meta-renderer-view.h"
+
+ #include "backends/meta-color-device.h"
+@@ -88,8 +92,14 @@
+   output_color_state = meta_color_device_get_color_state (priv->color_device);
+
+   force_linear = meta_debug_control_is_linear_blending_forced (debug_control);
+-  view_color_state = clutter_color_state_get_blending (output_color_state,
+-                                                       force_linear);
++#ifdef HAVE_ANLAND
++  if (META_IS_BACKEND_ANLAND (priv->backend))
++    view_color_state = meta_backend_anland_create_view_color_state (
++      META_BACKEND_ANLAND (priv->backend));
++  else
++#endif
++    view_color_state = clutter_color_state_get_blending (output_color_state,
++                                                         force_linear);
+
+   if (meta_is_topic_enabled (META_DEBUG_RENDER))
+     {
+diff --git a/clutter/clutter/clutter-stage-view-private.h b/clutter/clutter/clutter-stage-view-private.h
+--- a/clutter/clutter/clutter-stage-view-private.h
++++ b/clutter/clutter/clutter-stage-view-private.h
+@@ -55,6 +55,18 @@
+ void clutter_stage_view_replace_framebuffer (ClutterStageView *view,
+                                               CoglFramebuffer  *framebuffer);
+
++/* Anland's persistent FP16 scene and rotating consumer targets have
++ * separate damage lifetimes. The returned region is owned by the caller. */
++typedef MtkRegion * (* MetaStageViewCopyRegionFunc) (ClutterStageView *view,
++                                                    const MtkRegion  *redraw_clip,
++                                                    gpointer          user_data);
++CLUTTER_EXPORT
++void clutter_stage_view_set_anland_hdr_copy_func (ClutterStageView *view,
++                                                  MetaStageViewCopyRegionFunc func,
++                                                  gpointer          user_data);
++CLUTTER_EXPORT
++void clutter_stage_view_queue_anland_hdr_copy (ClutterStageView *view);
++
+ CLUTTER_EXPORT
+ void clutter_stage_view_set_present_func (ClutterStageView        *view,
+                                            MetaStageViewPresentFunc present_func,
+diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
+--- a/clutter/clutter/clutter-stage-view.c
++++ b/clutter/clutter/clutter-stage-view.c
+@@ -92,6 +92,8 @@
+
+   MetaStageViewPresentFunc present_func;
+   gpointer present_user_data;
++  MetaStageViewCopyRegionFunc anland_hdr_copy_func;
++  gpointer anland_hdr_copy_data;
+
+   float refresh_rate;
+   int64_t vblank_duration_us;
+@@ -256,6 +258,17 @@
+                                    cogl_offscreen_get_texture (priv->offscreen));
+   cogl_pipeline_set_layer_wrap_mode (pipeline, 0,
+                                      COGL_PIPELINE_WRAP_MODE_CLAMP_TO_EDGE);
++
++  if (priv->anland_hdr_copy_func)
++    {
++      g_autoptr (CoglSnippet) clip = NULL;
++      /* Scene linear code 1 is 1000 nits. Limit before the native PQ
++       * transform, including on 48/49 which lack mastering-peak metadata. */
++      clip = cogl_snippet_new (COGL_SNIPPET_HOOK_TEXTURE_LOOKUP, NULL,
++                              "cogl_texel.rgb = clamp (cogl_texel.rgb, "
++                              "vec3 (0.0), vec3 (1.0));");
++      cogl_pipeline_add_layer_snippet (pipeline, 0, clip);
++    }
+
+   if (priv->transform != MTK_MONITOR_TRANSFORM_NORMAL)
+     {
+@@ -517,6 +530,12 @@
+
+   g_warn_if_fail (priv->ensure_offscreen_idle_id == 0);
+
++  g_autoptr (MtkRegion) copy_clip = NULL;
++
++  if (priv->anland_hdr_copy_func)
++    copy_clip = priv->anland_hdr_copy_func (view, redraw_clip,
++                                           priv->anland_hdr_copy_data);
++
+   if (priv->offscreen)
+     {
+       if (priv->shadow.framebuffer)
+@@ -528,7 +547,7 @@
+                                          priv->offscreen_pipeline,
+                                          priv->offscreen,
+                                          shadowfb,
+-                                         redraw_clip);
++                                         copy_clip ? copy_clip : redraw_clip);
+         }
+       else
+         {
+@@ -536,7 +555,7 @@
+                                          priv->offscreen_pipeline,
+                                          priv->offscreen,
+                                          priv->framebuffer,
+-                                         redraw_clip);
++                                         copy_clip ? copy_clip : redraw_clip);
+         }
+     }
+ }
+@@ -1202,6 +1221,35 @@
+                              priv->present_user_data);
+ }
+
++void
++clutter_stage_view_set_anland_hdr_copy_func (ClutterStageView *view,
++                                             MetaStageViewCopyRegionFunc func,
++                                             gpointer          user_data)
++{
++  ClutterStageViewPrivate *priv =
++    clutter_stage_view_get_instance_private (view);
++
++  priv->anland_hdr_copy_func = func;
++  priv->anland_hdr_copy_data = user_data;
++  if (func)
++    clutter_stage_view_invalidate_offscreen (view);
++}
++
++void
++clutter_stage_view_queue_anland_hdr_copy (ClutterStageView *view)
++{
++  ClutterStageViewPrivate *priv =
++    clutter_stage_view_get_instance_private (view);
++
++  /* An empty scene redraw still runs the final pass for this slot's debt.
++   * Do not fabricate one-pixel scene damage: it would age every other slot. */
++  if (!priv->has_redraw_clip)
++    {
++      priv->redraw_clip = mtk_region_create ();
++      priv->has_redraw_clip = TRUE;
++    }
++}
++
+ static void
+ clutter_stage_view_set_transform (ClutterStageView    *view,
+                                   MtkMonitorTransform  transform)
+diff --git a/src/backends/meta-stage-impl.c b/src/backends/meta-stage-impl.c
+--- a/src/backends/meta-stage-impl.c
++++ b/src/backends/meta-stage-impl.c
+@@ -607,7 +607,14 @@
+         queued_redraw_clip = mtk_region_ref (redraw_clip);
+     }
+
+-  g_return_if_fail (!mtk_region_is_empty (fb_clip_region));
++  if (mtk_region_is_empty (fb_clip_region))
++    {
++      /* Anland may only owe a final FP16-to-consumer copy, with no scene
++       * damage. Its callback expands the copy region using per-slot debt. */
++      clutter_stage_view_after_paint (stage_view, redraw_clip);
++      swap_framebuffer (stage_window, stage_view, fb_clip_region, FALSE, frame);
++      return;
++    }
+
+   /* XXX: It seems there will be a race here in that the stage
+    * window may be resized before the cogl_onscreen_swap_region

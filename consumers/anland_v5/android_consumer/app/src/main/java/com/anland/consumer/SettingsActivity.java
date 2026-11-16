@@ -350,6 +350,7 @@ public class SettingsActivity extends Activity {
         currentPage = Page.RESOLUTION;
         LinearLayout root = newPage(R.string.section_resolution);
         addResolutionSection(root);
+        addHdrSection(root);
         setContent(root);
     }
 
@@ -1416,6 +1417,117 @@ public class SettingsActivity extends Activity {
             hint.setPadding(0, dp(2), 0, dp(12));
             root.addView(hint);
         }
+    }
+
+    private void addHdrSection(LinearLayout root) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(16), 0, 0);
+        Switch hdrSwitch = new Switch(this);
+        hdrSwitch.setText(R.string.hdr_switch);
+        hdrSwitch.setTextSize(14);
+        hdrSwitch.setMinWidth(0);
+        hdrSwitch.setPadding(0, 0, dp(8), 0);
+        hdrSwitch.setChecked(prefs.getBoolean(MainActivity.KEY_EXPERIMENTAL_HDR, false));
+        row.addView(hdrSwitch, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button brightness = new Button(this);
+        brightness.setTextSize(12);
+        brightness.setAllCaps(false);
+        brightness.setMinWidth(0);
+        brightness.setMinimumWidth(0);
+        brightness.setMaxWidth(dp(148));
+        brightness.setPadding(dp(8), 0, dp(8), 0);
+        updateHdrBrightnessButton(brightness, prefs);
+        brightness.setEnabled(hdrSwitch.isChecked());
+        brightness.setOnClickListener(view -> showHdrBrightnessDialog(brightness, prefs));
+        row.addView(brightness, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        hdrSwitch.setOnCheckedChangeListener((view, checked) -> {
+            prefs.edit().putBoolean(MainActivity.KEY_EXPERIMENTAL_HDR, checked).apply();
+            brightness.setEnabled(checked);
+        });
+        root.addView(row);
+
+        TextView hint = new TextView(this);
+        hint.setText(R.string.hdr_hint);
+        hint.setTextSize(12);
+        hint.setTextColor(Color.GRAY);
+        hint.setPadding(0, dp(4), 0, dp(12));
+        root.addView(hint);
+    }
+
+    private void updateHdrBrightnessButton(Button button, SharedPreferences prefs) {
+        int nits = HdrBrightness.clamp(prefs.getInt(
+                HdrBrightness.KEY_SDR_WHITE_NITS, HdrBrightness.DEFAULT_NITS));
+        button.setText(getString(R.string.hdr_brightness_button, nits));
+        button.setContentDescription(getString(R.string.hdr_brightness_accessibility, nits));
+    }
+
+    private void showHdrBrightnessDialog(Button button, SharedPreferences prefs) {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(24), dp(12), dp(24), 0);
+        TextView explanation = new TextView(this);
+        explanation.setText(R.string.hdr_brightness_hint);
+        explanation.setTextSize(14);
+        content.addView(explanation);
+
+        TextView value = new TextView(this);
+        value.setTextSize(20);
+        value.setPadding(0, dp(16), 0, dp(8));
+        content.addView(value);
+        SeekBar seek = new SeekBar(this);
+        seek.setContentDescription(getString(R.string.hdr_brightness_title));
+        seek.setMin(HdrBrightness.MIN_NITS);
+        seek.setMax(HdrBrightness.MAX_NITS);
+        int current = HdrBrightness.clamp(prefs.getInt(
+                HdrBrightness.KEY_SDR_WHITE_NITS, HdrBrightness.DEFAULT_NITS));
+        seek.setProgress(current);
+        seek.setStateDescription(getString(R.string.hdr_brightness_value, current));
+        value.setText(getString(R.string.hdr_brightness_value, current));
+        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                int nits = progress;
+                value.setText(getString(R.string.hdr_brightness_value, nits));
+                seek.setStateDescription(getString(R.string.hdr_brightness_value, nits));
+                prefs.edit().putInt(HdrBrightness.KEY_SDR_WHITE_NITS, nits).apply();
+                updateHdrBrightnessButton(button, prefs);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) { }
+            @Override public void onStopTrackingTouch(SeekBar bar) { }
+        });
+        content.addView(seek, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout presets = new LinearLayout(this);
+        for (int nits : new int[] {HdrBrightness.DEFAULT_NITS, 300, 400}) {
+            Button preset = new Button(this);
+            preset.setText(getString(R.string.hdr_brightness_value, nits));
+            preset.setTextSize(12);
+            preset.setAllCaps(false);
+            preset.setMinWidth(0);
+            preset.setMinimumWidth(0);
+            preset.setPadding(dp(4), 0, dp(4), 0);
+            preset.setOnClickListener(view -> seek.setProgress(nits));
+            presets.addView(preset, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        }
+        content.addView(presets);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.hdr_brightness_title)
+                .setView(scroll)
+                .setNeutralButton(R.string.hdr_brightness_reset, null)
+                .setPositiveButton(android.R.string.ok, null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+                .setOnClickListener(view -> seek.setProgress(
+                        HdrBrightness.DEFAULT_NITS)));
+        dialog.show();
     }
 
     // Connection settings: a custom daemon socket path and a "connect with root"

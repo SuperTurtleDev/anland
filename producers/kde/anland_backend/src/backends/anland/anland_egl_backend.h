@@ -21,9 +21,7 @@
 #include "platformsupport/scenes/opengl/abstract_egl_backend.h"
 #endif
 
-#ifndef ANLAND_KWIN_66
 #include <QRegion>
-#endif
 #include <array>
 #include <map>
 #include <memory>
@@ -44,6 +42,7 @@ class SurfaceTexture;
 class AnlandBackend;
 class AnlandEglBackend;
 class AnlandOutput;
+class AnlandHdrEncoder;
 
 class AnlandEglLayer : public OutputLayer
 {
@@ -128,6 +127,9 @@ public:
 
 private:
     void onOutputTransformChanged();
+    void onOutputColorDescriptionChanged();
+    bool createHdrRenderTarget(const QSize &size, const OutputTransform &transform);
+    bool encodeHdrFrame(const QRegion &deviceDamage);
 
     AnlandEglBackend *const m_backend;
     AnlandOutput *m_output;
@@ -142,6 +144,14 @@ private:
     int m_pendingFence = -1;
     std::array<std::shared_ptr<GLTexture>, ANLAND_DEVICE_MAX_BUFS> m_textures;
     std::array<std::unique_ptr<GLFramebuffer>, ANLAND_DEVICE_MAX_BUFS> m_fbos;
+    // The scene persists across consumer slot changes. Only its first frame or
+    // an orientation or color change needs a full repaint; each consumer slot separately
+    // accumulates the damage that still needs final PQ encoding.
+    std::unique_ptr<GLTexture> m_hdrTexture;
+    std::unique_ptr<GLFramebuffer> m_hdrFbo;
+    std::unique_ptr<AnlandHdrEncoder> m_hdrEncoder;
+    uint32_t m_hdrTextureId = 0; // owned here; GLTexture is a non-owning wrapper
+    bool m_hdrSceneNeedsFullRepaint = false;
     /* Per-buffer accumulated damage: each buffer must remember everything that
      * changed since it was last rendered, because the consumer rotates the
      * selected index out from under us. */

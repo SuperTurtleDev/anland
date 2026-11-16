@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.os.Handler;
 import android.os.Looper;
@@ -31,6 +32,8 @@ public final class HudFreeformButtonView extends View {
     private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF mBounds = new RectF();
+    private final Path mPath = new Path();
+    private final float[] mRadii = new float[8];
     private final HudButtonPress mPress = new HudButtonPress();
 
     private boolean mIsPressed;
@@ -125,6 +128,39 @@ public final class HudFreeformButtonView extends View {
         mRepeatHandler.removeCallbacks(mRepeatTick);
     }
 
+    public static void computeRadii(int shape, float r, float[] outRadii) {
+        // [Top-Left x, y, Top-Right x, y, Bottom-Right x, y, Bottom-Left x, y]
+        java.util.Arrays.fill(outRadii, 0f);
+        switch (shape) {
+            case HudButton.CORNER_TOP_LEFT:
+                outRadii[0] = r; outRadii[1] = r;
+                break;
+            case HudButton.CORNER_TOP_RIGHT:
+                outRadii[2] = r; outRadii[3] = r;
+                break;
+            case HudButton.CORNER_BOTTOM_LEFT:
+                outRadii[6] = r; outRadii[7] = r;
+                break;
+            case HudButton.CORNER_BOTTOM_RIGHT:
+                outRadii[4] = r; outRadii[5] = r;
+                break;
+            case HudButton.CORNER_LEFT_BOTH:
+                outRadii[0] = r; outRadii[1] = r;
+                outRadii[6] = r; outRadii[7] = r;
+                break;
+            case HudButton.CORNER_RIGHT_BOTH:
+                outRadii[2] = r; outRadii[3] = r;
+                outRadii[4] = r; outRadii[5] = r;
+                break;
+            case HudButton.CORNER_ALL:
+                java.util.Arrays.fill(outRadii, r);
+                break;
+            case HudButton.CORNER_NONE:
+            default:
+                break;
+        }
+    }
+
     public HudButton getModel() {
         return mModel;
     }
@@ -151,29 +187,56 @@ public final class HudFreeformButtonView extends View {
 
         // Fill
         mPaint.setStyle(Paint.Style.FILL);
-        mPaint.setColor(mIsPressed ? mModel.activeColor : mModel.bgColor);
-        mPaint.setAlpha(Math.round(mModel.opacity * 255));
+        int baseColor = mIsPressed ? mModel.activeColor : mModel.bgColor;
+        int origAlpha = (baseColor >>> 24);
+        int finalAlpha = Math.round(mModel.opacity * origAlpha);
+        mPaint.setColor((baseColor & 0x00FFFFFF) | (finalAlpha << 24));
         float corner = mModel.cornerRadiusDp * density;
-        canvas.drawRoundRect(mBounds, corner, corner, mPaint);
+
+        computeRadii(mModel.cornerShape, corner, mRadii);
+        mPath.reset();
+        mPath.addRoundRect(mBounds, mRadii, Path.Direction.CW);
+        canvas.drawPath(mPath, mPaint);
 
         // Stroke
-        mPaint.setStyle(Paint.Style.STROKE);
-        mPaint.setStrokeWidth(Math.max(1, Math.round(1.0f * density)));
-        mPaint.setColor(0x66FFFFFF);
-        canvas.drawRoundRect(mBounds, corner, corner, mPaint);
-
-        // Text with auto font scaling
-        mTextPaint.setColor(mIsPressed ? 0xFF11111B : mModel.textColor);
-        String label = mModel.label != null ? mModel.label : "BTN";
-        float maxTextWidth = w - 12 * density;
-        float textSize = Math.min(w, h) * 0.35f;
-        mTextPaint.setTextSize(textSize);
-        float textW = mTextPaint.measureText(label);
-        if (textW > maxTextWidth && textW > 0) {
-            mTextPaint.setTextSize(Math.max(8 * density, textSize * (maxTextWidth / textW)));
+        if (mModel.borderStrokeWidthDp > 0) {
+            mPaint.setStyle(Paint.Style.STROKE);
+            mPaint.setStrokeWidth(Math.max(1, Math.round(mModel.borderStrokeWidthDp * density)));
+            mPaint.setColor(mModel.borderColor);
+            canvas.drawPath(mPath, mPaint);
         }
-        float textY = h * 0.5f - ((mTextPaint.descent() + mTextPaint.ascent()) * 0.5f);
-        canvas.drawText(label, w * 0.5f, textY, mTextPaint);
+
+        // Text or Icon
+        if (mModel.iconId != null && !HudVectorIcons.ICON_NONE.equals(mModel.iconId) && !mModel.iconId.isEmpty()) {
+            mPaint.setColor(mIsPressed ? 0xFF11111B : mModel.textColor);
+            float iconSize = Math.min(w, h) * 0.46f;
+            HudVectorIcons.drawIcon(canvas, mModel.iconId, w * 0.5f, h * 0.5f, iconSize, mPaint);
+        } else {
+            // Text with auto font scaling and alignment
+            mTextPaint.setColor(mIsPressed ? 0xFF11111B : mModel.textColor);
+            String label = mModel.label != null ? mModel.label : "BTN";
+            float maxTextWidth = w - 16 * density;
+            float textSize = Math.min(w, h) * 0.35f;
+            mTextPaint.setTextSize(textSize);
+            float textW = mTextPaint.measureText(label);
+            if (textW > maxTextWidth && textW > 0) {
+                mTextPaint.setTextSize(Math.max(8 * density, textSize * (maxTextWidth / textW)));
+            }
+            float textY = h * 0.5f - ((mTextPaint.descent() + mTextPaint.ascent()) * 0.5f);
+
+            float textX;
+            if (mModel.textAlign == HudButton.ALIGN_LEFT) {
+                mTextPaint.setTextAlign(Paint.Align.LEFT);
+                textX = 10 * density;
+            } else if (mModel.textAlign == HudButton.ALIGN_RIGHT) {
+                mTextPaint.setTextAlign(Paint.Align.RIGHT);
+                textX = w - 10 * density;
+            } else {
+                mTextPaint.setTextAlign(Paint.Align.CENTER);
+                textX = w * 0.5f;
+            }
+            canvas.drawText(label, textX, textY, mTextPaint);
+        }
 
         // Secondary popup glyph dot if configured
         if (mModel.popupAction != null) {

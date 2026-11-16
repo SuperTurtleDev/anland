@@ -117,7 +117,7 @@ public final class KeyboardWingsDialog {
         }
         Button done = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         if (done != null) {
-            done.setTextColor(M3.COLOR_PRIMARY);
+            done.setTextColor(0xFFA39CB8);
             done.setAllCaps(false);
         }
         Button reset = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);

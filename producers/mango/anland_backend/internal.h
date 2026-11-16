@@ -96,6 +96,7 @@ struct anland_backend {
     uint32_t touch_ids[INPUT_PRESSED_MAX], touch_count;
 	uint32_t width, height, format, refresh;
 	bool announced;
+	bool hdr_rejection_logged;
 	bool output_initialized;
 	bool selection_listener_set;
 	struct wl_listener selection_listener;

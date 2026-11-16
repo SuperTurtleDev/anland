@@ -56,7 +56,7 @@ typedef struct anland_device_output {
     char     name[ANLAND_DEVICE_MAX_NAME];
     uint32_t width;        /* logical (consumer native) resolution */
     uint32_t height;
-    uint32_t format;       /* 1 = ABGR8888 (protocol convention) */
+    uint32_t format;       /* consumer HAL layout: 1/2/5 (8-bit), 43 (RGB10A2) */
     uint32_t refresh_mhz;  /* milli-Hz */
     bool     connected;    /* false while consumer absent (fallback) */
     bool     primary;
@@ -177,6 +177,10 @@ void anland_device_close(anland_device *dev);
 
 /* True once a consumer session is up (not in fallback). */
 bool anland_device_is_connected(const anland_device *dev);
+/* Consumer's optional SDR reference white within HDR, in nits (80..500).
+ * Defaults to 203 on every new session and for old apps. Set by the existing
+ * ACTION input when polled; does not change the consumer's HDR/SDR mode. */
+uint32_t anland_device_hdr_sdr_white_nits(const anland_device *dev);
 /* Poll target-ready and peer hangups together without consuming any bytes.
  * 1 ready / 0 pending / -1 lost (fallback callback run); timeout is per-call.
  * Detects closure before the first target as well as during normal ACK waits. */
@@ -258,7 +262,9 @@ int anland_device_get_fb(anland_device *dev, int index, anland_device_fb_t *fb);
 
 /* Additive native-import view: format is DRM fourcc, not the legacy protocol
  * value in get_fb(). Owned fd is always CLOEXEC. Other fields/ownership match
- * get_fb(). Existing consumers retain their original format semantics. */
+ * get_fb(). Existing consumers retain their original format semantics.
+ * HAL 43 maps to ABGR2101010 storage only; a backend must separately validate
+ * its HDR policy and full color pipeline before accepting the app's PQ target. */
 int anland_device_get_drm_fb(anland_device *dev, int index, anland_device_fb_t *fb);
 
 /* Index the consumer selected for the current frame (shm page). Clamped into

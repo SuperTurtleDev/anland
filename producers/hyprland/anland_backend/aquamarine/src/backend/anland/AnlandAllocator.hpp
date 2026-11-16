@@ -17,6 +17,7 @@ namespace Aquamarine {
         eAllocatorType type() override { return AQ_ALLOCATOR_TYPE_GBM; }
         bool supportsBufferAge() override { return false; }
         uint64_t generation = 0;
+        bool hdr = false;
         std::vector<Hyprutils::Memory::CSharedPointer<CAnlandBuffer>> buffers;
       private:
         Hyprutils::Memory::CWeakPointer<CAnlandBackend> m_owner;

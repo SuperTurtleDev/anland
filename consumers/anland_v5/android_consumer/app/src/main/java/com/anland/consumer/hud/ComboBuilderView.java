@@ -4,7 +4,9 @@ import com.anland.consumer.R;
 import com.anland.consumer.theme.M3;
 import android.content.Context;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -52,6 +54,13 @@ public final class ComboBuilderView {
     private final List<String> mKeyLabels = new ArrayList<>();
 
     public ComboBuilderView() {
+        // 0. Modifiers (CTRL, ALT, SUPER, SHIFT) - included in normal grid!
+        for (int m = 0; m < MODIFIER_CODES.length; m++) {
+            final int code = MODIFIER_CODES[m];
+            final String lbl = MODIFIER_LABELS[m];
+            mKeycodes.add(code);
+            mKeyLabels.add(lbl);
+        }
         // 1. Navigation & Arrow keys (evdev scancodes)
         int[] navCodes = {103, 108, 105, 106, 102, 107, 104, 109};
         String[] navLabels = {"UP", "DOWN", "LEFT", "RIGHT", "HOME", "END", "PGUP", "PGDN"};
@@ -138,16 +147,27 @@ public final class ComboBuilderView {
             if (mSlotLabels[i] == null) continue;
             Context ctx = mSlotLabels[i].getContext();
             if (i == mActiveSlot) {
-                mSlotLabels[i].setBackground(M3.shape(ctx, M3.RADIUS_CHIP, M3.COLOR_PRIMARY, 0, 0));
-                mSlotLabels[i].setTextColor(0xFF00363D);
+                GradientDrawable d = new GradientDrawable();
+                d.setCornerRadius(dp(ctx, 8));
+                d.setColor(0xFFA39CB8); // Lilac pastel
+                mSlotLabels[i].setBackground(d);
+                mSlotLabels[i].setTextColor(Color.WHITE);
                 mSlotLabels[i].setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
             } else if (mSlotCodes[i] != 0) {
-                mSlotLabels[i].setBackground(M3.shape(ctx, M3.RADIUS_CHIP, M3.COLOR_SURFACE_HIGHEST, M3.COLOR_PRIMARY, 1.0f));
-                mSlotLabels[i].setTextColor(M3.COLOR_PRIMARY);
+                GradientDrawable d = new GradientDrawable();
+                d.setCornerRadius(dp(ctx, 8));
+                d.setColor(0xFF484848);
+                d.setStroke(dp(ctx, 1), 0xFFA39CB8);
+                mSlotLabels[i].setBackground(d);
+                mSlotLabels[i].setTextColor(Color.WHITE);
                 mSlotLabels[i].setTypeface(android.graphics.Typeface.DEFAULT);
             } else {
-                mSlotLabels[i].setBackground(M3.shape(ctx, M3.RADIUS_CHIP, M3.COLOR_SURFACE_HIGH, M3.COLOR_BORDER_SUBTLE, 1.0f));
-                mSlotLabels[i].setTextColor(M3.COLOR_TEXT_MUTED);
+                GradientDrawable d = new GradientDrawable();
+                d.setCornerRadius(dp(ctx, 8));
+                d.setColor(0xFF2E2E2E);
+                d.setStroke(dp(ctx, 1), 0x33FFFFFF);
+                mSlotLabels[i].setBackground(d);
+                mSlotLabels[i].setTextColor(0xFF888888);
                 mSlotLabels[i].setTypeface(android.graphics.Typeface.DEFAULT);
             }
         }
@@ -189,8 +209,20 @@ public final class ComboBuilderView {
      * calling the onComboBuilt callback.
      */
     public void showInline(Context ctx, ViewGroup host, OnComboBuiltListener listener) {
+        showInline(ctx, host, null, listener);
+    }
+
+    public void showInline(Context ctx, ViewGroup host, LinearLayout slotContainer, OnComboBuiltListener listener) {
         mListener = listener;
         host.removeAllViews();
+        host.setBackgroundColor(Color.TRANSPARENT);
+
+        if (slotContainer != null) {
+            slotContainer.removeAllViews();
+            slotContainer.addView(buildSlotRow(ctx), new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+
         // On short screens, let the whole builder scroll rather than squeezing
         // its weighted key grid down to an unusable sliver.
         ScrollView scroll = new ScrollView(ctx);
@@ -203,41 +235,23 @@ public final class ComboBuilderView {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
-    // Build the dialog body. Uses flex weight=1f on the key grid so that
-    // CLEAR ALL and APPLY COMBO stay at the bottom when space allows. On very
-    // short screens the outer scroll view keeps the entire builder reachable.
-    private LinearLayout buildContent(final Context ctx) {
+    private LinearLayout buildSlotRow(final Context ctx) {
         boolean isLandscape = ctx.getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
-        LinearLayout root = new LinearLayout(ctx);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFF1E1E2E);
-        root.setPadding(dp(ctx, 12), dp(ctx, 4), dp(ctx, 12), dp(ctx, 10));
-
-        if (!isLandscape) {
-            TextView hint = new TextView(ctx);
-            hint.setText(ctx.getString(R.string.hud_combo_builder_hint));
-            hint.setTextColor(0xFFAAAAAA);
-            hint.setTextSize(11);
-            hint.setPadding(0, 0, 0, dp(ctx, 8));
-            root.addView(hint);
-        }
-
-        // Slot row
         LinearLayout slotRow = new LinearLayout(ctx);
         slotRow.setOrientation(LinearLayout.HORIZONTAL);
         slotRow.setGravity(Gravity.CENTER_VERTICAL);
-        slotRow.setPadding(0, 0, 0, dp(ctx, 8));
+
         for (int i = 0; i < MAX_SLOTS; i++) {
             TextView slot = new TextView(ctx);
             slot.setText(slotLabel(ctx, i + 1));
-            slot.setTextSize(13);
+            slot.setTextSize(isLandscape ? 11f : 12f);
             slot.setAllCaps(false);
             slot.setTextColor(0xFF888888);
-            slot.setGravity(Gravity.CENTER);
-            slot.setPadding(dp(ctx, 8), dp(ctx, 8), dp(ctx, 8), dp(ctx, 8));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            if (i > 0) lp.leftMargin = dp(ctx, 8);
+            slot.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+            slot.setPadding(dp(ctx, 10), 0, dp(ctx, 6), 0);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(ctx, 32), 1f);
+            if (i > 0) lp.leftMargin = dp(ctx, 6);
             slotRow.addView(slot, lp);
             mSlotLabels[i] = slot;
             final int slotIndex = i;
@@ -247,48 +261,41 @@ public final class ComboBuilderView {
                 } else {
                     setActiveSlot(slotIndex);
                 }
-                updatePreview();
             });
         }
-        root.addView(slotRow);
+        refreshActiveSlot();
+        return slotRow;
+    }
 
-        // Pinned Modifiers Quick-Bar (Always visible without scrolling)
-        LinearLayout modRow = new LinearLayout(ctx);
-        modRow.setOrientation(LinearLayout.HORIZONTAL);
-        modRow.setGravity(Gravity.CENTER_VERTICAL);
-        modRow.setPadding(0, 0, 0, dp(ctx, 8));
-        for (int m = 0; m < MODIFIER_CODES.length; m++) {
-            final int code = MODIFIER_CODES[m];
-            final String lbl = MODIFIER_LABELS[m];
-            Button b = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
-            b.setText(lbl);
-            b.setTextSize(11.5f);
-            b.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            b.setTextColor(M3.COLOR_PRIMARY);
-            b.setBackground(M3.createRippleDrawable(ctx, M3.RADIUS_CHIP, M3.COLOR_PRIMARY_CONTAINER, 0x5580DEEA, M3.COLOR_BORDER_SUBTLE));
-            b.setMinHeight(dp(ctx, 36));
-            b.setPadding(dp(ctx, 2), dp(ctx, 4), dp(ctx, 2), dp(ctx, 4));
-            b.setSingleLine(true);
-            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            if (m > 0) mlp.leftMargin = dp(ctx, 6);
-            b.setLayoutParams(mlp);
-            b.setOnClickListener(v -> {
-                setSlot(mActiveSlot, code);
-                updatePreview();
-            });
-            modRow.addView(b);
-        }
-        root.addView(modRow);
-
-        // Key picker grid inside flex ScrollView (weight = 1f)
+    // Build the dialog body.
+    private LinearLayout buildContent(final Context ctx) {
+        boolean isLandscape = ctx.getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        LinearLayout root = new LinearLayout(ctx);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Color.TRANSPARENT);
+        root.setPadding(0, dp(ctx, 4), 0, dp(ctx, 4));
+        // KEY PICKER GRID INSIDE FLEX SCROLLVIEW
         ScrollView keyScroll = new ScrollView(ctx);
-        keyScroll.setBackgroundColor(0xFF15151E);
-        keyScroll.setPadding(dp(ctx, 6), dp(ctx, 6), dp(ctx, 6), dp(ctx, 6));
+        keyScroll.setVerticalScrollBarEnabled(true);
+        keyScroll.setScrollbarFadingEnabled(false);
+        keyScroll.setScrollBarStyle(View.SCROLLBARS_INSIDE_INSET);
+        keyScroll.setBackgroundColor(Color.TRANSPARENT); // Transparent background
+
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setShape(GradientDrawable.RECTANGLE);
+        thumb.setCornerRadius(dp(ctx, 4));
+        thumb.setColor(0xFFA39CB8); // Lilac pastel
+        thumb.setSize(dp(ctx, 4), dp(ctx, 36));
+        keyScroll.setVerticalScrollbarThumbDrawable(thumb);
+
         LinearLayout keyGrid = new LinearLayout(ctx);
         keyGrid.setOrientation(LinearLayout.VERTICAL);
-        final int keyCols = isLandscape ? 6 : 4;
-        final int hSpacing = dp(ctx, 6);
-        final int vSpacing = dp(ctx, 6);
+        keyGrid.setPadding(dp(ctx, 2), dp(ctx, 2), dp(ctx, 12), dp(ctx, 4)); // Right padding 12dp to make room for scrollbar
+
+        final int keyCols = isLandscape ? 5 : 3; // Standard 5 columns
+        final int hSpacing = dp(ctx, isLandscape ? 4 : 6);
+        final int vSpacing = dp(ctx, isLandscape ? 4 : 6);
         for (int i = 0; i < mKeycodes.size(); i += keyCols) {
             LinearLayout row = new LinearLayout(ctx);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -309,19 +316,25 @@ public final class ComboBuilderView {
                 final String lbl = mKeyLabels.get(idx);
                 Button k = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
                 k.setText(lbl);
-                k.setTextSize(11.5f);
+                k.setTextSize(isLandscape ? 11f : 12f);
                 k.setAllCaps(false);
                 k.setTextColor(Color.WHITE);
-                k.setBackground(M3.createRippleDrawable(ctx, M3.RADIUS_CHIP, M3.COLOR_SURFACE_HIGHEST, 0x44FFFFFF, M3.COLOR_BORDER_SUBTLE));
-                k.setMinHeight(dp(ctx, 38));
-                k.setPadding(dp(ctx, 2), dp(ctx, 4), dp(ctx, 2), dp(ctx, 4));
+                GradientDrawable kBg = new GradientDrawable();
+                kBg.setCornerRadius(dp(ctx, 8));
+                kBg.setColor(0xFF484848);
+                kBg.setStroke(dp(ctx, 1), 0x33FFFFFF);
+                k.setBackground(kBg);
+                k.setMinHeight(dp(ctx, isLandscape ? 30 : 38));
+                k.setPadding(dp(ctx, 4), dp(ctx, 2), dp(ctx, 4), dp(ctx, 2));
                 k.setSingleLine(true);
+                k.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                k.setGravity(Gravity.CENTER);
+                k.setIncludeFontPadding(false);
                 LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
                 if (col > 0) blp.leftMargin = hSpacing;
                 k.setLayoutParams(blp);
                 k.setOnClickListener(v -> {
                     setSlot(mActiveSlot, code);
-                    updatePreview();
                 });
                 row.addView(k);
             }
@@ -336,16 +349,6 @@ public final class ComboBuilderView {
         scrollLp.setMargins(0, 0, 0, dp(ctx, 6));
         root.addView(keyScroll, scrollLp);
 
-        // Preview is shown right above the action row
-        mPreview = new TextView(ctx);
-        mPreview.setText("");
-        mPreview.setTextColor(M3.COLOR_PRIMARY);
-        mPreview.setTextSize(13);
-        mPreview.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        mPreview.setGravity(Gravity.CENTER);
-        mPreview.setPadding(0, dp(ctx, 4), 0, dp(ctx, 4));
-        root.addView(mPreview);
-
         // Action row: Clear All + Apply Combo (always pinned at the bottom)
         LinearLayout actions = new LinearLayout(ctx);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -356,44 +359,38 @@ public final class ComboBuilderView {
         btnClear.setTextSize(12);
         btnClear.setAllCaps(true);
         btnClear.setTextColor(Color.WHITE);
-        btnClear.setBackground(M3.createRippleDrawable(ctx, M3.RADIUS_BUTTON, M3.COLOR_SURFACE_HIGHEST, 0x44FFFFFF, M3.COLOR_BORDER_SUBTLE));
-        btnClear.setOnClickListener(v -> {
-            clear();
-            updatePreview();
-        });
+        GradientDrawable clrBg = new GradientDrawable();
+        clrBg.setCornerRadius(dp(ctx, 12));
+        clrBg.setColor(0xFF878787); // Grey button
+        btnClear.setBackground(clrBg);
+        btnClear.setMinHeight(dp(ctx, 32));
+        btnClear.setOnClickListener(v -> clear());
         actions.addView(btnClear, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         Button btnApply = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
         btnApply.setText(ctx.getString(R.string.hud_combo_apply));
         btnApply.setTextSize(12);
         btnApply.setAllCaps(true);
-        btnApply.setTextColor(Color.BLACK);
-        btnApply.setBackground(M3.createRippleDrawable(ctx, M3.RADIUS_BUTTON, M3.COLOR_PRIMARY, 0xAA80DEEA, 0));
+        btnApply.setTextColor(Color.WHITE);
+        btnApply.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        GradientDrawable appBg = new GradientDrawable();
+        appBg.setCornerRadius(dp(ctx, 12));
+        appBg.setColor(0xFFA39CB8); // Lilac pastel
+        btnApply.setBackground(appBg);
+        btnApply.setMinHeight(dp(ctx, 32));
         btnApply.setOnClickListener(v -> commit());
-        LinearLayout.LayoutParams applyLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        applyLp.leftMargin = dp(ctx, 8);
-        actions.addView(btnApply, applyLp);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        alp.leftMargin = dp(ctx, 8);
+        actions.addView(btnApply, alp);
 
         root.addView(actions);
 
         refreshActiveSlot();
-        updatePreview();
 
         return root;
     }
 
     private void updatePreview() {
-        if (mPreview == null) return;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < MAX_SLOTS; i++) {
-            if (mSlotCodes[i] == 0) continue;
-            if (sb.length() > 0) sb.append(" + ");
-            sb.append(labelFor(mSlotCodes[i]));
-        }
-        if (sb.length() == 0) {
-            sb.append(mPreview.getContext().getString(R.string.hud_combo_empty));
-        }
-        mPreview.setText(sb.toString());
     }
 
     private static int dp(Context ctx, int v) {

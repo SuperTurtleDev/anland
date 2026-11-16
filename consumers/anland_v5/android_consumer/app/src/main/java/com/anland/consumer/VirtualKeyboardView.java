@@ -783,14 +783,14 @@ public class VirtualKeyboardView extends View {
 
     private void initTopWings() {
         mWingKeys.clear();
-        // Nut phu nho gon 3x2 moi ben (12 nut), ha thap gan phim chu.
-        // Cánh trái: các phím bổ trợ & thao tác nhanh
+        // Compact 3x2 wing keys on each side (12 keys total), positioned close to letter keys.
+        // Left wing: modifiers & shortcuts
         String[] leftDefLabels = {"ESC", "TAB", "CTRL", "ALT", "SHIFT", "SUPER"};
         int[] leftDefCodes = {KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_TAB,
                 KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_ALT_LEFT,
                 KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_META_LEFT};
 
-        // Cánh phải: cụm phím điều hướng chữ T ngược chuẩn (Inverted-T) + Del/PgUp
+        // Right wing: inverted-T navigation cluster + Del/PgUp
         String[] rightDefLabels = {"DEL", "▲", "PGUP", "◀", "▼", "▶"};
         int[] rightDefCodes = {KeyEvent.KEYCODE_FORWARD_DEL, KeyEvent.KEYCODE_DPAD_UP,
                 KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_DPAD_LEFT,

@@ -2,6 +2,7 @@
 #include "AnlandOutput.hpp"
 #include "AnlandInput.hpp"
 #include "anland_camera.h"
+#include "anland_hdr.h"
 #include <algorithm>
 #include <cmath>
 #include <time.h>
@@ -119,6 +120,7 @@ void CAnlandBackend::onInputReadable() {
             m_payloadType = 0; m_payload.clear();
         }
         anland_device_input_t event = {};
+        const uint32_t previousWhite = anland_device_hdr_sdr_white_nits(device);
         const int result = anland_device_poll_input(device, &event, 0);
         if (result < 0) m_lost = true;
         if (result <= 0) break;
@@ -132,6 +134,15 @@ void CAnlandBackend::onInputReadable() {
             continue;
         }
         switch (event.type) {
+            case ANLAND_DEVICE_IN_ACTION:
+                if (event.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE && hdrEnabled() && m_output &&
+                    anland_device_hdr_sdr_white_nits(device) != previousWhite) {
+                    // Notify the WM to refresh native CM without a modeset or
+                    // replacing imported targets. The getter already changed.
+                    m_output->events.state.emit(IOutput::SStateEvent{});
+                    m_output->scheduleFrame(IOutput::AQ_SCHEDULE_DAMAGE);
+                }
+                break;
             case ANLAND_DEVICE_IN_PTR_MOTION: {
                 const Vector2D delta{event.pointer_motion.dx, event.pointer_motion.dy};
                 if (!std::isfinite(delta.x) || !std::isfinite(delta.y) || delta == Vector2D{}) break;

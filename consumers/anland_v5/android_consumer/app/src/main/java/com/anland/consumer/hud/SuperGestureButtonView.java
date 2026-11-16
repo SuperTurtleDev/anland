@@ -76,8 +76,10 @@ public final class SuperGestureButtonView extends View {
 
         // Background
         mPaint.setStyle(Paint.Style.FILL);
-        mPaint.setColor(mIsPressed ? 0xFF80DEEA : mModel.bgColor);
-        mPaint.setAlpha(Math.round(mModel.opacity * 255));
+        int targetCol = mIsPressed ? 0xFF80DEEA : mModel.bgColor;
+        int origAlpha = (targetCol >>> 24);
+        int finalAlpha = Math.round(mModel.opacity * origAlpha);
+        mPaint.setColor((targetCol & 0x00FFFFFF) | (finalAlpha << 24));
         float corner = mModel.cornerRadiusDp * density;
         canvas.drawRoundRect(mBounds, corner, corner, mPaint);
 
@@ -99,7 +101,18 @@ public final class SuperGestureButtonView extends View {
             mTextPaint.setTextSize(textSize);
         }
         float textY = h * 0.5f - ((mTextPaint.descent() + mTextPaint.ascent()) * 0.5f);
-        canvas.drawText(label, w * 0.5f, textY, mTextPaint);
+        float textX;
+        if (mModel.textAlign == HudButton.ALIGN_LEFT) {
+            mTextPaint.setTextAlign(Paint.Align.LEFT);
+            textX = 14 * density;
+        } else if (mModel.textAlign == HudButton.ALIGN_RIGHT) {
+            mTextPaint.setTextAlign(Paint.Align.RIGHT);
+            textX = w - 14 * density;
+        } else {
+            mTextPaint.setTextAlign(Paint.Align.CENTER);
+            textX = w * 0.5f;
+        }
+        canvas.drawText(label, textX, textY, mTextPaint);
 
         // 4-way outward vector chevrons (Top, Bottom, Left, Right)
         mPaint.setColor(0xCC80DEEA);

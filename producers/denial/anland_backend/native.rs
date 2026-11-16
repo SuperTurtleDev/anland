@@ -10,17 +10,27 @@ use crate::flutter_runtime::{OutputRenderTargetPool, PoolSelection};
 use crate::frame_request::{OutputFrameRequest, RenderDispatch};
 use crate::wayland_frontend::WaylandFrontend;
 use denial_core::topology::{AtlasPlan, OutputId, TopologyManager, TopologySnapshot};
-use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufFlags};
-use smithay::backend::allocator::{Fourcc, Modifier};
+use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf, DmabufFlags};
+use smithay::backend::allocator::gbm::{GbmAllocator, GbmBuffer};
+use smithay::backend::allocator::{Allocator, Buffer, Fourcc, Modifier};
+use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::egl::EGLContext;
 use std::io;
 use std::time::Instant;
 
-/// Dmabuf owns the duplicated descriptors; Flutter's existing EGLImage/FBO
-/// importer borrows this pool. No new scanout allocation or CPU copy is made.
+struct SceneBuffer {
+    dmabuf: Dmabuf,
+    _allocation: GbmBuffer,
+}
+
+/// Consumer storage stays zero-copy. HDR alone gets native FP16 scene targets
+/// and Denial's final BT.2020/PQ pass, retaining highlights from HDR clients.
 pub(crate) struct ImportedPool {
     pub identity: Pool,
+    pub hdr: bool,
+    pub sdr_white_nits: u32,
     buffers: Vec<Dmabuf>,
+    scenes: Vec<SceneBuffer>,
 }
 
 /// Called only after the public event queue and any old native pool have been
@@ -29,6 +39,7 @@ pub(crate) fn prepare_output(
     client: &mut Client,
     previous: &TopologyManager,
     scale_120: u32,
+    allocator: &mut GbmAllocator<DrmDeviceFd>,
 ) -> io::Result<(OutputPlan, ImportedPool)> {
     if client.events_pending() != 0 {
         return Err(io::Error::from(io::ErrorKind::WouldBlock));
@@ -45,7 +56,7 @@ pub(crate) fn prepare_output(
         ));
     }
     let plan = OutputPlan::prepare_scaled(previous, output, target, scale_120)?;
-    let imported = ImportedPool::import(client, target, plan.pool)?;
+    let imported = ImportedPool::import(client, target, plan.pool, allocator)?;
     let current = client.output()?;
     if client.events_pending() != 0
         || current.width != output.width
@@ -58,7 +69,12 @@ pub(crate) fn prepare_output(
 }
 
 impl ImportedPool {
-    pub fn import(client: &mut Client, target: Target, identity: Pool) -> io::Result<Self> {
+    pub fn import(
+        client: &mut Client,
+        target: Target,
+        identity: Pool,
+        allocator: &mut GbmAllocator<DrmDeviceFd>,
+    ) -> io::Result<Self> {
         if identity.generation != target.generation
             || identity.count != target.count as usize
             || !(1..=8).contains(&identity.count)
@@ -71,6 +87,7 @@ impl ImportedPool {
             ));
         }
         let mut buffers = Vec::with_capacity(identity.count);
+        let mut pool_format = None;
         for index in 0..target.count {
             let image = client.import(target.generation, index)?;
             if image.width != target.width || image.height != target.height {
@@ -86,6 +103,16 @@ impl ImportedPool {
             i32::try_from(image.offset).map_err(io::Error::other)?;
             let format = Fourcc::try_from(image.fourcc)
                 .map_err(|_| io::Error::other("unknown DRM fourcc"))?;
+            if !matches!(
+                format,
+                Fourcc::Abgr8888 | Fourcc::Xbgr8888 | Fourcc::Argb8888 | Fourcc::Abgr2101010
+            ) || pool_format.is_some_and(|first| first != format)
+            {
+                return Err(io::Error::other(
+                    "unsupported or mixed Anland consumer formats",
+                ));
+            }
+            pool_format = Some(format);
             let mut builder = Dmabuf::builder(
                 (width, height),
                 format,
@@ -111,12 +138,52 @@ impl ImportedPool {
                 ));
             }
         }
-        Ok(Self { identity, buffers })
+        let hdr = pool_format == Some(Fourcc::Abgr2101010);
+        #[cfg(not(feature = "anland-runtime-v2"))]
+        if hdr {
+            return Err(io::Error::other(
+                "this Denial version has no native HDR content pipeline",
+            ));
+        }
+        let mut scenes = Vec::new();
+        if hdr {
+            for _ in 0..identity.count {
+                // Use a native renderable, uncompressed FP16 scene. Do not
+                // inherit the consumer's RGB10 layout or fall back to RGBA8.
+                let allocation = allocator
+                    .create_buffer(
+                        target.width,
+                        target.height,
+                        Fourcc::Abgr16161616f,
+                        &[Modifier::Linear],
+                    )
+                    .map_err(io::Error::other)?;
+                if allocation.format().code != Fourcc::Abgr16161616f
+                    || allocation.format().modifier != Modifier::Linear
+                {
+                    return Err(io::Error::other("HDR scene allocation is not linear FP16"));
+                }
+                scenes.push(SceneBuffer {
+                    dmabuf: allocation.export().map_err(io::Error::other)?,
+                    _allocation: allocation,
+                });
+            }
+        }
+        Ok(Self {
+            identity,
+            hdr,
+            sdr_white_nits: client.hdr_sdr_white_nits(),
+            buffers,
+            scenes,
+        })
     }
 
     pub fn buffer(&self, index: usize) -> io::Result<&Dmabuf> {
-        self.buffers
+        // Native capture reads the scene, before display primaries/PQ encoding.
+        self.scenes
             .get(index)
+            .map(|scene| &scene.dmabuf)
+            .or_else(|| self.buffers.get(index))
             .ok_or_else(|| io::Error::other("capture source exceeds the imported Anland pool"))
     }
 
@@ -127,13 +194,20 @@ impl ImportedPool {
             configuration_generation: self.identity.configuration,
             size: self.identity.size,
             #[cfg(feature = "anland-runtime-v2")]
-            color: None,
+            color: self
+                .hdr
+                .then(|| super::hdr::output(self.sdr_white_nits).output_color()),
             selection: PoolSelection::External {
                 generation: self.identity.generation,
                 selected: None,
             },
             transfers: self.buffers.iter().map(|_| None).collect(),
-            dmabufs: self.buffers.iter().map(|buffer| (buffer, None)).collect(),
+            dmabufs: self
+                .buffers
+                .iter()
+                .enumerate()
+                .map(|(index, buffer)| (buffer, self.scenes.get(index).map(|scene| &scene.dmabuf)))
+                .collect(),
         }
     }
 
@@ -151,8 +225,17 @@ impl ImportedPool {
                 output: self.identity.output,
                 view: self.identity.view,
                 size: self.identity.size,
+                #[cfg(feature = "anland-runtime-v2")]
+                color: self
+                    .hdr
+                    .then(|| super::hdr::output(self.sdr_white_nits).output_color()),
             },
             self.buffers.clone(),
+            #[cfg(feature = "anland-runtime-v2")]
+            self.scenes
+                .iter()
+                .map(|scene| scene.dmabuf.clone())
+                .collect(),
         )
     }
 
@@ -180,13 +263,19 @@ impl ImportedPool {
         {
             return Err("Anland render plan differs from the imported pool".into());
         }
+        // Import every real FBO and validate RGB10/FP16 precision before
+        // publishing a preferred HDR description or starting a float engine.
+        let prepared =
+            launcher.prepare_with_pools(context, [self.descriptor()], atlas.pixel_size)?;
+        #[cfg(feature = "anland-runtime-v2")]
+        super::hdr::activate(self.identity.output, self.hdr, self.sdr_white_nits);
         let mut runtime = launcher.start_with_pools(
             context,
             [self.descriptor()],
             snapshot,
             atlas,
             refresh_millihz,
-            None,
+            Some(prepared),
         )?;
         runtime.enable_native_frame_clock();
         Ok(runtime)

@@ -37,6 +37,7 @@ add_library(anland_consumer SHARED
 target_include_directories(anland_consumer PRIVATE
     ${LIBDISPLAY_DIR}/libdisplay_consumer
     ${LIBDISPLAY_DIR}/common
+    ${LIBDISPLAY_DIR}/../../libdisplay_producer
 )
 
 target_compile_options(anland_consumer PRIVATE -O3 -flto)
@@ -44,6 +45,7 @@ target_link_options(anland_consumer PRIVATE -flto -fuse-ld=lld)
 
 target_link_libraries(anland_consumer
     android
+    nativewindow
     log
     dl
     aaudio

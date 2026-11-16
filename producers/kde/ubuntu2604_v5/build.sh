@@ -114,6 +114,13 @@ build_pkg() {
     fi
 
     log "Building '$src' (.deb, keeping official version)"
+    if [ "$src" = kwin ] && [ -n "${KWIN_SOURCE_TREE:-}" ]; then
+        # -nc preserves the CMake tree, but also debhelper's completed-build
+        # stamp. Without removing it, dh binary can package the old library
+        # without running the compiler after an overlay update.
+        rm -f "$tree/debian/debhelper-build-stamp" \
+            || die "failed to invalidate the prepared KWin build stamp"
+    fi
     # -d: don't re-check build-deps (already installed above)
     # -b -uc -us: binary only, unsigned. changelog untouched -> official version.
     ( cd "$tree" && DEB_BUILD_OPTIONS="nocheck parallel=$JOBS" \

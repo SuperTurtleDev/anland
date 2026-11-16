@@ -92,26 +92,37 @@ public final class HudDpadView extends View {
         float cy = h * 0.5f;
         float minDim = Math.min(w, h);
         float radius = minDim * 0.5f - 2f * density;
-        int activeAccent = mModel.activeColor != 0 ? mModel.activeColor : 0xFF80DEEA;
-        int baseBg = mModel.bgColor != 0 ? mModel.bgColor : 0xE61A1C29;
+        int activeAccent = mModel.activeColor != 0 ? mModel.activeColor : 0xFFA39CB8;
+        int baseBg = mModel.bgColor != 0 ? mModel.bgColor : 0xFF424242;
 
         // 1. Outer Circular Bezel / Dish
         mPaint.setStyle(Paint.Style.FILL);
-        mPaint.setColor(baseBg);
+        int variant = mModel.styleVariant; // 0=Alight Motion Flat, 1=Classic Dish, 2=Outlined Floating
+
+        if (variant == 2) {
+            // Outlined Floating (Minimalist Transparent)
+            mPaint.setColor(0x00000000);
+        } else {
+            mPaint.setColor(baseBg);
+        }
         mPaint.setAlpha(Math.round(mModel.opacity * 255));
         canvas.drawCircle(cx, cy, radius, mPaint);
 
         // Outer Bezel Rim
-        mPaint.setStyle(Paint.Style.STROKE);
-        mPaint.setStrokeWidth(Math.max(1, Math.round(1.5f * density)));
-        mPaint.setColor(mIsPressed ? activeAccent : 0x5580DEEA);
-        canvas.drawCircle(cx, cy, radius, mPaint);
+        if (mModel.borderStrokeWidthDp > 0) {
+            mPaint.setStyle(Paint.Style.STROKE);
+            mPaint.setStrokeWidth(Math.max(1, Math.round(mModel.borderStrokeWidthDp * density)));
+            mPaint.setColor(mModel.borderColor);
+            canvas.drawCircle(cx, cy, radius, mPaint);
+        }
 
-        // Inner Tactile Bevel Ring
-        float innerBevelR = radius * 0.88f;
-        mPaint.setStrokeWidth(1.0f * density);
-        mPaint.setColor(0x22FFFFFF);
-        canvas.drawCircle(cx, cy, innerBevelR, mPaint);
+        // Inner Tactile Bevel Ring (Only in Classic Dish mode)
+        if (variant == 1) {
+            float innerBevelR = radius * 0.88f;
+            mPaint.setStrokeWidth(1.0f * density);
+            mPaint.setColor(0x33FFFFFF);
+            canvas.drawCircle(cx, cy, innerBevelR, mPaint);
+        }
 
         // 2. Sculpted Cross Arms (Top, Bottom, Left, Right)
         float armWidth = minDim * 0.32f;

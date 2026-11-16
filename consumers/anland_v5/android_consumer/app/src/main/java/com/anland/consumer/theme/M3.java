@@ -15,6 +15,7 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.SeekBar;
 import android.widget.Switch;
+import com.anland.consumer.hud.HudVectorIcons;
 
 /**
  * Anland Material 3 Purist Design System (M3 Purist / Catppuccin & Linear Hybrid).
@@ -35,20 +36,20 @@ public final class M3 {
     // COLOR PALETTE (Catppuccin Mocha / Material 3 Dark)
     // ============================================================
 
-    public static final int COLOR_SURFACE          = 0xFF1E1E2E; // Crust: Dialogs, Popups
-    public static final int COLOR_SURFACE_HIGH     = 0xFF252638; // Panel interiors, active layers
-    public static final int COLOR_SURFACE_HIGHEST  = 0xFF2A2B3D; // Component buttons, text inputs
+    public static final int COLOR_SURFACE          = 0xFF3A3A3A; // Alight Motion Charcoal card
+    public static final int COLOR_SURFACE_HIGH     = 0xFF424242; // Panel interiors
+    public static final int COLOR_SURFACE_HIGHEST  = 0xFF484848; // Component buttons, text inputs
 
-    public static final int COLOR_PRIMARY          = 0xFF80DEEA; // Cyan accent (Focus / Key actions)
-    public static final int COLOR_PRIMARY_CONTAINER= 0xFF004F58; // Muted active container
+    public static final int COLOR_PRIMARY          = 0xFFA39CB8; // Lilac pastel accent (Alight Motion / Zalith)
+    public static final int COLOR_PRIMARY_CONTAINER= 0xFF5A536B; // Muted active container
     public static final int COLOR_ERROR            = 0xFFF38BA8; // Coral Red (Destructive actions)
     public static final int COLOR_SUCCESS          = 0xFFA6E3A1; // Mint Green (Online status)
 
     public static final int COLOR_TEXT_PRIMARY     = 0xFFFFFFFF; // High-contrast white
-    public static final int COLOR_TEXT_MUTED       = 0xFFA6ADC8; // Labels, captions, hints
+    public static final int COLOR_TEXT_MUTED       = 0xFFB3B3B3; // Labels, captions, hints
 
     public static final int COLOR_BORDER_SUBTLE    = 0x22FFFFFF; // 1px hairline border
-    public static final int COLOR_BORDER_STRONG    = 0x33FFFFFF; // Header / Dialog borders
+    public static final int COLOR_BORDER_STRONG    = 0xFFA39CB8; // Lilac stroke
 
     // ============================================================
     // CORNER RADIUS TOKENS (Strict Geometry)
@@ -149,11 +150,11 @@ public final class M3 {
         sw.setTextColor(COLOR_TEXT_PRIMARY);
         sw.setTextSize(14);
         int[][] states = new int[][] {
-            new int[] { android.R.attr.state_checked },
-            new int[] { -android.R.attr.state_checked }
+            new int[] { android.R.attr.state_checked},
+            new int[] {-android.R.attr.state_checked}
         };
         int[] trackColors = new int[] {
-            0x6680DEEA,
+            0x66A39CB8,
             0x33FFFFFF
         };
         int[] thumbColors = new int[] {
@@ -203,15 +204,45 @@ public final class M3 {
         }
     }
 
+    public static class VectorIconView extends View {
+        private final String mIconId;
+        private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        public VectorIconView(Context ctx, String iconId, int color) {
+            super(ctx);
+            this.mIconId = iconId;
+            this.mPaint.setColor(color);
+        }
+
+        public void setColor(int color) {
+            this.mPaint.setColor(color);
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (mIconId != null && !mIconId.isEmpty()) {
+                float size = Math.min(getWidth(), getHeight()) * 0.65f;
+                HudVectorIcons.drawIcon(canvas, mIconId, getWidth() * 0.5f, getHeight() * 0.5f, size, mPaint);
+            }
+        }
+    }
+
     public static final class BackArrowView extends View {
         private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         public BackArrowView(Context ctx) {
             super(ctx);
-            mPaint.setColor(COLOR_PRIMARY);
+            mPaint.setColor(Color.WHITE);
             mPaint.setStyle(Paint.Style.STROKE);
             mPaint.setStrokeCap(Paint.Cap.ROUND);
             mPaint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        public void setColor(int color) {
+            mPaint.setColor(color);
+            invalidate();
         }
 
         @Override

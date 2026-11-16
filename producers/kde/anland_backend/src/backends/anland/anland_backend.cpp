@@ -10,6 +10,7 @@
 #include "anland_camera.h"
 #include "anland_egl_backend.h"
 #include "anland_input.h"
+#include "libdisplay_producer/anland_hdr.h"
 #include "anland_logging.h"
 #include "anland_output.h"
 
@@ -653,6 +654,15 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
     }
     case ANLAND_DEVICE_IN_TOUCH_FRAME:
         m_inputDevice->touchFrame();
+        break;
+    case ANLAND_DEVICE_IN_ACTION:
+        if (ev.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE) {
+            // libdisplay_producer validates and stores the current session's
+            // value before returning this existing ACTION event.
+            for (AnlandOutput *output : m_outputs) {
+                output->setHdrSdrWhiteNits(anland_device_hdr_sdr_white_nits(m_device));
+            }
+        }
         break;
     case ANLAND_DEVICE_IN_DISPLAY_REFRESH:
         // Not an input event: the consumer reports its live display refresh rate

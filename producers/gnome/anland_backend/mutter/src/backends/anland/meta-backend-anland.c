@@ -8,9 +8,13 @@
 #include "backends/anland/meta-anland-camera.h"
 #include "backends/anland/meta-anland-clipboard.h"
 #include "backends/anland/meta-anland-input.h"
+#include "backends/anland/meta-anland-color.h"
 #include "backends/anland/libdisplay_producer/anland_de_backend.h"
 #include "backends/anland/libdisplay_producer/anland_device.h"
 #include "backends/meta-backend-private.h"
+#include "backends/meta-color-device.h"
+#include "backends/meta-color-manager.h"
+#include "backends/meta-output.h"
 #include "backends/meta-fd-source.h"
 #include "backends/meta-monitor-manager-private.h"
 #include "backends/meta-renderer.h"
@@ -40,7 +44,6 @@
 #define ANLAND_RECONNECT_INTERVAL_MS 200
 /* Protocol pixel-format convention shared by the daemon and every consumer
  * (see anland_device.h: 1 = ABGR8888). */
-#define ANLAND_FORMAT_RGBA_8888 1
 #define ANLAND_MAX_RESOURCE_FDS 64
 
 typedef struct
@@ -97,6 +100,7 @@ struct _MetaBackendAnland
   MetaStageView *stage_view;
   CoglFramebuffer *placeholder_framebuffer;
   CoglFramebuffer *buffer_framebuffers[ANLAND_DEVICE_MAX_BUFS];
+  MtkRegion *buffer_damage[ANLAND_DEVICE_MAX_BUFS];
   int current_buffer;
   /* Generation of the consumer session this backend is serving, and the number of
    * buffers imported for it. A render target is only usable when it belongs to
@@ -105,6 +109,9 @@ struct _MetaBackendAnland
   uint64_t session_generation;
   uint32_t buffer_count;
   gboolean consumer_active;
+  gboolean hdr_allowed;
+  gboolean hdr_enabled;
+  uint32_t hdr_sdr_white_nits;
   gboolean frame_clock_inhibited;
   gboolean frame_pending;
   gboolean warned_sync_fallback;
@@ -114,6 +121,22 @@ struct _MetaBackendAnland
 };
 
 G_DEFINE_TYPE (MetaBackendAnland, meta_backend_anland, META_TYPE_BACKEND_NATIVE)
+
+ClutterColorState *
+meta_backend_anland_create_output_color_state (MetaBackendAnland *backend)
+{
+  return meta_anland_color_state_new (
+    meta_backend_get_clutter_context (META_BACKEND (backend)),
+    backend->hdr_enabled, TRUE, backend->hdr_sdr_white_nits);
+}
+
+ClutterColorState *
+meta_backend_anland_create_view_color_state (MetaBackendAnland *backend)
+{
+  return meta_anland_color_state_new (
+    meta_backend_get_clutter_context (META_BACKEND (backend)),
+    backend->hdr_enabled, FALSE, backend->hdr_sdr_white_nits);
+}
 
 static void deactivate_consumer (MetaBackendAnland *backend);
 static void invalidate_consumer (MetaBackendAnland *backend);
@@ -804,8 +827,9 @@ validate_buffer_info (const anland_device_fb_t  *fb,
   struct stat stat_buf;
   uint64_t required_size;
 
-  if (fb->format != ANLAND_FORMAT_RGBA_8888 ||
+  if (anland_hdr_mode_for_hal (fb->format, TRUE) == ANLAND_HDR_REJECTED ||
       fb->modifier != DRM_FORMAT_MOD_LINEAR ||
+      fb->width == 0 || fb->height == 0 || fb->stride == 0 ||
       fb->width > G_MAXUINT32 / 4u ||
       fb->stride < fb->width * 4u ||
       fb->height > G_MAXUINT64 / fb->stride ||
@@ -875,6 +899,8 @@ deactivate_consumer (MetaBackendAnland *backend)
 
   if (backend->stage_view)
     {
+      clutter_stage_view_set_anland_hdr_copy_func (
+        CLUTTER_STAGE_VIEW (backend->stage_view), NULL, NULL);
       clutter_stage_view_set_present_func (
         CLUTTER_STAGE_VIEW (backend->stage_view), NULL, NULL);
 
@@ -891,7 +917,10 @@ deactivate_consumer (MetaBackendAnland *backend)
     }
 
   for (int i = 0; i < ANLAND_DEVICE_MAX_BUFS; i++)
-    g_clear_object (&backend->buffer_framebuffers[i]);
+    {
+      g_clear_object (&backend->buffer_framebuffers[i]);
+      g_clear_pointer (&backend->buffer_damage[i], mtk_region_unref);
+    }
 
   backend->consumer_active = FALSE;
   backend->current_buffer = -1;
@@ -972,8 +1001,17 @@ apply_render_target (MetaBackendAnland *backend)
       backend->current_buffer = (int) index;
     }
 
-  clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view),
-                                      NULL);
+  if (backend->hdr_enabled)
+    {
+      /* Every writable target needs a present, even when the persistent
+       * scene and this slot are current. The empty clip skips scene painting
+       * and a zero-debt final copy but still runs the native present path. */
+      clutter_stage_view_queue_anland_hdr_copy (
+        CLUTTER_STAGE_VIEW (backend->stage_view));
+    }
+  else
+    clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view),
+                                        NULL);
   uninhibit_frame_clock (backend);
   clutter_stage_view_schedule_update_now (CLUTTER_STAGE_VIEW (backend->stage_view));
 }
@@ -1091,6 +1129,20 @@ on_stage_view_present (ClutterStageView *stage_view,
     return FALSE;
 
   framebuffer = clutter_stage_view_get_onscreen (stage_view);
+  if (backend->hdr_enabled)
+    {
+      CoglFramebuffer *scene = clutter_stage_view_get_framebuffer (stage_view);
+      if (scene == framebuffer ||
+          cogl_framebuffer_get_red_bits (scene) < 16 ||
+          cogl_framebuffer_get_green_bits (scene) < 16 ||
+          cogl_framebuffer_get_blue_bits (scene) < 16)
+        {
+          g_warning ("Anland HDR refused: Clutter did not render into real FP16 storage");
+          invalidate_consumer (backend);
+          clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_IDLE);
+          return TRUE;
+        }
+    }
   cogl_context = cogl_framebuffer_get_context (framebuffer);
   cogl_framebuffer_flush (framebuffer);
 
@@ -1194,6 +1246,37 @@ on_stage_view_present (ClutterStageView *stage_view,
   return TRUE;
 }
 
+/* The shared input layer has validated and stored this session's reference.
+ * Refresh both native client preferences and the linear scene, then invalidate
+ * every rotating target: an old slot must not retain the previous brightness. */
+static void
+update_hdr_sdr_white (MetaBackendAnland *backend)
+{
+  uint32_t white = anland_device_hdr_sdr_white_nits (backend->device);
+  MetaColorDevice *color_device;
+  MtkRectangle layout;
+
+  if (!backend->hdr_enabled || white == backend->hdr_sdr_white_nits ||
+      !backend->stage_view || !backend->virtual_monitor)
+    return;
+
+  backend->hdr_sdr_white_nits = white;
+  color_device = meta_color_manager_get_color_device (
+    meta_backend_get_color_manager (META_BACKEND (backend)),
+    meta_output_get_monitor (meta_virtual_monitor_get_output (backend->virtual_monitor)));
+  if (color_device)
+    meta_color_device_update (color_device);
+
+  clutter_stage_view_get_layout (CLUTTER_STAGE_VIEW (backend->stage_view), &layout);
+  for (uint32_t i = 0; i < backend->buffer_count; i++)
+    {
+      g_clear_pointer (&backend->buffer_damage[i], mtk_region_unref);
+      backend->buffer_damage[i] = mtk_region_create_rectangle (&layout);
+    }
+  clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view), NULL);
+  clutter_stage_view_schedule_update_now (CLUTTER_STAGE_VIEW (backend->stage_view));
+}
+
 static gboolean
 input_source_prepare (gpointer user_data)
 {
@@ -1223,6 +1306,13 @@ input_source_dispatch (gpointer user_data)
               invalidate_consumer (backend);
               return G_SOURCE_REMOVE;
             }
+          continue;
+        }
+
+      if (event.type == ANLAND_DEVICE_IN_ACTION &&
+          event.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE)
+        {
+          update_hdr_sdr_white (backend);
           continue;
         }
 
@@ -1298,6 +1388,53 @@ buffer_ready_source_dispatch (gpointer user_data)
 }
 
 static gboolean
+check_hdr_render_support (CoglContext *context,
+                          int          width,
+                          int          height,
+                          GError     **error)
+{
+  g_autoptr (CoglTexture) texture =
+    cogl_texture_2d_new_with_format (context, width, height,
+                                    COGL_PIXEL_FORMAT_RGBA_FP_16161616_PRE);
+  g_autoptr (CoglOffscreen) offscreen = NULL;
+
+  if (!cogl_texture_allocate (texture, error))
+    return FALSE;
+  offscreen = cogl_offscreen_new_with_texture (texture);
+  if (!cogl_framebuffer_allocate (COGL_FRAMEBUFFER (offscreen), error))
+    return FALSE;
+  if (cogl_framebuffer_get_red_bits (COGL_FRAMEBUFFER (offscreen)) < 16 ||
+      cogl_framebuffer_get_green_bits (COGL_FRAMEBUFFER (offscreen)) < 16 ||
+      cogl_framebuffer_get_blue_bits (COGL_FRAMEBUFFER (offscreen)) < 16)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "Anland HDR requires a real FP16 Clutter render target");
+      return FALSE;
+    }
+  return TRUE;
+}
+
+/* Clutter paints the single persistent scene only for new stage damage. Its
+ * native final color pass separately repairs everything this consumer slot
+ * missed. Regions stay in stage coordinates: Clutter handles scale/rotation
+ * once, in paint_transformed_framebuffer(). */
+static MtkRegion *
+get_hdr_copy_region (ClutterStageView *view,
+                     const MtkRegion  *redraw_clip,
+                     gpointer          user_data)
+{
+  MetaBackendAnland *backend = user_data;
+
+  g_return_val_if_fail (backend->consumer_active && backend->hdr_enabled, NULL);
+  g_return_val_if_fail (backend->current_buffer >= 0 &&
+                       backend->current_buffer < (int) backend->buffer_count, NULL);
+  return meta_anland_accumulate_copy_damage (backend->buffer_damage,
+                                              backend->buffer_count,
+                                              backend->current_buffer,
+                                              redraw_clip);
+}
+
+static gboolean
 activate_consumer (MetaBackendAnland *backend)
 {
   MetaRenderer *renderer = meta_backend_get_renderer (META_BACKEND (backend));
@@ -1306,6 +1443,8 @@ activate_consumer (MetaBackendAnland *backend)
   anland_device_fb_t probe = { .fd = -1 };
   uint32_t probe_width;
   uint32_t probe_height;
+  enum anland_hdr_mode color_mode;
+  MetaColorDevice *color_device;
   int n_buffers;
   int buffer_ready_fd;
   int buffer_ready_source_fd = -1;
@@ -1325,8 +1464,17 @@ activate_consumer (MetaBackendAnland *backend)
    * mismatch, refresh-rate mismatch) would otherwise leak one fd per attempt. */
   probe_width = probe.width;
   probe_height = probe.height;
+  color_mode = anland_hdr_mode_for_hal (probe.format, backend->hdr_allowed);
   close (probe.fd);
   probe.fd = -1;
+
+  if (color_mode == ANLAND_HDR_REJECTED)
+    {
+      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "Unsupported consumer HAL format %u (HDR may be forbidden by ANLAND_HDR)",
+                   probe.format);
+      goto failed;
+    }
 
   if (probe_width != backend->output.width ||
       probe_height != backend->output.height)
@@ -1341,6 +1489,16 @@ activate_consumer (MetaBackendAnland *backend)
 
   if (!ensure_stage_view (backend, &error))
     return FALSE;
+
+  color_device = meta_color_manager_get_color_device (
+    meta_backend_get_color_manager (META_BACKEND (backend)),
+    meta_output_get_monitor (meta_virtual_monitor_get_output (backend->virtual_monitor)));
+  if (!color_device)
+    {
+      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Anland virtual monitor has no color device");
+      goto failed;
+    }
 
   if (!backend->clipboard)
     {
@@ -1368,12 +1526,18 @@ activate_consumer (MetaBackendAnland *backend)
       uint32_t stride;
       uint32_t offset;
       uint64_t modifier;
+      uint32_t drm_format;
 
       if (anland_device_get_fb (backend->device, i, &fb) < 0)
         goto failed;
 
-      if (!validate_buffer_info (&fb, &error))
+      if (!validate_buffer_info (&fb, &error) ||
+          anland_hdr_mode_for_hal (fb.format, backend->hdr_allowed) != color_mode ||
+          fb.width != probe_width || fb.height != probe_height)
         {
+          if (!error)
+            g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "Mixed HDR/SDR formats or dimensions in consumer buffer set");
           close (fb.fd);
           fb.fd = -1;
           goto failed;
@@ -1383,21 +1547,29 @@ activate_consumer (MetaBackendAnland *backend)
       stride = fb.stride;
       offset = fb.offset;
       modifier = fb.modifier;
+      switch (fb.format)
+        {
+        case 1: drm_format = DRM_FORMAT_ABGR8888; break;
+        case 2: drm_format = DRM_FORMAT_XBGR8888; break;
+        case 5: drm_format = DRM_FORMAT_ARGB8888; break;
+        case 43: drm_format = DRM_FORMAT_ABGR2101010; break;
+        default: g_assert_not_reached ();
+        }
 #ifdef ANLAND_MUTTER_51
       CoglContext *cogl_context =
         meta_renderer_native_get_cogl_context (renderer_native);
       CoglRenderer *cogl_renderer =
         cogl_display_get_renderer (cogl_context_get_display (cogl_context));
       const MetaFormatInfo *format_info =
-        meta_format_info_from_drm_format (DRM_FORMAT_ABGR8888);
+        meta_format_info_from_drm_format (drm_format);
       framebuffers[i] = cogl_renderer_create_dma_buf_framebuffer (
         cogl_renderer, cogl_context, fb.width, fb.height,
-        DRM_FORMAT_ABGR8888, format_info->cogl_format,
+        drm_format, format_info->cogl_format,
         1, &fd, &stride, &offset, &modifier, &error);
 #else
       framebuffers[i] = meta_renderer_native_create_dma_buf_framebuffer (
         renderer_native, fb.width, fb.height,
-        DRM_FORMAT_ABGR8888, 1, &fd, &stride, &offset, &modifier, &error);
+        drm_format, 1, &fd, &stride, &offset, &modifier, &error);
 #endif
 
       /* meta_renderer_native_create_dma_buf_framebuffer() imports the dmabuf
@@ -1419,7 +1591,22 @@ activate_consumer (MetaBackendAnland *backend)
                           fb.stride, fb.offset, fb.modifier);
           goto failed;
         }
+      if (color_mode == ANLAND_HDR_HDR10 &&
+          (cogl_framebuffer_get_red_bits (framebuffers[i]) < 10 ||
+           cogl_framebuffer_get_green_bits (framebuffers[i]) < 10 ||
+           cogl_framebuffer_get_blue_bits (framebuffers[i]) < 10))
+        {
+          g_set_error (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                       "Consumer HDR framebuffer lacks real 10-bit RGB precision");
+          goto failed;
+        }
     }
+
+  if (color_mode == ANLAND_HDR_HDR10 &&
+      !check_hdr_render_support (
+        cogl_framebuffer_get_context (framebuffers[0]),
+        probe_width, probe_height, &error))
+    goto failed;
 
   buffer_ready_fd = anland_device_buffer_ready_fd (backend->device);
   buffer_ready_source_fd = fcntl (buffer_ready_fd, F_DUPFD_CLOEXEC, 3);
@@ -1450,8 +1637,28 @@ activate_consumer (MetaBackendAnland *backend)
       goto failed;
     }
 
+  /* Import and capability checks are complete. Publish the wire color through
+   * MetaColorDevice too, so Wayland HDR clients receive the actual preference.
+   * RendererView uses our linear scene state instead of blending PQ values. */
+  backend->hdr_enabled = color_mode == ANLAND_HDR_HDR10;
+  backend->hdr_sdr_white_nits = anland_device_hdr_sdr_white_nits (backend->device);
+  clutter_stage_view_set_anland_hdr_copy_func (
+    CLUTTER_STAGE_VIEW (backend->stage_view),
+    backend->hdr_enabled ? get_hdr_copy_region : NULL,
+    backend->hdr_enabled ? backend : NULL);
+  meta_color_device_update (color_device);
+  clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view), NULL);
+  g_message ("Anland consumer color: %s (SDR white %u nit)", backend->hdr_enabled
+             ? "BT.2020/PQ 10bit, linear FP16 scene, 1000-nit peak"
+             : "sRGB 8bit", backend->hdr_sdr_white_nits);
+
   for (i = 0; i < n_buffers; i++)
-    backend->buffer_framebuffers[i] = framebuffers[i];
+    {
+      MtkRectangle layout;
+      clutter_stage_view_get_layout (CLUTTER_STAGE_VIEW (backend->stage_view), &layout);
+      backend->buffer_framebuffers[i] = framebuffers[i];
+      backend->buffer_damage[i] = mtk_region_create_rectangle (&layout);
+    }
   backend->consumer_active = TRUE;
   meta_anland_clipboard_set_device (backend->clipboard, backend->device);
   backend->current_buffer = -1;
@@ -1717,6 +1924,9 @@ meta_backend_anland_class_init (MetaBackendAnlandClass *klass)
 static void
 meta_backend_anland_init (MetaBackendAnland *backend_anland)
 {
+  const char *hdr_policy = g_getenv ("ANLAND_HDR");
+  backend_anland->hdr_allowed = !anland_hdr_environment_disabled (hdr_policy);
+  backend_anland->hdr_sdr_white_nits = ANLAND_HDR_SDR_WHITE_NITS;
   backend_anland->socket_path = get_default_socket_path ();
   backend_anland->current_buffer = -1;
   backend_anland->constraint_watches =

@@ -561,8 +561,6 @@ index 798f31e9c..1165ebad6 100644
      bool                   hasCursorRectangle();
      CBox                   cursorBox();
  
-diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
-index 4a50c9f90..f4f8138f6 100644
 --- a/src/output/Monitor.cpp
 +++ b/src/output/Monitor.cpp
 @@ -1,3 +1,4 @@
@@ -570,7 +568,7 @@ index 4a50c9f90..f4f8138f6 100644
  #include "Monitor.hpp"
  #include "../desktop/view/window/WindowEffectsController.hpp"
  #include "../desktop/view/window/WindowPresentation.hpp"
-@@ -161,7 +162,6 @@ void CMonitor::onConnect(bool noRule) {
+@@ -161,7 +162,6 @@
              m_damage.damageEntire();
              return;
          }
@@ -578,23 +576,75 @@ index 4a50c9f90..f4f8138f6 100644
          if (m_pendingDpmsAnimation) {
              m_pendingDpmsAnimationCounter++;
              // we give ourselves 5 frames of a buffer. The first presentation event still doesn't usually say that we actually
-@@ -666,8 +666,10 @@ bool CMonitor::applyMonitorRule(Config::CMonitorRule&& pMonitorRule) {
- 
+@@ -228,6 +228,20 @@
+     });
+
+     m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
++        if (event.size == Vector2D{} && Anland::outputHdrMode(m_output).value_or(false)) {
++            // Consumer SDR-white action: update only native color state. Do not
++            // modeset or replace the fixed 10-bit targets during an input poll.
++            Anland::configureColorRule(m_output, m_activeMonitorRule);
++            m_sdrMinLuminance = m_activeMonitorRule.m_sdrMinLuminance;
++            m_sdrMaxLuminance = m_activeMonitorRule.m_sdrMaxLuminance;
++            m_sdrBrightness = m_activeMonitorRule.m_sdrBrightness;
++            m_sdrSaturation = m_activeMonitorRule.m_sdrSaturation;
++            applyCMType(m_cmType, m_sdrEotf);
++            m_blurFBDirty = true;
++            m_damage.damageEntire();
++            g_pHyprRenderer->damageMonitor(m_self.lock());
++            return;
++        }
+         if (event.size == Vector2D{}) {
+             // an indication to re-set state
+             // we can't do much for createdByUser displays I think
+@@ -584,6 +598,16 @@
+         default: UNREACHABLE();
+     }
+
++    if (Anland::outputHdrMode(m_output).value_or(false)) {
++        // Publish the selected reference to native HDR clients and the FP16
++        // work-buffer description as well as the SDR shader input range.
++        m_imageDescription = m_imageDescription->with({
++            .min = m_imageDescription->value().luminances.min,
++            .max = m_imageDescription->value().luminances.max,
++            .reference = sc<uint32_t>(m_sdrMaxLuminance),
++        });
++    }
++
+     if (oldImageDescription != m_imageDescription) {
+         if (PROTO::colorManagement)
+             PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
+@@ -594,6 +618,7 @@
+ }
+
+ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
++    Anland::configureColorRule(m_output, pMonitorRule);
+     m_activeMonitorRule = std::move(pMonitorRule);
+     m_reservedArea.setStatic(m_activeMonitorRule.m_reservedArea);
+     m_transform         = m_activeMonitorRule.m_transform;
+@@ -661,13 +686,16 @@
+ }
+
+ bool CMonitor::applyMonitorRule(Config::CMonitorRule&& pMonitorRule) {
++    Anland::configureColorRule(m_output, pMonitorRule);
+
+     static auto PDISABLESCALECHECKS = CConfigValue<Config::INTEGER>("debug:disable_scale_checks");
+
      LOG(Log::DEBUG, "Applying monitor rule for {}", m_name);
- 
+
 -    if (m_forceSize.has_value())
 -        m_activeMonitorRule.m_resolution = m_forceSize.value();
 +    if (m_forceSize.has_value()) {
 +        pMonitorRule.m_resolution = m_forceSize.value();
 +        m_forceSize.reset();
 +    }
- 
+
      const auto RULE = &pMonitorRule;
- 
-@@ -802,7 +804,10 @@ bool CMonitor::applyMonitorRule(Config::CMonitorRule&& pMonitorRule) {
+
+@@ -802,7 +830,10 @@
      m_customDrmMode = {};
      m_currentMode   = nullptr;
- 
+
 -    const auto initialFormat = m_drmFormat != DRM_FORMAT_INVALID ? m_drmFormat : DRM_FORMAT_XRGB8888;
 +    const auto fixedFormat = Anland::renderTargetFormat(m_output);
 +    if (m_output->getBackend()->type() == Aquamarine::AQ_BACKEND_ANLAND && fixedFormat == DRM_FORMAT_INVALID)
@@ -603,38 +653,59 @@ index 4a50c9f90..f4f8138f6 100644
      m_output->state->setFormat(initialFormat);
      m_prevDrmFormat = m_drmFormat;
      m_drmFormat     = initialFormat;
-@@ -924,8 +929,10 @@ bool CMonitor::applyMonitorRule(Config::CMonitorRule&& pMonitorRule) {
+@@ -924,8 +955,11 @@
      static constexpr auto formats10bit = std::to_array<uint32_t>({DRM_FORMAT_XRGB2101010, DRM_FORMAT_XBGR2101010});
      static constexpr auto formats8bit  = std::to_array<uint32_t>({DRM_FORMAT_XRGB8888, DRM_FORMAT_XBGR8888});
- 
+
 -    const bool            set10bit = RULE->m_enable10bit && trySetFormat(formats10bit);
 -    if (!set10bit)
-+    const bool set10bit = fixedFormat == DRM_FORMAT_INVALID && RULE->m_enable10bit && trySetFormat(formats10bit);
++    const bool set10bit = fixedFormat == DRM_FORMAT_ABGR2101010 ||
++        (fixedFormat == DRM_FORMAT_INVALID && RULE->m_enable10bit && trySetFormat(formats10bit));
 +    if (fixedFormat != DRM_FORMAT_INVALID) {
 +        if (!m_state.test()) return false;
 +    } else if (!set10bit)
          trySetFormat(formats8bit);
- 
+
      m_enabled10bit = set10bit;
-@@ -2581,6 +2588,8 @@ CMonitorState::CMonitorState(CMonitor* owner) : m_owner(owner) {
+@@ -2455,6 +2489,10 @@
+
+ // TODO support more drm properties
+ bool CMonitor::canNoShaderCM(bool forDSmode) {
++    // Android consumes the already encoded pixels; Anland has no KMS CTM.
++    if (Anland::outputHdrMode(m_output).has_value())
++        return false;
++
+     static auto PNONSHADER = CConfigValue<Config::INTEGER>("render:non_shader_cm");
+     if (*PNONSHADER == CM_NS_DISABLE)
+         return false;
+@@ -2487,6 +2525,8 @@
  }
- 
+
+ bool CMonitor::doesNoShaderCM() {
++    if (Anland::outputHdrMode(m_output).has_value())
++        return false;
+     return m_noShaderCTM;
+ }
+
+@@ -2581,6 +2621,8 @@
+ }
+
  void CMonitorState::ensureBufferPresent() {
 +    if (m_owner->m_output->getBackend()->type() == Aquamarine::AQ_BACKEND_ANLAND)
 +        return;
      const auto& STATE = m_owner->m_output->state->state();
      if (!STATE.enabled) {
          LOG(Log::TRACE, "CMonitorState::ensureBufferPresent: Ignoring, monitor is not enabled");
-@@ -2635,13 +2644,15 @@ bool CMonitorState::updateSwapchain() {
+@@ -2635,13 +2677,15 @@
          return true;
      }
- 
+
 -    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize)
 +    const auto LENGTH = Anland::swapchainLength(m_owner->m_output, 3);
 +    if (!LENGTH) return false;
 +    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == LENGTH && OPTIONS.size == MODE->pixelSize)
          return true;
- 
+
      auto options    = OPTIONS;
      options.format  = m_owner->m_drmFormat;
      options.scanout = true;
@@ -643,6 +714,17 @@ index 4a50c9f90..f4f8138f6 100644
      options.size    = MODE->pixelSize;
      return m_owner->m_output->swapchain->reconfigure(options);
  }
+@@ -2678,6 +2722,10 @@
+ }
+
+ bool CMonitor::useFP16() {
++    // PQ output must retain linear HDR precision through the native final CM pass.
++    if (Anland::outputHdrMode(m_output).value_or(false))
++        return g_pHyprRenderer->fp16Supported();
++
+     static const auto PFP16 = CConfigValue<Hyprlang::INT>("render:use_fp16");
+
+     auto              isSRGB = [this] {
 diff --git a/src/protocols/PointerConstraints.cpp b/src/protocols/PointerConstraints.cpp
 index a003ee982..0c0c5abf7 100644
 --- a/src/protocols/PointerConstraints.cpp
@@ -732,8 +814,6 @@ index 9ad5dca5b..eda7d7a5c 100644
      if (!m_owner || m_resource->version() < 4 || (rate == m_lastRate && delayMs == m_lastDelayMs))
          return;
      m_lastRate    = rate;
-diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
-index 4bbb60661..e8f9ac1fc 100644
 --- a/src/render/Renderer.cpp
 +++ b/src/render/Renderer.cpp
 @@ -1,3 +1,4 @@
@@ -741,15 +821,38 @@ index 4bbb60661..e8f9ac1fc 100644
  #include "Renderer.hpp"
  #include "../Compositor.hpp"
  #include "../helpers/math/Math.hpp"
-@@ -1925,6 +1926,8 @@ bool IHyprRenderer::beginRender(PHLMONITOR pMonitor, CRegion& damage, eRenderMod
- 
+@@ -1923,8 +1924,20 @@
+
+     initRender();
+
++    // Consumer PQ encoding requires the native CM shader and FP16 working path.
++    static const auto PCMENABLED = CConfigValue<Config::INTEGER>("render:cm_enabled");
++    const auto colorBackend = glBackend();
++    if (m_context.m_mode == RENDER_MODE_NORMAL && Anland::outputHdrMode(pMonitor->m_output).value_or(false) &&
++        (!*PCMENABLED || !colorBackend || !colorBackend->colorManagementSupported() || !fp16Supported())) {
++        LOG(Log::ERR, "anland: HDR requires native color management and FP16 rendering");
++        Anland::renderImportFailed(pMonitor->m_output, m_context.m_currentBuffer);
++        return false;
++    }
++
      if (!initRenderBuffer(m_context, m_context.m_currentBuffer, pMonitor->m_output->state->state().drmFormat)) {
          LOG(Log::ERR, "failed to start a render pass for output {}, no RBO could be obtained", pMonitor->m_name);
 +        if (m_context.m_mode == RENDER_MODE_NORMAL)
 +            Anland::renderImportFailed(pMonitor->m_output, m_context.m_currentBuffer);
          return false;
      }
- 
+
+@@ -2581,7 +2594,9 @@
+
+     const auto  FULLSCREEN_WINDOW = Fullscreen::controller()->getFullscreenWindow(pMonitor);
+
+-    if (pMonitor->supportsHDR()) {
++    // Anland already fixed the encoding when this buffer generation connected.
++    // A fullscreen surface cannot switch its Android PQ dataspace independently.
++    if (pMonitor->supportsHDR() && !Anland::outputHdrMode(pMonitor->m_output).has_value()) {
+         // HDR metadata determined by
+         // HDR scRGB - monitor settings
+         // HDR PQ surface & DS is active - surface settings
 diff --git a/start/CMakeLists.txt b/start/CMakeLists.txt
 index a05a7f047..fbec42e19 100644
 --- a/start/CMakeLists.txt
@@ -763,3 +866,14 @@ index a05a7f047..fbec42e19 100644
  endif()
  if (NOT CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
      if (NOT glaze_FOUND AND NOT TARGET glaze::glaze)
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -133,6 +133,8 @@
+       public:
+         CHyprOpenGLImpl();
+         ~CHyprOpenGLImpl();
++
++        bool colorManagementSupported() const { return m_cmSupported; }
+
+         struct SRectRenderData {
+             const CRegion*                    damage        = nullptr;

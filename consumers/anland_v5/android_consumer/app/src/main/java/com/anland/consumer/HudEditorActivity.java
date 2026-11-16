@@ -23,6 +23,7 @@ import android.widget.Switch;
 import android.widget.TextView;
 
 import com.anland.consumer.hud.HudOverlayView;
+import com.anland.consumer.hud.HudVectorIcons;
 import com.anland.consumer.theme.M3;
 
 /**
@@ -41,8 +42,8 @@ public final class HudEditorActivity extends Activity {
     // screen with the HUD, so both are edited here and only one is shown at a
     // time (they are mutually exclusive at runtime as well).
     private VirtualKeyboardView mKeyboard;
-    private Button mLayerButton;
-    private Button mKeyboardSettingsButton;
+    private View mLayerButton;
+    private View mKeyboardSettingsButton;
     private boolean mKeyboardLayer = false;
 
     @Override
@@ -103,9 +104,11 @@ public final class HudEditorActivity extends Activity {
                 // reachable while the HUD widgets themselves are hidden.
                 mLayerButton = mHudOverlay.addToolbarButton(
                         getString(R.string.keyboard_layer_to_keyboard),
+                        mKeyboardLayer ? HudVectorIcons.ICON_KEYBOARD_OFF : HudVectorIcons.ICON_KEYBOARD,
                         () -> setKeyboardLayer(!mKeyboardLayer));
                 mKeyboardSettingsButton = mHudOverlay.addToolbarButton(
                         getString(R.string.keyboard_layer_settings),
+                        HudVectorIcons.ICON_SETTINGS,
                         this::showKeyboardSettings);
                 updateLayerBar();
             }
@@ -113,10 +116,10 @@ public final class HudEditorActivity extends Activity {
     }
 
     private void updateLayerBar() {
-        if (mLayerButton != null) {
-            mLayerButton.setText(mKeyboardLayer
-                    ? R.string.keyboard_layer_to_hud
-                    : R.string.keyboard_layer_to_keyboard);
+        if (mLayerButton != null && mHudOverlay != null) {
+            mHudOverlay.updateToolbarButtonIcon(mLayerButton,
+                    mKeyboardLayer ? HudVectorIcons.ICON_KEYBOARD_OFF : HudVectorIcons.ICON_KEYBOARD,
+                    getString(mKeyboardLayer ? R.string.keyboard_layer_to_hud : R.string.keyboard_layer_to_keyboard));
         }
         if (mKeyboardSettingsButton != null) {
             mKeyboardSettingsButton.setVisibility(mKeyboardLayer ? View.VISIBLE : View.GONE);
@@ -281,7 +284,7 @@ public final class HudEditorActivity extends Activity {
         }
         Button done = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         if (done != null) {
-            done.setTextColor(M3.COLOR_PRIMARY);
+            done.setTextColor(0xFFA39CB8);
             done.setAllCaps(false);
         }
     }

@@ -46,13 +46,36 @@ public final class HudButton {
     public int heightDp = 40;
     /** Inner padding for WIDGET_GROUP, in dp. */
     public int padDp = 8;
+    // Zalith-style 8 button corner shapes:
+    // 1: Top-Left, 2: Top-Right, 3: Bottom-Left, 4: Bottom-Right,
+    // 5: Left Both, 6: Right Both, 7: All 4 Corners (default), 8: None (Sharp 90deg)
+    public static final int CORNER_TOP_LEFT = 1;
+    public static final int CORNER_TOP_RIGHT = 2;
+    public static final int CORNER_BOTTOM_LEFT = 3;
+    public static final int CORNER_BOTTOM_RIGHT = 4;
+    public static final int CORNER_LEFT_BOTH = 5;
+    public static final int CORNER_RIGHT_BOTH = 6;
+    public static final int CORNER_ALL = 7;
+    public static final int CORNER_NONE = 8;
+    public int cornerShape = CORNER_ALL;
+
     public int cornerRadiusDp = 8;
     public float opacity = 0.85f;
 
     // Styling colors (ARGB hex)
-    public int bgColor = 0xE62A2B3D;
+    public int bgColor = 0xFF424242; // Alight Motion dark charcoal C23C479
     public int textColor = 0xFFFFFFFF;
-    public int activeColor = 0xFF80DEEA;
+    public int activeColor = 0xFFA39CB8; // Lilac pastel C23C479
+    public int borderStrokeWidthDp = 1;  // 0 = none, 1..10 dp
+    public int borderColor = 0xFFFFFFFF; // Clean white border default
+    public String iconId = null;         // Pure vector icon identifier (e.g. "save", "copy", "up"...)
+    public int styleVariant = 0;         // Widget-specific visual variant (0=default/minimal, 1=classic/matte, 2=outline/glass)
+
+    // Text Alignment: 0 = Center (default), 1 = Left, 2 = Right
+    public static final int ALIGN_CENTER = 0;
+    public static final int ALIGN_LEFT = 1;
+    public static final int ALIGN_RIGHT = 2;
+    public int textAlign = ALIGN_CENTER;
 
     // Action mappings
     public HudAction action = new HudAction();
@@ -145,11 +168,17 @@ public final class HudButton {
         obj.put("pos_y_pct", posYPercent);
         obj.put("width_dp", widthDp);
         obj.put("height_dp", heightDp);
+        obj.put("corner_shape", cornerShape);
         obj.put("corner_radius_dp", cornerRadiusDp);
         obj.put("opacity", opacity);
         obj.put("bg_color", bgColor);
         obj.put("text_color", textColor);
         obj.put("active_color", activeColor);
+        obj.put("border_stroke_width_dp", borderStrokeWidthDp);
+        obj.put("border_color", borderColor);
+        if (iconId != null) obj.put("icon_id", iconId);
+        obj.put("style_variant", styleVariant);
+        obj.put("text_align", textAlign);
         obj.put("action", action.toJSON());
         obj.put("send_on_release", sendOnRelease);
         if (popupAction != null) {
@@ -204,11 +233,17 @@ public final class HudButton {
         b.posYPercent = (float) obj.optDouble("pos_y_pct", 0.5);
         b.widthDp = obj.optInt("width_dp", 64);
         b.heightDp = obj.optInt("height_dp", 40);
+        b.cornerShape = obj.optInt("corner_shape", CORNER_ALL);
         b.cornerRadiusDp = obj.optInt("corner_radius_dp", 8);
         b.opacity = (float) obj.optDouble("opacity", 0.85);
-        b.bgColor = obj.optInt("bg_color", 0xE62A2B3D);
+        b.bgColor = obj.optInt("bg_color", 0xFF424242);
         b.textColor = obj.optInt("text_color", 0xFFFFFFFF);
-        b.activeColor = obj.optInt("active_color", 0xFF80DEEA);
+        b.activeColor = obj.optInt("active_color", 0xFFA39CB8);
+        b.borderStrokeWidthDp = obj.optInt("border_stroke_width_dp", 1);
+        b.borderColor = obj.optInt("border_color", 0xFFFFFFFF);
+        if (obj.has("icon_id")) b.iconId = obj.optString("icon_id", null);
+        b.styleVariant = obj.optInt("style_variant", 0);
+        b.textAlign = obj.optInt("text_align", ALIGN_CENTER);
         b.action = HudAction.fromJSON(obj.optJSONObject("action"));
         if (obj.has("popup_action")) {
             b.popupAction = HudAction.fromJSON(obj.optJSONObject("popup_action"));
@@ -294,11 +329,17 @@ public final class HudButton {
         d.posYPercent = Math.min(0.95f, this.posYPercent + 0.04f);
         d.widthDp = this.widthDp;
         d.heightDp = this.heightDp;
+        d.cornerShape = this.cornerShape;
         d.cornerRadiusDp = this.cornerRadiusDp;
         d.opacity = this.opacity;
         d.bgColor = this.bgColor;
         d.textColor = this.textColor;
         d.activeColor = this.activeColor;
+        d.borderStrokeWidthDp = this.borderStrokeWidthDp;
+        d.borderColor = this.borderColor;
+        d.iconId = this.iconId;
+        d.styleVariant = this.styleVariant;
+        d.textAlign = this.textAlign;
         d.action = this.action.copy();
         d.sendOnRelease = this.sendOnRelease;
         if (this.popupAction != null) d.popupAction = copyAction(this.popupAction);

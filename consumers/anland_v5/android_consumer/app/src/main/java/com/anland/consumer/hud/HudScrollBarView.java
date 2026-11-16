@@ -84,19 +84,23 @@ public final class HudScrollBarView extends View {
 
         // 1. Background Track
         mPaint.setStyle(Paint.Style.FILL);
-        int baseBg = mModel.bgColor != 0 ? mModel.bgColor : 0xE61A1B26;
-        mPaint.setColor(mIsTouching ? 0xF0252838 : baseBg);
-        mPaint.setAlpha(Math.round(mModel.opacity * 255));
+        int baseBg = mModel.bgColor != 0 ? mModel.bgColor : 0xFF424242;
+        int targetCol = mIsTouching ? 0xFFA39CB8 : baseBg;
+        int origAlpha = (targetCol >>> 24);
+        int finalAlpha = Math.round(mModel.opacity * origAlpha);
+        mPaint.setColor((targetCol & 0x00FFFFFF) | (finalAlpha << 24));
         canvas.drawRoundRect(mBounds, corner, corner, mPaint);
 
-        // 2. Outer Border with subtle accent glow
-        mPaint.setStyle(Paint.Style.STROKE);
-        mPaint.setStrokeWidth(Math.max(1, Math.round(1.5f * density)));
-        int activeAccent = mModel.activeColor != 0 ? mModel.activeColor : 0xFF80DEEA;
-        mPaint.setColor(mIsTouching ? activeAccent : 0x6680DEEA);
-        canvas.drawRoundRect(mBounds, corner, corner, mPaint);
+        // 2. Outer Border with clean white line C23C479
+        if (mModel.borderStrokeWidthDp > 0) {
+            mPaint.setStyle(Paint.Style.STROKE);
+            mPaint.setStrokeWidth(Math.max(1, Math.round(mModel.borderStrokeWidthDp * density)));
+            mPaint.setColor(mModel.borderColor);
+            canvas.drawRoundRect(mBounds, corner, corner, mPaint);
+        }
 
         // 3. Arrow indicators and sliding thumb
+        int activeAccent = mModel.activeColor != 0 ? mModel.activeColor : 0xFFA39CB8;
         mPaint.setStyle(Paint.Style.FILL);
         mPaint.setColor(mIsTouching ? activeAccent : 0xAA80DEEA);
 

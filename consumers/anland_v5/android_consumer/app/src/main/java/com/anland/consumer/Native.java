@@ -33,15 +33,17 @@ public final class Native {
     // ---- instance API (delegates to the handle-taking natives) ----
 
     public void configure(String socketPath, boolean useRoot, String helperPath, String bridgePath) {
-        nativeConfigure(handle, socketPath, useRoot, helperPath, bridgePath, false, null, 1, null);
+        nativeConfigure(handle, socketPath, useRoot, helperPath, bridgePath, false, null, 1, null,
+                        false, false);
     }
 
     /** Full configure, including the foreground-scheduling (top-app) helper. */
     public void configure(String socketPath, boolean useRoot, String helperPath, String bridgePath,
                           boolean topAppEnable, String topAppPath, int topAppMode,
-                          String topAppStops) {
+                          String topAppStops, boolean hdrEnabled, boolean hdr10Supported) {
         nativeConfigure(handle, socketPath, useRoot, helperPath, bridgePath,
-                        topAppEnable, topAppPath, topAppMode, topAppStops);
+                        topAppEnable, topAppPath, topAppMode, topAppStops,
+                        hdrEnabled, hdr10Supported);
     }
     public void start(Surface surface, Object clipboardTarget, Object activityTarget) { nativeStart(handle, surface, clipboardTarget, activityTarget); }
     public void stop() { nativeStop(handle); }
@@ -49,6 +51,7 @@ public final class Native {
     public void setFocused(boolean focused) { nativeSetFocused(handle, focused); }
     public void setCustomResolution(int width, int height) { nativeSetCustomResolution(handle, width, height); }
     public void setScreenSize(int width, int height) { nativeSetScreenSize(handle, width, height); }
+    public void setHdrSdrWhiteNits(int nits) { nativeSetHdrSdrWhiteNits(handle, nits); }
     public void sendTouch(int action, float x, float y, int pointerId) { nativeSendTouch(handle, action, x, y, pointerId); }
     public void sendTouchFrame() { nativeSendTouchFrame(handle); }
     public void sendKey(int action, int keycode) { nativeSendKey(handle, action, keycode); }
@@ -77,7 +80,8 @@ public final class Native {
     private static native void nativeConfigure(long handle, String socketPath, boolean useRoot,
                                                String helperPath, String bridgePath,
                                                boolean topAppEnable, String topAppPath,
-                                               int topAppMode, String topAppStops);
+                                               int topAppMode, String topAppStops,
+                                               boolean hdrEnabled, boolean hdr10Supported);
 
     // With static natives there is no `thiz`, so native is handed the object it
     // calls back into (the Clipboard hosting nativeSetClipboardText /
@@ -90,6 +94,7 @@ public final class Native {
     private static native void nativeStop(long handle);
     private static native void nativeSetCustomResolution(long handle, int width, int height);
     private static native void nativeSetScreenSize(long handle, int width, int height);
+    private static native void nativeSetHdrSdrWhiteNits(long handle, int nits);
     private static native void nativeSendTouch(long handle, int action, float x, float y, int pointerId);
     private static native void nativeSendTouchFrame(long handle);
     private static native void nativeSendKey(long handle, int action, int keycode);

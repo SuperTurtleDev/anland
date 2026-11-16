@@ -1,10 +1,12 @@
 #pragma once
 #include <aquamarine/backend/Backend.hpp>
 #include <sys/types.h>
+#include <optional>
 #include "../helpers/memory/Memory.hpp"
 class IDataSource;
 class IKeyboard;
 struct wl_client;
+namespace Config { class CMonitorRule; }
 namespace Anland {
     void beforeKeyboardEvent();
     void resetTextInput();
@@ -14,6 +16,8 @@ namespace Anland {
     void reportActiveClient(pid_t pid);
     size_t swapchainLength(SP<Aquamarine::IOutput> output, size_t nativeLength);
     uint32_t renderTargetFormat(SP<Aquamarine::IOutput> output);
+    std::optional<bool> outputHdrMode(SP<Aquamarine::IOutput> output);
+    void configureColorRule(SP<Aquamarine::IOutput> output, Config::CMonitorRule& rule);
     void selectionChanged(SP<IDataSource> source);
     void shutdownClipboard();
     void renderImportFailed(SP<Aquamarine::IOutput> output, SP<Aquamarine::IBuffer> buffer);

@@ -15,6 +15,7 @@ if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.8")
 endif()
 target_sources(kwin PRIVATE
     anland_backend.cpp
+    anland_color.cpp
     anland_egl_backend.cpp
     anland_input.cpp
     anland_logging.cpp

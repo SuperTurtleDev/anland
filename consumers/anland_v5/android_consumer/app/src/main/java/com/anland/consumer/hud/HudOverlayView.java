@@ -23,6 +23,8 @@ import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.graphics.drawable.GradientDrawable;
 import android.widget.Toast;
 
 import java.util.ArrayList;
@@ -86,6 +88,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     private HudGroupView mDropTargetGroup = null;
 
     private final SnapGeometryEngine mSnapEngine;
+    private boolean mSnapEnabled = true;
     private static final String PREF_KEY_LAYOUT_SLOT = "hud_layout_slot";
     private int mLayoutSlot = 0;
     private final Paint mGuidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -94,14 +97,17 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     // from "the edge of the button I am dragging" (cyan, self).
     private final Paint mSelfGuidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mSelectBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint mHandleDotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint mQuickActionBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint mQuickActionTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mGridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mBannerFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mBannerStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint mBannerTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final List<Float> mActiveVerticalGuides = new ArrayList<>();
     private final List<Float> mActiveHorizontalGuides = new ArrayList<>();
-    // Self-edge guides (cạnh nút đang kéo). Tách riêng để vẽ khác màu với
-    // sibling guides (cạnh của nút khác trên màn hình).
+    // Self-edge guides (dragged button edges). Separated to draw with different color
+    // from sibling guides (other buttons on screen).
     private final List<Float> mActiveSelfVerticalGuides = new ArrayList<>();
     private final List<Float> mActiveSelfHorizontalGuides = new ArrayList<>();
     private boolean mWasSnapped = false;
@@ -110,6 +116,13 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     private FrameLayout mFloatingContainer;
     private LinearLayout mTopToolbar;
     private HudPropertyInspectorView mInspectorView;
+    private HudButton mInspectorSessionButton;
+    private HudButton mInspectorOriginalButton;
+    private HudLayout mInspectorSessionLayout;
+    private final java.util.List<HudButton> mInspectorDetachedChildren = new java.util.ArrayList<>();
+    private final java.util.List<HudButton> mInspectorMovedButtons = new java.util.ArrayList<>();
+    private final java.util.List<Integer> mInspectorMovedIndices = new java.util.ArrayList<>();
+    private final java.util.Set<String> mInspectorInitialFloatingIds = new java.util.HashSet<>();
 
     /* ---- Layout lifecycle bookkeeping -----------------------------------
      * A rebuild removes and re-adds every widget view. Doing that from inside
@@ -287,6 +300,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         this.mHost = host;
         this.mSnapEngine = new SnapGeometryEngine(getResources().getDisplayMetrics().density);
 
+        float density = getResources().getDisplayMetrics().density;
         this.mInsetTop = getSystemStatusBarHeight(context);
         this.mInsetBottom = getSystemNavigationBarHeight(context);
 
@@ -295,14 +309,21 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         mGuidePaint.setStyle(Paint.Style.STROKE);
         mGuidePaint.setPathEffect(new DashPathEffect(new float[]{8, 8}, 0));
 
-        mSelfGuidePaint.setColor(0xFF80DEEA); // Cyan: cạnh của nút đang kéo
+        mSelfGuidePaint.setColor(0xFF80DEEA); // Cyan: dragged button edges
         mSelfGuidePaint.setStrokeWidth(2.5f);
         mSelfGuidePaint.setStyle(Paint.Style.STROKE);
         mSelfGuidePaint.setPathEffect(new DashPathEffect(new float[]{4, 4}, 0));
 
-        mSelectBorderPaint.setColor(0xFF80DEEA);
-        mSelectBorderPaint.setStrokeWidth(3f);
+        mSelectBorderPaint.setColor(0xFF3054F6); // Cobalt Blue C23C479
+        mSelectBorderPaint.setStrokeWidth(1.5f * density);
         mSelectBorderPaint.setStyle(Paint.Style.STROKE);
+
+        mHandleDotPaint.setColor(0xFF3054F6); // Cobalt Blue handle dot
+        mHandleDotPaint.setStyle(Paint.Style.FILL);
+
+        mQuickActionTextPaint.setTextSize(11f * density);
+        mQuickActionTextPaint.setTypeface(Typeface.DEFAULT_BOLD);
+        mQuickActionTextPaint.setTextAlign(Paint.Align.CENTER);
 
         mGridPaint.setColor(0x22FFFFFF);
         mGridPaint.setStrokeWidth(1f);
@@ -405,11 +426,11 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         dialog.show();
 
         Button p = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-        if (p != null) p.setTextColor(M3.COLOR_PRIMARY);
+        if (p != null) p.setTextColor(0xFFA39CB8);
         Button n = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
-        if (n != null) n.setTextColor(M3.COLOR_ERROR);
+        if (n != null) n.setTextColor(0xFFF38BA8);
         Button c = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
-        if (c != null) c.setTextColor(M3.COLOR_TEXT_MUTED);
+        if (c != null) c.setTextColor(0xFFB3B3B3);
     }
 
     public void setEditMode(boolean editMode) {
@@ -536,10 +557,10 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                     lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
                     lp.setMargins(0, Math.max(dp(8), mInsetTop), 0, 0);
                 } else {
-                    lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                    lp.gravity = Gravity.TOP;
+                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
                     int topMargin = Math.max(dp(36), mInsetTop + dp(6));
-                    lp.setMargins(dp(10) + mInsetLeft, topMargin, dp(10) + mInsetRight, 0);
+                    lp.setMargins(0, topMargin, 0, 0);
                 }
                 mTopToolbar.setLayoutParams(lp);
             }
@@ -702,6 +723,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             public void onGroupChildDetachRequested(HudButton group, HudButton child) {
                 if (group == null || child == null) return;
                 if (!group.children.remove(child)) return;
+                if (group == mInspectorSessionButton) mInspectorDetachedChildren.add(child);
                 // Drop it back on the canvas just below-right of the group so it
                 // does not end up hidden underneath its former container.
                 child.posXPercent = Math.min(0.95f, group.posXPercent + 0.08f);
@@ -740,6 +762,11 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             public void onCloseRequested() {
                 selectButton(null, null);
             }
+
+            @Override
+            public void onCancelRequested() {
+                cancelInspectorChanges();
+            }
         });
         mInspectorView.setVisibility(GONE);
         addView(mInspectorView, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -751,20 +778,39 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         LinearLayout bar = new LinearLayout(getContext());
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackground(M3.shape(getContext(), M3.RADIUS_PANEL, 0xF0181825, M3.COLOR_BORDER_STRONG, 1.0f));
+        GradientDrawable barBg = new GradientDrawable();
+        barBg.setCornerRadius(dp(16));
+        barBg.setColor(0xF03A3A3A); // Alight Motion dark charcoal
+        barBg.setStroke(dp(1), 0xFFA39CB8); // Lilac pastel border
+        bar.setBackground(barBg);
         bar.setPadding(dp(8), dp(6), dp(8), dp(6));
         bar.setElevation(dp(8));
 
-        addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_save),
-                M3.COLOR_PRIMARY, false, this::saveProfile);
+        View btnSave = addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_save),
+                HudVectorIcons.ICON_SAVE, Color.WHITE, false, this::saveProfile);
+
         addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_add),
-                Color.WHITE, true, this::showAddWidgetChooser);
+                HudVectorIcons.ICON_ADD, Color.WHITE, true, this::showAddWidgetChooser);
+
+        // SNAP Toggle button with corner indicator dot (same background as other buttons)
+        View btnSnap = addTool(bar, getContext().getString(R.string.hud_editor_snap), HudVectorIcons.ICON_SNAP, Color.WHITE, true, null);
+        btnSnap.setOnClickListener(v -> {
+            mSnapEnabled = !mSnapEnabled;
+            btnSnap.invalidate();
+            Toast.makeText(getContext(), mSnapEnabled ? R.string.hud_editor_snap_on : R.string.hud_editor_snap_off, Toast.LENGTH_SHORT).show();
+        });
 
         addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_layout),
-                Color.WHITE, true, this::showLayoutOptionsChooser);
+                HudVectorIcons.ICON_LAYOUT, Color.WHITE, true, this::showLayoutOptionsChooser);
+
         // EXIT prompts for saving first.
-        addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_exit),
-                M3.COLOR_ERROR, true, this::requestExit);
+        View btnExit = addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_exit),
+                HudVectorIcons.ICON_EXIT, 0xFFF38BA8, true, this::requestExit);
+        GradientDrawable exitBg = new GradientDrawable();
+        exitBg.setCornerRadius(dp(8));
+        exitBg.setColor(0xFF484848);
+        exitBg.setStroke(dp(1), 0x44F38BA8);
+        btnExit.setBackground(exitBg);
 
         return bar;
     }
@@ -772,113 +818,287 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     private LinearLayout.LayoutParams createToolButtonLayoutParams(boolean hasLeftMargin) {
         int orientation = getResources().getConfiguration().orientation;
         boolean isLandscape = (orientation == Configuration.ORIENTATION_LANDSCAPE);
-        LinearLayout.LayoutParams lp = isLandscape
-                ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32))
-                : new LinearLayout.LayoutParams(0, dp(34), 1f);
-        if (hasLeftMargin) lp.leftMargin = isLandscape ? dp(6) : dp(4);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(36), dp(32));
+        if (hasLeftMargin) lp.leftMargin = isLandscape ? dp(6) : dp(5);
         return lp;
     }
 
     private void showLayoutOptionsChooser() {
         int orientation = getResources().getConfiguration().orientation;
         boolean isLandscape = (orientation == Configuration.ORIENTATION_LANDSCAPE);
-        String copyOption = getContext().getString(isLandscape
-                ? R.string.hud_overlay_copy_portrait_here
-                : R.string.hud_overlay_copy_landscape_here);
+        Context ctx = getContext();
 
-        final String[] options = new String[] {
-                getContext().getString(R.string.hud_layout_1),
-                getContext().getString(R.string.hud_layout_2),
-                getContext().getString(R.string.hud_layout_3),
-                copyOption,
-                getContext().getString(R.string.hud_overlay_productivity_preset),
-                getContext().getString(R.string.hud_overlay_user_portrait_hotkeys_layout),
-                getContext().getString(R.string.hud_overlay_clear_active_layout)
-        };
+        AlertDialog.Builder builder = new AlertDialog.Builder(ctx);
+        LinearLayout root = new LinearLayout(ctx);
+        root.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable rootBg = new GradientDrawable();
+        rootBg.setCornerRadius(dp(16));
+        rootBg.setColor(0xFF3A3A3A); // Charcoal card
+        rootBg.setStroke(dp(1), 0xFFA39CB8); // Lilac border
+        root.setBackground(rootBg);
+        root.setPadding(dp(16), dp(14), dp(16), dp(16));
+
+        // Header Title
+        TextView title = new TextView(ctx);
+        title.setText(R.string.hud_overlay_layout_options_title);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(13.5f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, 0, 0, dp(12));
+        root.addView(title);
+
+        AlertDialog dialog = builder.setView(root).create();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        }
+
+        // Section 1: 3 Layout Buttons (LAYOUT 1 | LAYOUT 2 | LAYOUT 3)
+        TextView slotTitle = new TextView(ctx);
+        slotTitle.setText(R.string.hud_editor_select_layout);
+        slotTitle.setTextColor(0xFFB3B3B3);
+        slotTitle.setTextSize(10f);
+        slotTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        slotTitle.setPadding(0, 0, 0, dp(6));
+        root.addView(slotTitle);
+
+        LinearLayout slotRow = new LinearLayout(ctx);
+        slotRow.setOrientation(LinearLayout.HORIZONTAL);
+        for (int s = 0; s < 3; s++) {
+            final int slotIdx = s;
+            Button sb = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
+            sb.setText(ctx.getString(R.string.hud_editor_layout_number, s + 1));
+            sb.setTextSize(11.5f);
+            sb.setTypeface(Typeface.DEFAULT_BOLD);
+            sb.setTextColor(Color.WHITE);
+            GradientDrawable sBg = new GradientDrawable();
+            sBg.setCornerRadius(dp(8));
+            sBg.setColor(mLayoutSlot == s ? 0xFFA39CB8 : 0xFF484848);
+            sBg.setStroke(dp(1), mLayoutSlot == s ? 0xFFFFFFFF : 0x33FFFFFF);
+            sb.setBackground(sBg);
+            sb.setMinHeight(dp(36));
+            sb.setOnClickListener(v -> {
+                dialog.dismiss();
+                switchLayoutSlot(slotIdx);
+            });
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(38), 1f);
+            if (s > 0) slp.leftMargin = dp(6);
+            slotRow.addView(sb, slp);
+        }
+        root.addView(slotRow);
+
+        // Section 2: Preset Actions (Clean 3-item list without complex copy)
+        TextView actionTitle = new TextView(ctx);
+        actionTitle.setText(R.string.hud_editor_preset_actions);
+        actionTitle.setTextColor(0xFFB3B3B3);
+        actionTitle.setTextSize(10f);
+        actionTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        actionTitle.setPadding(0, dp(12), 0, dp(6));
+        root.addView(actionTitle);
+
+        // Load Productivity Preset
+        Button btnProd = createLayoutActionButton(ctx, getContext().getString(R.string.hud_editor_productivity_layout), 0xFF484848, Color.WHITE, () -> {
+            dialog.dismiss();
+            mHasUnsavedChanges = true;
+            HudLayout dst = getActiveLayout();
+            dst.floatingButtons.clear();
+            HudLayout preset = HudLayoutProfile.createProductivityLayout(isLandscape);
+            for (HudButton b : preset.floatingButtons) dst.floatingButtons.add(b.duplicate());
+            selectButton(null, null);
+            rebuildActiveLayout();
+            Toast.makeText(getContext(), R.string.hud_overlay_productivity_preset_loaded, Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams prodLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38));
+        prodLp.bottomMargin = dp(6);
+        root.addView(btnProd, prodLp);
+
+        // User Portrait Hotkeys Layout
+        Button btnHotkeys = createLayoutActionButton(ctx, getContext().getString(R.string.hud_editor_portrait_layout), 0xFF484848, Color.WHITE, () -> {
+            dialog.dismiss();
+            mHasUnsavedChanges = true;
+            HudLayout dst = getActiveLayout();
+            dst.floatingButtons.clear();
+            HudLayout preset = HudLayoutProfile.createDefaultPortraitLayout();
+            for (HudButton b : preset.floatingButtons) dst.floatingButtons.add(b.duplicate());
+            selectButton(null, null);
+            rebuildActiveLayout();
+            Toast.makeText(getContext(), R.string.hud_overlay_user_portrait_layout_loaded, Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams hotLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38));
+        hotLp.bottomMargin = dp(6);
+        root.addView(btnHotkeys, hotLp);
+
+        // Clear Layout (Destructive Red)
+        Button btnClear = createLayoutActionButton(ctx, getContext().getString(R.string.hud_editor_clear_layout), 0xFF484848, 0xFFF38BA8, () -> {
+            dialog.dismiss();
+            mHasUnsavedChanges = true;
+            HudLayout dst = getActiveLayout();
+            dst.floatingButtons.clear();
+            selectButton(null, null);
+            rebuildActiveLayout();
+            Toast.makeText(getContext(), R.string.hud_overlay_layout_cleared, Toast.LENGTH_SHORT).show();
+        });
+        root.addView(btnClear, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38)));
+
         mInspectorView.setVisibility(GONE);
-        AlertDialog dialog = styleDialog(darkDialog()
-                .setTitle(R.string.hud_overlay_layout_options_title)
-                .setItems(options, (d, which) -> {
-                    if (!mIsEditMode) return;
-                    if (which < 3) {
-                        switchLayoutSlot(which);
-                        return;
-                    }
-                    which -= 3;
-                    mHasUnsavedChanges = true;
-                    HudLayout dst = getActiveLayout();
-                    if (which == 0) {
-                        // Copy from opposite layout
-                        HudLayout src = mProfile.getLayout(mLayoutSlot, !isLandscape, false);
-                        dst.floatingButtons.clear();
-                        for (HudButton b : src.floatingButtons) {
-                            dst.floatingButtons.add(b.duplicate());
-                        }
-                        selectButton(null, null);
-                        rebuildActiveLayout();
-                        Toast.makeText(getContext(), R.string.hud_overlay_copied, Toast.LENGTH_SHORT).show();
-                    } else if (which == 1) {
-                        // Load Desktop / Productivity Preset (10% Inset)
-                        dst.floatingButtons.clear();
-                        HudLayout preset = HudLayoutProfile.createProductivityLayout(isLandscape);
-                        for (HudButton b : preset.floatingButtons) {
-                            dst.floatingButtons.add(b.duplicate());
-                        }
-                        selectButton(null, null);
-                        rebuildActiveLayout();
-                        Toast.makeText(getContext(), R.string.hud_overlay_productivity_preset_loaded, Toast.LENGTH_SHORT).show();
-                    } else if (which == 2) {
-                        // Load User Portrait Hotkeys Layout
-                        dst.floatingButtons.clear();
-                        HudLayout preset = HudLayoutProfile.createDefaultPortraitLayout();
-                        for (HudButton b : preset.floatingButtons) {
-                            dst.floatingButtons.add(b.duplicate());
-                        }
-                        selectButton(null, null);
-                        rebuildActiveLayout();
-                        Toast.makeText(getContext(), R.string.hud_overlay_user_portrait_layout_loaded, Toast.LENGTH_SHORT).show();
-                    } else if (which == 3) {
-                        // Clear
-                        dst.floatingButtons.clear();
-                        selectButton(null, null);
-                        rebuildActiveLayout();
-                        Toast.makeText(getContext(), R.string.hud_overlay_layout_cleared, Toast.LENGTH_SHORT).show();
-                    }
-                    d.dismiss();
-                })
-                .setOnDismissListener(d -> {
-                    if (mSelectedButton != null) mInspectorView.setVisibility(VISIBLE);
-                })
-                .setNegativeButton(R.string.hud_overlay_cancel, null)
-                .create());
         dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setLayout(dp(isLandscape ? 440 : 340), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private Button createLayoutActionButton(Context ctx, String text, int bgColor, int textColor, Runnable onClick) {
+        Button b = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
+        b.setText(text);
+        b.setTextSize(10.5f);
+        b.setTextColor(textColor);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setSingleLine(true);
+        b.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(8));
+        bg.setColor(bgColor);
+        bg.setStroke(dp(1), textColor == 0xFFF38BA8 ? 0x44F38BA8 : 0x33FFFFFF);
+        b.setBackground(bg);
+        b.setPadding(dp(6), dp(2), dp(6), dp(2));
+        b.setOnClickListener(v -> onClick.run());
+        return b;
     }
 
     // Modal chooser for the "what kind of widget do you want to add?"
-    // prompt. Replaces the old trio of separate [+] buttons which were
-    // squeezed off the right edge of the bar on portrait phones.
+    // prompt with visual grid cards (C23C479 Alight Motion style, without Trackpoint!).
     private void showAddWidgetChooser() {
-        final String[] labels = new String[] {
-                getContext().getString(R.string.hud_overlay_add_standard_key_button),
-                getContext().getString(R.string.hud_overlay_add_super_gesture_nub),
-                getContext().getString(R.string.hud_overlay_add_trackpoint),
-                getContext().getString(R.string.hud_overlay_add_steam_deck_trackpad),
-                getContext().getString(R.string.hud_overlay_add_scroll_bar),
-                getContext().getString(R.string.hud_overlay_add_dpad),
-                getContext().getString(R.string.hud_overlay_add_group)
-        };
-        final HudButton.WidgetKind[] kinds = new HudButton.WidgetKind[] {
-                HudButton.WidgetKind.KEY,
-                HudButton.WidgetKind.SUPER_GESTURE,
-                HudButton.WidgetKind.TRACKPOINT,
-                HudButton.WidgetKind.TOUCHPAD,
-                HudButton.WidgetKind.SCROLLBAR,
-                HudButton.WidgetKind.DPAD,
-                HudButton.WidgetKind.GROUP
-        };
-        showItemChooser(R.string.hud_overlay_add_widget_title, labels, which -> {
-            if (mIsEditMode) addWidgetOfKind(kinds[which]);
+        Context ctx = getContext();
+        AlertDialog.Builder builder = new AlertDialog.Builder(ctx);
+
+        LinearLayout root = new LinearLayout(ctx);
+        root.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable rootBg = new GradientDrawable();
+        rootBg.setCornerRadius(dp(16));
+        rootBg.setColor(0xFF3A3A3A); // Charcoal card
+        rootBg.setStroke(dp(1), 0xFFA39CB8);
+        root.setBackground(rootBg);
+        root.setPadding(dp(16), dp(14), dp(16), dp(16));
+
+        // Header Title
+        TextView title = new TextView(ctx);
+        title.setText(R.string.hud_overlay_add_widget_title);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(13.5f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, 0, 0, dp(12));
+        root.addView(title);
+
+        AlertDialog dialog = builder.setView(root).create();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        }
+
+        // 2-Row / 3-Column Grid for widgets
+        LinearLayout row1 = new LinearLayout(ctx);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.bottomMargin = dp(8);
+        row1.setLayoutParams(rlp);
+
+        LinearLayout row2 = new LinearLayout(ctx);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 1. KEY BUTTON
+        row1.addView(createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_key), getContext().getString(R.string.hud_editor_widget_standard), () -> {
+            dialog.dismiss();
+            if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.KEY);
+        }), new LinearLayout.LayoutParams(0, dp(58), 1f));
+
+        // 2. D-PAD
+        View dpadCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_dpad), getContext().getString(R.string.hud_editor_widget_directional), () -> {
+            dialog.dismiss();
+            if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.DPAD);
         });
+        LinearLayout.LayoutParams dpadLp = new LinearLayout.LayoutParams(0, dp(58), 1f);
+        dpadLp.leftMargin = dp(8);
+        row1.addView(dpadCard, dpadLp);
+
+        // 3. TOUCHPAD
+        View touchpadCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_touchpad), getContext().getString(R.string.hud_editor_widget_mouse_trackpad), () -> {
+            dialog.dismiss();
+            if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.TOUCHPAD);
+        });
+        LinearLayout.LayoutParams tpLp = new LinearLayout.LayoutParams(0, dp(58), 1f);
+        tpLp.leftMargin = dp(8);
+        row1.addView(touchpadCard, tpLp);
+
+        // 4. SCROLLBAR / SLIDER
+        row2.addView(createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_slider), getContext().getString(R.string.hud_editor_widget_scrollbar), () -> {
+            dialog.dismiss();
+            if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.SCROLLBAR);
+        }), new LinearLayout.LayoutParams(0, dp(58), 1f));
+
+        // 5. SUPER GESTURE
+        View gestureCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_gesture), getContext().getString(R.string.hud_editor_widget_swipe), () -> {
+            dialog.dismiss();
+            if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.SUPER_GESTURE);
+        });
+        LinearLayout.LayoutParams gestLp = new LinearLayout.LayoutParams(0, dp(58), 1f);
+        gestLp.leftMargin = dp(8);
+        row2.addView(gestureCard, gestLp);
+
+        // 6. GROUP CONTAINER
+        View groupCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_group), getContext().getString(R.string.hud_editor_widget_container), () -> {
+            dialog.dismiss();
+            if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.GROUP);
+        });
+        LinearLayout.LayoutParams grpLp = new LinearLayout.LayoutParams(0, dp(58), 1f);
+        grpLp.leftMargin = dp(8);
+        row2.addView(groupCard, grpLp);
+
+        root.addView(row1);
+        root.addView(row2);
+
+        dialog.show();
+        boolean isLandscape = ctx.getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setLayout(dp(isLandscape ? 440 : 340), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private View createWidgetChoiceCard(Context ctx, String title, String subtitle, Runnable onClick) {
+        LinearLayout card = new LinearLayout(ctx);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(10));
+        bg.setColor(0xFF484848);
+        bg.setStroke(dp(1), 0x33FFFFFF);
+        card.setBackground(bg);
+        card.setPadding(dp(4), dp(6), dp(4), dp(6));
+        card.setClickable(true);
+        card.setOnClickListener(v -> onClick.run());
+
+        TextView t = new TextView(ctx);
+        t.setText(title);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(11.5f);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        card.addView(t);
+
+        TextView sub = new TextView(ctx);
+        sub.setText(subtitle);
+        sub.setTextColor(0xFF888888);
+        sub.setTextSize(9.5f);
+        sub.setGravity(Gravity.CENTER);
+        sub.setSingleLine(true);
+        sub.setPadding(0, dp(2), 0, 0);
+        card.addView(sub);
+
+        return card;
     }
 
     /**
@@ -1013,16 +1233,23 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
      * Append a button to the editor toolbar. Used by the floating-control editor
      * to expose the keyboard layer next to SAVE / ADD / SNAP / LAYOUT / EXIT.
      */
-    public Button addToolbarButton(CharSequence label, Runnable onClick) {
+    public void updateToolbarButtonIcon(View buttonView, String newIconId, String contentDescription) {
+        if (buttonView == null) return;
+        buttonView.setContentDescription(contentDescription);
+        buttonView.setTag(newIconId);
+        buttonView.invalidate();
+    }
+
+    public View addToolbarButton(CharSequence label, String iconId, Runnable onClick) {
         if (mTopToolbar == null) return null;
-        return addTool(mTopToolbar, label, Color.WHITE, true, onClick);
+        View b = addTool(mTopToolbar, label, iconId != null ? iconId : HudVectorIcons.ICON_KEYBOARD, Color.WHITE, true, onClick);
+        return b;
     }
 
     /** One toolbar button; every button in the editor bar is built like this. */
-    private Button addTool(LinearLayout bar, CharSequence label, int textColor,
-                           boolean hasLeftMargin, Runnable onClick) {
-        Button b = createToolButton(label.toString());
-        b.setTextColor(textColor);
+    private View addTool(LinearLayout bar, CharSequence label, String iconId, int textColor,
+                         boolean hasLeftMargin, Runnable onClick) {
+        View b = createToolButton(label.toString(), iconId);
         if (onClick != null) b.setOnClickListener(v -> onClick.run());
         bar.addView(b, createToolButtonLayoutParams(hasLeftMargin));
         return b;
@@ -1062,29 +1289,67 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     // 8dp Material surface, the same corner radius the rest of the
     // editor UI uses. Background is a subtle translucent white so the
     // chrome blends with the dark scrim above Niri.
-    private Button createToolButton(String label) {
-        Button b = new Button(getContext(), null, android.R.attr.buttonBarButtonStyle);
-        b.setText(label);
-        b.setAllCaps(true);
-        b.setTextSize(11f);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setTextColor(Color.WHITE);
-        b.setBackground(M3.createRippleDrawable(getContext(), M3.RADIUS_CHIP, 0x22FFFFFF, 0x44FFFFFF, M3.COLOR_BORDER_SUBTLE));
-        b.setPadding(dp(10), dp(4), dp(10), dp(4));
-        b.setGravity(Gravity.CENTER);
-        b.setSingleLine(true);
-        b.setMinWidth(dp(44));
-        b.setMinHeight(dp(30));
-        return b;
+    private View createToolButton(String label, String iconId) {
+        Context ctx = getContext();
+        if (iconId == null || iconId.isEmpty()) {
+            Button b = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
+            b.setText(label);
+            b.setTextSize(11f);
+            b.setTypeface(Typeface.DEFAULT_BOLD);
+            b.setTextColor(Color.WHITE);
+            b.setGravity(Gravity.CENTER);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setCornerRadius(dp(8));
+            bg.setColor(0xFF484848);
+            bg.setStroke(dp(1), 0x33FFFFFF);
+            b.setBackground(bg);
+            b.setPadding(dp(8), dp(4), dp(8), dp(4));
+            return b;
+        }
+
+        // Dedicated custom view that renders vector icon directly at exact center (cx, cy)
+        View iconBtn = new View(ctx) {
+            private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+            @Override
+            protected void onDraw(Canvas canvas) {
+                super.onDraw(canvas);
+                String activeIcon = (getTag() instanceof String) ? (String) getTag() : iconId;
+                int col = Color.WHITE;
+                if (getContext().getString(R.string.hud_overlay_toolbar_exit).equals(label)) {
+                    col = 0xFFF38BA8;
+                }
+                mPaint.setColor(col);
+                float density = getResources().getDisplayMetrics().density;
+                float iconSize = 18f * density;
+                HudVectorIcons.drawIcon(canvas, activeIcon, getWidth() * 0.5f, getHeight() * 0.5f, iconSize, mPaint);
+
+                // Corner indicator dot for SNAP button
+                if (HudVectorIcons.ICON_SNAP.equals(iconId)) {
+                    mPaint.setStyle(Paint.Style.FILL);
+                    mPaint.setColor(mSnapEnabled ? 0xFFA39CB8 : 0x44FFFFFF);
+                    canvas.drawCircle(getWidth() - 6f * density, 6f * density, 2.5f * density, mPaint);
+                }
+            }
+        };
+
+        iconBtn.setContentDescription(label);
+        iconBtn.setTag(iconId);
+        iconBtn.setClickable(true);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(8));
+        bg.setColor(0xFF484848);
+        bg.setStroke(dp(1), 0x33FFFFFF);
+        iconBtn.setBackground(bg);
+        return iconBtn;
     }
 
     @Override
     protected void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        // The orientation decides which HudLayout is active, so this is a real
-        // rebuild (new children), not just a reposition. It must not run from
-        // the middle of a layout pass -- see scheduleRebuild().
-        scheduleRebuild();
+        if (!mIsEditMode) {
+            scheduleRebuild();
+        }
         // The toolbar switches between "full-width row of equal cells" in
         // portrait and "wrap-content, centred" in landscape, so its layout
         // parameters have to be recomputed for the new orientation once the new
@@ -1167,9 +1432,127 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         postOnAnimation(mDeferredRebuild);
     }
 
+    private int mResizeMode = 0; // 0=none, 1=top-left, 2=bottom-right
+    private float mResizeStartX, mResizeStartY;
+    private int mInitialWidthDp, mInitialHeightDp;
+    private float mInitialPosX, mInitialPosY;
+
+    private float mTouchDownRawX, mTouchDownRawY;
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         if (mIsEditMode) {
+            // Exit preview on tap anywhere
+            if (mInspectorView != null && mInspectorView.isPreviewing()) {
+                if (event.getAction() == MotionEvent.ACTION_UP) {
+                    mInspectorView.exitPreview();
+                }
+                return true;
+            }
+
+            float x = event.getX();
+            float y = event.getY();
+            float density = getResources().getDisplayMetrics().density;
+
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    mTouchDownRawX = event.getRawX();
+                    mTouchDownRawY = event.getRawY();
+                    mResizeMode = 0;
+                    if (mSelectedView != null && mSelectedButton != null) {
+                        float bw = mSelectedView.getWidth() > 0 ? mSelectedView.getWidth() : mSelectedButton.widthDp * density;
+                        float bh = mSelectedView.getHeight() > 0 ? mSelectedView.getHeight() : mSelectedButton.heightDp * density;
+                        float pad = 3f * density;
+                        float left = mSelectedView.getX() - pad;
+                        float top = mSelectedView.getY() - pad;
+                        float right = mSelectedView.getX() + bw + pad;
+                        float bottom = mSelectedView.getY() + bh + pad;
+                        float hitR = 24f * density;
+
+                        // Check Top-Left Anchor
+                        if (Math.hypot(x - left, y - top) <= hitR) {
+                            mResizeMode = 1;
+                            mResizeStartX = x;
+                            mResizeStartY = y;
+                            mInitialWidthDp = mSelectedButton.widthDp;
+                            mInitialHeightDp = mSelectedButton.heightDp;
+                            mInitialPosX = mSelectedButton.posXPercent;
+                            mInitialPosY = mSelectedButton.posYPercent;
+                            return true;
+                        }
+                        // Check Bottom-Right Anchor
+                        if (Math.hypot(x - right, y - bottom) <= hitR) {
+                            mResizeMode = 2;
+                            mResizeStartX = x;
+                            mResizeStartY = y;
+                            mInitialWidthDp = mSelectedButton.widthDp;
+                            mInitialHeightDp = mSelectedButton.heightDp;
+                            mInitialPosX = mSelectedButton.posXPercent;
+                            mInitialPosY = mSelectedButton.posYPercent;
+                            return true;
+                        }
+                    }
+                    break;
+
+                case MotionEvent.ACTION_MOVE:
+                    if (mResizeMode != 0 && mSelectedButton != null && mSelectedView != null) {
+                        float dx = (x - mResizeStartX) / density;
+                        float dy = (y - mResizeStartY) / density;
+                        int minSize = 25;
+                        int maxSize = 400;
+
+                        if (mResizeMode == 2) { // Bottom-Right
+                            int newW = Math.max(minSize, Math.min(maxSize, Math.round(mInitialWidthDp + dx)));
+                            int newH = Math.max(minSize, Math.min(maxSize, Math.round(mInitialHeightDp + dy)));
+                            mSelectedButton.widthDp = newW;
+                            mSelectedButton.heightDp = newH;
+                            float deltaXPercent = (dx * density * 0.5f) / getWidth();
+                            float deltaYPercent = (dy * density * 0.5f) / getHeight();
+                            mSelectedButton.posXPercent = mInitialPosX + deltaXPercent;
+                            mSelectedButton.posYPercent = mInitialPosY + deltaYPercent;
+                        } else if (mResizeMode == 1) { // Top-Left
+                            int newW = Math.max(minSize, Math.min(maxSize, Math.round(mInitialWidthDp - dx)));
+                            int newH = Math.max(minSize, Math.min(maxSize, Math.round(mInitialHeightDp - dy)));
+                            mSelectedButton.widthDp = newW;
+                            mSelectedButton.heightDp = newH;
+                            float deltaXPercent = (dx * density * 0.5f) / getWidth();
+                            float deltaYPercent = (dy * density * 0.5f) / getHeight();
+                            mSelectedButton.posXPercent = mInitialPosX + deltaXPercent;
+                            mSelectedButton.posYPercent = mInitialPosY + deltaYPercent;
+                        }
+                        mSelectedView.getLayoutParams().width = Math.round(mSelectedButton.widthDp * density);
+                        mSelectedView.getLayoutParams().height = Math.round(mSelectedButton.heightDp * density);
+                        mSelectedView.requestLayout();
+                        if (mInspectorView != null && mInspectorView.getVisibility() == VISIBLE) {
+                            mInspectorView.bindButton(mSelectedButton);
+                        }
+                        invalidate();
+                        return true;
+                    }
+                    break;
+
+                case MotionEvent.ACTION_UP:
+                    if (mResizeMode != 0) {
+                        mResizeMode = 0;
+                        mHasUnsavedChanges = true;
+                        rebuildActiveLayout();
+                        return true;
+                    }
+                    if (handleQuickActionClick(x, y)) {
+                        return true;
+                    }
+
+                    // Empty canvas taps deselect only when the inspector is closed.
+                    float upDx = event.getRawX() - mTouchDownRawX;
+                    float upDy = event.getRawY() - mTouchDownRawY;
+                    int touchSlop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
+                    if (upDx * upDx + upDy * upDy <= touchSlop * touchSlop
+                            && (mInspectorView == null || mInspectorView.getVisibility() != VISIBLE)) {
+                        selectButton(null, null);
+                        return true;
+                    }
+                    break;
+            }
             return true;
         }
         return super.onTouchEvent(event);
@@ -1442,7 +1825,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                                 view.getWidth(), view.getHeight()));
                     }
 
-                    if (mDropTargetGroup == null) {
+                    if (mDropTargetGroup == null && mSnapEnabled) {
                         RectF candidate = new RectF(targetX, targetY,
                                 targetX + view.getWidth(), targetY + view.getHeight());
                         List<RectF> siblings = getSiblingBounds(model);
@@ -1582,6 +1965,17 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         if (!HudButton.WIDGET_GROUP.equals(group.widgetType)) return;
         if (!HudButton.WIDGET_STANDARD.equals(widget.widgetType)) return;
         HudLayout layout = getActiveLayout();
+        if (group == mInspectorSessionButton && layout == mInspectorSessionLayout
+                && mInspectorInitialFloatingIds.remove(widget.id)) {
+            int index = layout.floatingButtons.indexOf(widget);
+            if (index >= 0) {
+                HudButton original = copyForInspector(widget);
+                if (original != null) {
+                    mInspectorMovedButtons.add(original);
+                    mInspectorMovedIndices.add(index);
+                }
+            }
+        }
         if (!layout.floatingButtons.remove(widget)) return;
         group.children.add(widget);
         ensureGroupFits(group);
@@ -1638,14 +2032,77 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     }
 
     private void selectButton(HudButton b, View v) {
+        if (mInspectorView != null && mInspectorView.getVisibility() == VISIBLE
+                && b != mInspectorSessionButton) {
+            beginInspectorSession(b);
+        }
         this.mSelectedButton = b;
         this.mSelectedView = v;
-        boolean wasHidden = mInspectorView.getVisibility() != VISIBLE;
-        mInspectorView.bindButton(b);
-        if (b != null && wasHidden) {
-            post(() -> placeInspector(b));
+        // Do not auto popup inspector on select to avoid obscuring controls!
+        // Only update inspector if it is already open.
+        if (mInspectorView != null && mInspectorView.getVisibility() == VISIBLE) {
+            mInspectorView.bindButton(b);
+            if (b != null) {
+                post(() -> placeInspector(b));
+            }
         }
         invalidate();
+    }
+
+    private static HudButton copyForInspector(HudButton button) {
+        if (button == null) return null;
+        try {
+            return HudButton.fromJSON(button.toJSON());
+        } catch (org.json.JSONException e) {
+            return null;
+        }
+    }
+
+    private void beginInspectorSession(HudButton button) {
+        mInspectorSessionButton = button;
+        mInspectorOriginalButton = copyForInspector(button);
+        mInspectorSessionLayout = button != null ? getActiveLayout() : null;
+        mInspectorDetachedChildren.clear();
+        mInspectorMovedButtons.clear();
+        mInspectorMovedIndices.clear();
+        mInspectorInitialFloatingIds.clear();
+        if (mInspectorSessionLayout != null) {
+            for (HudButton floating : mInspectorSessionLayout.floatingButtons) {
+                mInspectorInitialFloatingIds.add(floating.id);
+            }
+        }
+    }
+
+    private void cancelInspectorChanges() {
+        HudLayout layout = mInspectorSessionLayout;
+        if (layout != null && mInspectorOriginalButton != null) {
+            int index = layout.floatingButtons.indexOf(mInspectorSessionButton);
+            if (index >= 0) {
+                boolean changed = !mInspectorDetachedChildren.isEmpty() || !mInspectorMovedButtons.isEmpty();
+                try {
+                    changed |= !mInspectorSessionButton.toJSON().toString()
+                            .equals(mInspectorOriginalButton.toJSON().toString());
+                } catch (org.json.JSONException e) {
+                    changed = true;
+                }
+                layout.floatingButtons.set(index, mInspectorOriginalButton);
+                layout.floatingButtons.removeAll(mInspectorDetachedChildren);
+                for (int i = mInspectorMovedButtons.size() - 1; i >= 0; i--) {
+                    HudButton original = mInspectorMovedButtons.get(i);
+                    for (int j = layout.floatingButtons.size() - 1; j >= 0; j--) {
+                        if (original.id.equals(layout.floatingButtons.get(j).id)) {
+                            layout.floatingButtons.remove(j);
+                        }
+                    }
+                    int originalIndex = Math.min(mInspectorMovedIndices.get(i), layout.floatingButtons.size());
+                    layout.floatingButtons.add(originalIndex, original);
+                }
+                if (changed) mHasUnsavedChanges = true;
+            }
+        }
+        selectButton(null, null);
+        beginInspectorSession(null);
+        rebuildActiveLayout();
     }
 
     /**
@@ -1661,14 +2118,73 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         int ph = getHeight();
         if (pw <= 0 || ph <= 0) return;
         mInspectorView.adaptSize(pw, ph);
-        int iw = mInspectorView.getWidth() > 0 ? mInspectorView.getWidth() : dp(pw > ph ? 290 : 260);
-        int ih = mInspectorView.getHeight() > 0 ? mInspectorView.getHeight() : dp(pw > ph ? 240 : 350);
-        float targetX = (b.posXPercent < 0.5f) ? (pw - iw - dp(16) - mInsetRight) : (dp(16) + mInsetLeft);
-        float targetY = (b.posYPercent < 0.5f) ? (ph - ih - dp(16) - mInsetBottom) : (dp(56) + mInsetTop);
+        int iw = mInspectorView.getWidth() > 0 ? mInspectorView.getWidth() : dp(pw > ph ? 460 : 340);
+        int ih = mInspectorView.getHeight() > 0 ? mInspectorView.getHeight() : dp(pw > ph ? 280 : 380);
+        float targetX = (pw - iw) * 0.5f;
+        float targetY = (ph - ih) * 0.5f;
         targetX = Math.max(dp(8) + mInsetLeft, Math.min(pw - iw - dp(8) - mInsetRight, targetX));
-        targetY = Math.max(dp(56) + mInsetTop, Math.min(ph - ih - dp(8) - mInsetBottom, targetY));
+        targetY = Math.max(dp(44) + mInsetTop, Math.min(ph - ih - dp(8) - mInsetBottom, targetY));
         mInspectorView.setTranslationX(Math.max(0f, targetX));
         mInspectorView.setTranslationY(Math.max(0f, targetY));
+    }
+
+    private boolean handleQuickActionClick(float x, float y) {
+        if (mSelectedView == null || mSelectedButton == null) return false;
+        float density = getResources().getDisplayMetrics().density;
+        float bw = mSelectedView.getWidth();
+        float bh = mSelectedView.getHeight();
+        if (bw <= 0 || bh <= 0) {
+            bw = mSelectedButton.widthDp * density;
+            bh = mSelectedButton.heightDp * density;
+        }
+        float pad = 3f * density;
+        float left = mSelectedView.getX() - pad;
+        float right = mSelectedView.getX() + bw + pad;
+        float bottom = mSelectedView.getY() + bh + pad;
+        float pillH = 22f * density;
+        float pillW = 46f * density;
+        float pillY = bottom + 8f * density;
+        float gap = 8f * density;
+        float centerX = (left + right) * 0.5f;
+        float p2 = centerX - pillW * 0.5f;
+        float p1 = p2 - gap - pillW;
+        float p3 = p2 + pillW + gap;
+
+        if (y >= pillY - 6f * density && y <= pillY + pillH + 6f * density) {
+            if (x >= p1 && x <= p1 + pillW) {
+                // Click "Custom"
+                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+                if (mInspectorView != null) {
+                    if (mInspectorSessionButton != mSelectedButton) beginInspectorSession(mSelectedButton);
+                    mInspectorView.bindButton(mSelectedButton);
+                    mInspectorView.setVisibility(VISIBLE);
+                    placeInspector(mSelectedButton);
+                }
+                return true;
+            } else if (x >= p2 && x <= p2 + pillW) {
+                // Click "Copy"
+                performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
+                HudButton duplicate = mSelectedButton.duplicate();
+                duplicate.posXPercent = Math.min(0.95f, duplicate.posXPercent + 0.05f);
+                duplicate.posYPercent = Math.min(0.95f, duplicate.posYPercent + 0.05f);
+                getActiveLayout().floatingButtons.add(duplicate);
+                mHasUnsavedChanges = true;
+                rebuildActiveLayout();
+                selectButton(duplicate, null);
+                Toast.makeText(getContext(), R.string.hud_editor_duplicated, Toast.LENGTH_SHORT).show();
+                return true;
+            } else if (x >= p3 && x <= p3 + pillW) {
+                // Click "Delete"
+                performHapticFeedback(android.view.HapticFeedbackConstants.REJECT);
+                getActiveLayout().floatingButtons.remove(mSelectedButton);
+                mHasUnsavedChanges = true;
+                selectButton(null, null);
+                rebuildActiveLayout();
+                Toast.makeText(getContext(), R.string.hud_editor_deleted, Toast.LENGTH_SHORT).show();
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -1692,14 +2208,14 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             }
 
             // 3. Draw magnetic guidelines
-            // 3a. Sibling guides (xanh lá) - snap với nút khác / mép canvas
+            // 3a. Sibling guides (green) - snap with other buttons / canvas edges
             for (float x : mActiveVerticalGuides) {
                 canvas.drawLine(x, 0, x, h, mGuidePaint);
             }
             for (float y : mActiveHorizontalGuides) {
                 canvas.drawLine(0, y, w, y, mGuidePaint);
             }
-            // 3b. Self guides (cyan) - các cạnh của chính nút đang kéo
+            // 3b. Self guides (cyan) - dragged button edges
             for (float x : mActiveSelfVerticalGuides) {
                 canvas.drawLine(x, 0, x, h, mSelfGuidePaint);
             }
@@ -1707,7 +2223,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 canvas.drawLine(0, y, w, y, mSelfGuidePaint);
             }
 
-            // 4. Draw bounding border around selected view
+            // 4. Draw bounding border around selected view (Cobalt blue + 2 Anchor dots + Quick Actions)
             if (mSelectedView != null && mSelectedButton != null) {
                 float bw = mSelectedView.getWidth();
                 float bh = mSelectedView.getHeight();
@@ -1715,11 +2231,38 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                     bw = mSelectedButton.widthDp * density;
                     bh = mSelectedButton.heightDp * density;
                 }
-                RectF r = new RectF(mSelectedView.getX() - 3 * density,
-                        mSelectedView.getY() - 3 * density,
-                        mSelectedView.getX() + bw + 3 * density,
-                        mSelectedView.getY() + bh + 3 * density);
-                canvas.drawRoundRect(r, 6 * density, 6 * density, mSelectBorderPaint);
+                float pad = 3f * density;
+                float left = mSelectedView.getX() - pad;
+                float top = mSelectedView.getY() - pad;
+                float right = mSelectedView.getX() + bw + pad;
+                float bottom = mSelectedView.getY() + bh + pad;
+
+                // 4a. Rectangular Cobalt Border
+                canvas.drawRect(left, top, right, bottom, mSelectBorderPaint);
+
+                // 4b. Two Anchor Dots (Top-Left & Bottom-Right)
+                float dotRadius = 5f * density;
+                canvas.drawCircle(left, top, dotRadius, mHandleDotPaint);
+                canvas.drawCircle(right, bottom, dotRadius, mHandleDotPaint);
+
+                // 4c. Quick Action Labels underneath: Custom | Copy | Delete (Pill Buttons with Lucide Icons)
+                float pillH = 24f * density;
+                float pillW = 48f * density;
+                float pillY = bottom + 8f * density;
+                float gap = 8f * density;
+                float centerX = (left + right) * 0.5f;
+                float p2 = centerX - pillW * 0.5f;
+                float p1 = p2 - gap - pillW;
+                float p3 = p2 + pillW + gap;
+
+                // Custom (Pencil)
+                drawActionPillWithIcon(canvas, p1, pillY, pillW, pillH, 0xFF3A3A3A, 0xFFA39CB8, HudVectorIcons.ICON_CUSTOM, Color.WHITE, density);
+
+                // Copy (Copy sheets)
+                drawActionPillWithIcon(canvas, p2, pillY, pillW, pillH, 0xFF3A3A3A, 0x33FFFFFF, HudVectorIcons.ICON_COPY, Color.WHITE, density);
+
+                // Delete (Trash can)
+                drawActionPillWithIcon(canvas, p3, pillY, pillW, pillH, 0xFF3A3A3A, 0x55F38BA8, HudVectorIcons.ICON_DELETE, 0xFFF38BA8, density);
             }
 
             // 5. Bottom-center daemon status banner (only when we know the host)
@@ -1727,6 +2270,23 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 drawDaemonBanner(canvas, w, h, density);
             }
         }
+    }
+
+    private void drawActionPillWithIcon(Canvas canvas, float x, float y, float w, float h,
+                                        int bgColor, int strokeColor, String iconId, int iconColor, float density) {
+        RectF r = new RectF(x, y, x + w, y + h);
+        mQuickActionBgPaint.setStyle(Paint.Style.FILL);
+        mQuickActionBgPaint.setColor(bgColor);
+        float corner = h * 0.5f;
+        canvas.drawRoundRect(r, corner, corner, mQuickActionBgPaint);
+
+        mQuickActionBgPaint.setStyle(Paint.Style.STROKE);
+        mQuickActionBgPaint.setStrokeWidth(1.2f * density);
+        mQuickActionBgPaint.setColor(strokeColor);
+        canvas.drawRoundRect(r, corner, corner, mQuickActionBgPaint);
+
+        mQuickActionTextPaint.setColor(iconColor);
+        HudVectorIcons.drawIcon(canvas, iconId, x + w * 0.5f, y + h * 0.5f, 15f * density, mQuickActionTextPaint);
     }
 
     private void drawDaemonBanner(Canvas canvas, float w, float h, float density) {

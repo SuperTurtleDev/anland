@@ -182,6 +182,89 @@ struct Active {
     runtime: flutter_runtime::FlutterRuntime,
     _imports: ImportedPool,
     plan: OutputPlan,
+    #[cfg(feature = "anland-runtime-v2")]
+    hdr_update: Option<PendingHdrColor>,
+    #[cfg(feature = "anland-runtime-v2")]
+    hdr_update_since: Option<Instant>,
+}
+
+#[cfg(feature = "anland-runtime-v2")]
+struct PendingHdrColor {
+    white_nits: u32,
+    since: Instant,
+    completion: std::sync::mpsc::Receiver<denial_flutter_engine::RenderOperationResult>,
+}
+
+/// Pause new output authorizations while old raster tasks drain, then atomically
+/// retune scene encoding and PQ targets on the serial raster runner. Transport,
+/// input and consumer releases keep flowing; no engine or pool is recreated.
+#[cfg(feature = "anland-runtime-v2")]
+fn synchronize_hdr_brightness(
+    active: &mut Active,
+    events: &mut RuntimeState,
+    white_nits: u32,
+    now: Instant,
+) -> Result<bool, Box<dyn Error>> {
+    if !active._imports.hdr || active.driver.stopped() {
+        return Ok(false);
+    }
+    if let Some(update) = active.hdr_update.as_ref() {
+        match poll_replacement(Some(&update.completion), update.since, now)? {
+            ReplacementProgress::Completed => {
+                active._imports.sdr_white_nits = update.white_nits;
+                active.hdr_update = None;
+                active.hdr_update_since = None;
+                let textures = active.runtime.finish_external_hdr_update()?;
+                active.driver.update_textures(textures);
+                events.scene_sync.mark_dirty();
+                if let Some(frontend) = events.wayland.as_mut() {
+                    // Recomputes preferred descriptions and color-management
+                    // feedback only after the raster transaction has committed.
+                    frontend.update_topology(&active.plan.snapshot)?;
+                    frontend.display_handle.flush_clients()?;
+                }
+            }
+            ReplacementProgress::Busy => active.hdr_update = None,
+            ReplacementProgress::Rejected => {
+                return Err("Anland HDR brightness update rejected for the resident pool".into());
+            }
+            ReplacementProgress::Pending => {}
+        }
+    }
+    if active.hdr_update.is_none() && active._imports.sdr_white_nits == white_nits {
+        active.hdr_update_since = None;
+        active.driver.set_geometry_pending(false);
+        return Ok(false);
+    }
+    // Preserve the original deadline across Busy retries and coalesced drag
+    // values, including time spent draining existing output authorizations.
+    let since = *active.hdr_update_since.get_or_insert(now);
+    if active.hdr_update.is_none() && now.saturating_duration_since(since) >= Duration::from_secs(5)
+    {
+        return Err("Anland HDR brightness update exceeded its raster-idle deadline".into());
+    }
+    active.driver.set_geometry_pending(true);
+    if active.hdr_update.is_none() && active.driver.geometry_ready(&active.runtime, now) {
+        let pool = active.plan.pool;
+        let hdr = super::hdr::output(white_nits);
+        let completion = active.runtime.begin_external_hdr_update(
+            flutter_runtime::ExternalPoolDescriptor {
+                generation: pool.generation,
+                configuration: pool.configuration,
+                output: pool.output,
+                view: pool.view,
+                size: pool.size,
+                color: Some(hdr.output_color()),
+            },
+            hdr,
+        )?;
+        active.hdr_update = Some(PendingHdrColor {
+            white_nits,
+            since,
+            completion,
+        });
+    }
+    Ok(true)
 }
 
 fn synchronize_refresh(
@@ -929,7 +1012,20 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     }
                 }
                 let mut drive_now = Instant::now();
-                if !a.driver.stopped() && client.as_ref().unwrap().connected() {
+                #[cfg(feature = "anland-runtime-v2")]
+                let color_pending = if !a.driver.stopped() && client.as_ref().unwrap().connected() {
+                    synchronize_hdr_brightness(
+                        a,
+                        &mut events,
+                        client.as_ref().unwrap().hdr_sdr_white_nits(),
+                        drive_now,
+                    )?
+                } else {
+                    false
+                };
+                #[cfg(not(feature = "anland-runtime-v2"))]
+                let color_pending = false;
+                if !a.driver.stopped() && client.as_ref().unwrap().connected() && !color_pending {
                     // Consumer routing above may have just queued shell input.
                     // Use the runtime's bounded batch before scene synchronization/render.
                     if events.flutter_input.has_pending() {
@@ -1216,7 +1312,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
             // Wayland requests, shell/lock changes and constraint removal can
             // happen without input or rendering. Synchronize every bounded loop.
             if let Some(c) = client.as_mut() {
-                let mut running = active.as_ref().is_some_and(|a| !a.driver.stopped()) && !finishing;
+                let mut running =
+                    active.as_ref().is_some_and(|a| !a.driver.stopped()) && !finishing;
                 if !c.connected() {
                     camera_requested = false;
                 } else if running && !camera_requested {
@@ -1424,7 +1521,12 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                         let prepared = if let Some(plan) = staged_plan.take() {
                             Ok((plan, staged_imports.take().unwrap()))
                         } else {
-                            prepare_output(c, &topology, scale.scale_120)
+                            prepare_output(
+                                c,
+                                &topology,
+                                scale.scale_120,
+                                &mut graphics.capture_allocator,
+                            )
                         };
                         match prepared {
                             Ok((plan, imports)) => {
@@ -1489,6 +1591,10 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                         events.flutter_reload_requested,
                                         replacing.is_some(),
                                         old.plan.pool.output == plan.pool.output
+                                            // Float root color is an engine startup
+                                            // setting; a color-mode change needs a
+                                            // fresh engine, even at the same size.
+                                            && old._imports.hdr == staged_imports.as_ref().unwrap().hdr
                                             && old.plan.pool.view == plan.pool.view
                                             && old.plan.pool.configuration
                                                 == plan.pool.configuration
@@ -1531,6 +1637,18 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     match status {
                                         ReplacementProgress::Completed => {
                                             replacing = None;
+                                            #[cfg(feature = "anland-runtime-v2")]
+                                            {
+                                                // Both pools are raster-idle here;
+                                                // same-mode reconnects may carry a
+                                                // different saved reference white.
+                                                let imported = staged_imports.as_ref().unwrap();
+                                                super::hdr::activate(
+                                                    imported.identity.output,
+                                                    imported.hdr,
+                                                    imported.sdr_white_nits,
+                                                );
+                                            }
                                             parked
                                                 .as_mut()
                                                 .unwrap()
@@ -1606,9 +1724,17 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     runtime,
                                     _imports: staged_imports.take().unwrap(),
                                     plan,
+                                    #[cfg(feature = "anland-runtime-v2")]
+                                    hdr_update: None,
+                                    #[cfg(feature = "anland-runtime-v2")]
+                                    hdr_update_since: None,
                                 });
                                 let plan = &active.as_ref().unwrap().plan;
-                                if let Some(frontend) = staged_frontend.take() {
+                                if let Some(mut frontend) = staged_frontend.take() {
+                                    // Startup constructed the frontend before the
+                                    // imported renderer activated its HDR scene.
+                                    // Publish the committed preferred description.
+                                    frontend.update_topology(&plan.snapshot)?;
                                     let lifecycle = std::mem::take(&mut events.lifecycle);
                                     #[cfg(feature = "anland-runtime-v2")]
                                     let reopen_color_tuning = events.reopen_color_tuning;

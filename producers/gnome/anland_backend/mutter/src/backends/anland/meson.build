@@ -17,6 +17,8 @@ mutter_sources += [
   # Backend + DE-side bridges.
   'backends/anland/meta-backend-anland.c',
   'backends/anland/meta-backend-anland.h',
+  'backends/anland/meta-anland-color.c',
+  'backends/anland/meta-anland-color.h',
   'backends/anland/meta-anland-audio.c',
   'backends/anland/meta-anland-audio.h',
   'backends/anland/meta-anland-camera.c',
