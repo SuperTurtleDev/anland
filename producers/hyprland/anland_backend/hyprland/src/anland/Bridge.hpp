@@ -17,6 +17,7 @@ namespace Anland {
     size_t swapchainLength(SP<Aquamarine::IOutput> output, size_t nativeLength);
     uint32_t renderTargetFormat(SP<Aquamarine::IOutput> output);
     std::optional<bool> outputHdrMode(SP<Aquamarine::IOutput> output);
+    float hdrContentGain(SP<Aquamarine::IOutput> output);
     void configureColorRule(SP<Aquamarine::IOutput> output, Config::CMonitorRule& rule);
     void selectionChanged(SP<IDataSource> source);
     void shutdownClipboard();

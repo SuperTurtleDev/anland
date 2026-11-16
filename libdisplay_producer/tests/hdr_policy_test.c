@@ -38,6 +38,23 @@ int main(void)
     assert(!anland_hdr_sdr_white_from_action(0, 300, &white));
     assert(white == 400);
     assert(!anland_hdr_sdr_white_from_action(ANLAND_HDR_ACTION_SDR_WHITE, 300, NULL));
-    puts("HDR policy: environment/format and SDR reference white validation passed");
+    for (int32_t value = 50; value <= 200; ++value) {
+        uint32_t gain = 100;
+        assert(anland_hdr_content_gain_from_action(ANLAND_HDR_ACTION_CONTENT_GAIN, value, &gain));
+        assert(gain == (uint32_t)value);
+    }
+    const int32_t invalid_gain[] = {INT32_MIN, -1, 0, 49, 201, INT32_MAX};
+    for (size_t i = 0; i < sizeof(invalid_gain) / sizeof(invalid_gain[0]); ++i) {
+        uint32_t gain = 150;
+        assert(!anland_hdr_content_gain_from_action(ANLAND_HDR_ACTION_CONTENT_GAIN, invalid_gain[i], &gain));
+        assert(gain == 150);
+    }
+    uint32_t gain = 150;
+    assert(!anland_hdr_content_gain_from_action(ANLAND_HDR_ACTION_SDR_WHITE, 100, &gain));
+    assert(gain == 150);
+    assert(!anland_hdr_content_gain_from_action(ANLAND_HDR_ACTION_CONTENT_GAIN, 100, NULL));
+    assert(!anland_hdr_sdr_white_from_action(ANLAND_HDR_ACTION_CONTENT_GAIN, 100, &white));
+    assert(white == 400);
+    puts("HDR policy: environment/format, independent SDR white and HDR gain validation passed");
     return 0;
 }

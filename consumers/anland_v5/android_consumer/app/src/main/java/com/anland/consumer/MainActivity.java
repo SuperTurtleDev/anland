@@ -99,14 +99,18 @@ public class MainActivity extends Activity
     // Paused HDR windows must also receive changes made from Settings.
     private final SharedPreferences.OnSharedPreferenceChangeListener hdrBrightnessListener =
             (prefs, key) -> {
-                if (HdrBrightness.KEY_SDR_WHITE_NITS.equals(key))
+                if (HdrBrightness.KEY_SDR_WHITE_NITS.equals(key)
+                        || HdrContentGain.KEY_PERCENT.equals(key))
                     applyHdrBrightness(prefs);
             };
 
     private void applyHdrBrightness(SharedPreferences prefs) {
-        if (hdrEnabled && mNative != null)
+        if (hdrEnabled && mNative != null) {
             mNative.setHdrSdrWhiteNits(HdrBrightness.clamp(prefs.getInt(
                     HdrBrightness.KEY_SDR_WHITE_NITS, HdrBrightness.DEFAULT_NITS)));
+            mNative.setHdrContentGainPercent(HdrContentGain.clamp(prefs.getInt(
+                    HdrContentGain.KEY_PERCENT, HdrContentGain.DEFAULT_PERCENT)));
+        }
     }
     private final TabletInput tabletInput = new TabletInput(frame -> {
         if (mNative != null) {

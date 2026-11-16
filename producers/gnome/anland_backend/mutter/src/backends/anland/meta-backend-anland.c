@@ -112,6 +112,7 @@ struct _MetaBackendAnland
   gboolean hdr_allowed;
   gboolean hdr_enabled;
   uint32_t hdr_sdr_white_nits;
+  uint32_t hdr_content_gain_percent;
   gboolean frame_clock_inhibited;
   gboolean frame_pending;
   gboolean warned_sync_fallback;
@@ -127,7 +128,8 @@ meta_backend_anland_create_output_color_state (MetaBackendAnland *backend)
 {
   return meta_anland_color_state_new (
     meta_backend_get_clutter_context (META_BACKEND (backend)),
-    backend->hdr_enabled, TRUE, backend->hdr_sdr_white_nits);
+    backend->hdr_enabled, TRUE, backend->hdr_sdr_white_nits,
+    backend->hdr_content_gain_percent);
 }
 
 ClutterColorState *
@@ -135,7 +137,8 @@ meta_backend_anland_create_view_color_state (MetaBackendAnland *backend)
 {
   return meta_anland_color_state_new (
     meta_backend_get_clutter_context (META_BACKEND (backend)),
-    backend->hdr_enabled, FALSE, backend->hdr_sdr_white_nits);
+    backend->hdr_enabled, FALSE, backend->hdr_sdr_white_nits,
+    backend->hdr_content_gain_percent);
 }
 
 static void deactivate_consumer (MetaBackendAnland *backend);
@@ -1277,6 +1280,33 @@ update_hdr_sdr_white (MetaBackendAnland *backend)
   clutter_stage_view_schedule_update_now (CLUTTER_STAGE_VIEW (backend->stage_view));
 }
 
+static void
+update_hdr_content_gain (MetaBackendAnland *backend)
+{
+  uint32_t percent = anland_device_hdr_content_gain_percent (backend->device);
+  g_autoptr (ClutterColorState) scene = NULL;
+  MtkRectangle layout;
+
+  if (!backend->hdr_enabled || percent == backend->hdr_content_gain_percent ||
+      !backend->stage_view)
+    return;
+
+  backend->hdr_content_gain_percent = percent;
+  /* A fresh scene state makes each client texture attach the render-local
+   * source conversion for this gain. Native caches distinguish its reference
+   * luminance; neither the output preference nor SDR white changes. */
+  scene = meta_backend_anland_create_view_color_state (backend);
+  clutter_stage_view_set_color_state (CLUTTER_STAGE_VIEW (backend->stage_view), scene);
+  clutter_stage_view_get_layout (CLUTTER_STAGE_VIEW (backend->stage_view), &layout);
+  for (uint32_t i = 0; i < backend->buffer_count; i++)
+    {
+      g_clear_pointer (&backend->buffer_damage[i], mtk_region_unref);
+      backend->buffer_damage[i] = mtk_region_create_rectangle (&layout);
+    }
+  clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view), NULL);
+  clutter_stage_view_schedule_update_now (CLUTTER_STAGE_VIEW (backend->stage_view));
+}
+
 static gboolean
 input_source_prepare (gpointer user_data)
 {
@@ -1313,6 +1343,13 @@ input_source_dispatch (gpointer user_data)
           event.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE)
         {
           update_hdr_sdr_white (backend);
+          continue;
+        }
+
+      if (event.type == ANLAND_DEVICE_IN_ACTION &&
+          event.input_action.action == ANLAND_HDR_ACTION_CONTENT_GAIN)
+        {
+          update_hdr_content_gain (backend);
           continue;
         }
 
@@ -1642,11 +1679,19 @@ activate_consumer (MetaBackendAnland *backend)
    * RendererView uses our linear scene state instead of blending PQ values. */
   backend->hdr_enabled = color_mode == ANLAND_HDR_HDR10;
   backend->hdr_sdr_white_nits = anland_device_hdr_sdr_white_nits (backend->device);
+  backend->hdr_content_gain_percent = anland_device_hdr_content_gain_percent (backend->device);
   clutter_stage_view_set_anland_hdr_copy_func (
     CLUTTER_STAGE_VIEW (backend->stage_view),
     backend->hdr_enabled ? get_hdr_copy_region : NULL,
     backend->hdr_enabled ? backend : NULL);
   meta_color_device_update (color_device);
+  /* A reconnect can keep identical output metadata while restoring a different
+   * content gain. Do not depend on color-device equality to refresh the scene. */
+  {
+    g_autoptr (ClutterColorState) scene =
+      meta_backend_anland_create_view_color_state (backend);
+    clutter_stage_view_set_color_state (CLUTTER_STAGE_VIEW (backend->stage_view), scene);
+  }
   clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view), NULL);
   g_message ("Anland consumer color: %s (SDR white %u nit)", backend->hdr_enabled
              ? "BT.2020/PQ 10bit, linear FP16 scene, 1000-nit peak"
@@ -1927,6 +1972,7 @@ meta_backend_anland_init (MetaBackendAnland *backend_anland)
   const char *hdr_policy = g_getenv ("ANLAND_HDR");
   backend_anland->hdr_allowed = !anland_hdr_environment_disabled (hdr_policy);
   backend_anland->hdr_sdr_white_nits = ANLAND_HDR_SDR_WHITE_NITS;
+  backend_anland->hdr_content_gain_percent = ANLAND_HDR_CONTENT_GAIN_DEFAULT_PERCENT;
   backend_anland->socket_path = get_default_socket_path ();
   backend_anland->current_buffer = -1;
   backend_anland->constraint_watches =

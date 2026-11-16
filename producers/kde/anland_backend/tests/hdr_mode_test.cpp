@@ -3,6 +3,7 @@
 #include "anland_backend.h"
 #include "anland_egl_backend.h"
 #include "anland_format.h"
+#include "anland_hdr_gain.h"
 #include "anland_output.h"
 
 #include <QCoreApplication>
@@ -256,6 +257,56 @@ static void testReferenceWhite()
         "live action in SDR cannot enable HDR or lower SDR brightness");
 }
 
+static void testHdrContentGain()
+{
+    qunsetenv("ANLAND_HDR");
+    AnlandOutput output(nullptr, QStringLiteral("anland-hdr-gain-test"));
+    output.init(QSize(1920, 1080), 120000, 1);
+    const auto pq = std::make_shared<ColorDescription>(Colorimetry::BT2020,
+        TransferFunction(TransferFunction::PerceptualQuantizer, 0, 10000), 203, 0, 1000, 1000);
+    const auto scrgb = std::make_shared<ColorDescription>(Colorimetry::BT709,
+        TransferFunction(TransferFunction::linear, 0, 80), 203, 0, 1000, 1000);
+    const auto linearSdr = std::make_shared<ColorDescription>(Colorimetry::BT709,
+        TransferFunction(TransferFunction::linear, 0, 203), 203, 0, 203, 203);
+    int gainChanges = 0, colorChanges = 0;
+    QObject::connect(&output, &AnlandOutput::hdrContentGainChanged, [&] { ++gainChanges; });
+    QObject::connect(&output, &BackendOutput::colorDescriptionChanged, [&] { ++colorChanges; });
+    check(output.setHdrContentGainPercent(200) && output.hdrContentGainPercent() == 200
+            && anlandHdrContentGainForSurface(pq, output.renderColorDescription()) == 1.0,
+        "HDR gain in an SDR session records the preference without changing any rendered input");
+    output.setConsumerHdrMode(true, 203, 100);
+    const auto originalColor = output.renderColorDescription();
+    check(output.hdrContentGainPercent() == 100 && outputHasMode(output, true),
+        "new consumer import resets HDR gain to its own 1x session default");
+    int expectedChanges = 0;
+    for (unsigned int percent : {50u, 75u, 100u, 150u, 200u, 200u, 100u}) {
+        expectedChanges += percent != output.hdrContentGainPercent();
+        const bool accepted = output.setHdrContentGainPercent(percent);
+        check(accepted && anlandHdrContentGainForSurface(pq, output.renderColorDescription()) == percent / 100.0
+                && anlandHdrContentGainForSurface(scrgb, output.renderColorDescription()) == percent / 100.0
+                && anlandHdrContentGainForSurface(ColorDescription::sRGB, output.renderColorDescription()) == 1.0
+                && anlandHdrContentGainForSurface(linearSdr, output.renderColorDescription()) == 1.0
+                && anlandHdrContentGainForSurface(output.renderColorDescription(), output.renderColorDescription()) == 1.0
+                && anlandHdrContentGainForSurface(pq, output.wireColorDescription()) == 1.0
+                && output.renderColorDescription() == originalColor
+                && gainChanges == expectedChanges && colorChanges == 1 && outputHasMode(output, true),
+            "live 0.5x..2x gain selects PQ/scRGB inputs only, leaves SDR/intermediates/output colors unchanged, and signals actual changes once");
+    }
+    for (unsigned int invalid : {0u, 49u, 201u, 0xffffffffu}) {
+        check(!output.setHdrContentGainPercent(invalid) && output.hdrContentGainPercent() == 100
+                && gainChanges == expectedChanges,
+            "out-of-range HDR content gain leaves state and repaint notifications unchanged");
+    }
+    output.setHdrContentGainPercent(150);
+    output.setHdrSdrWhiteNits(300);
+    check(output.hdrContentGainPercent() == 150
+            && anlandHdrContentGainForSurface(pq, output.renderColorDescription()) == 1.5,
+        "SDR reference-white changes preserve the independent HDR gain and refresh its scene target");
+    output.setConsumerHdrMode(false);
+    check(anlandHdrContentGainForSurface(pq, originalColor) == 1.0,
+        "switching back to SDR unregisters the previous HDR scene target");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -264,6 +315,7 @@ int main(int argc, char** argv)
     testPolicy();
     testStateTransitions();
     testReferenceWhite();
+    testHdrContentGain();
     std::printf("RESULT %s failures=%d\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

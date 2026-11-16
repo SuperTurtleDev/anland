@@ -141,6 +141,9 @@ bool CAnlandBackend::hdrEnabled() const {
 float CAnlandBackend::hdrSdrWhiteNits() const {
     return hdrEnabled() && m_public ? anland_device_hdr_sdr_white_nits(anland_de_backend_device(m_public)) : ANLAND_HDR_SDR_WHITE_NITS;
 }
+float CAnlandBackend::hdrContentGain() const {
+    return hdrEnabled() && m_public ? anland_device_hdr_content_gain_percent(anland_de_backend_device(m_public)) / 100.0f : 1.0f;
+}
 float CAnlandBackend::hdrPeakNits() { return ANLAND_HDR_PEAK_NITS; }
 
 bool CAnlandBackend::effectiveMouseCapture() const {

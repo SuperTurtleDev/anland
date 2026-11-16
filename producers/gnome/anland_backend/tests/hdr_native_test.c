@@ -125,6 +125,105 @@ static void test_transforms (CoglContext *ctx, ClutterColorState *scene_color, C
     g_object_unref(view); for(int i=0;i<3;i++)g_object_unref(out[i]);
   }
 }
+
+static void test_content_gain (CoglContext *ctx, ClutterContext *cc)
+{
+  const unsigned int gains[] = {100, 50, 200, 100, 200, 50, 100};
+  const double levels[] = {0, 0.005, 1, 100, 800, 1000};
+  MtkRectangle layout = {.width=17, .height=11};
+  MtkRegion *full = mtk_region_create_rectangle (&layout);
+  MtkRegion *empty = mtk_region_create ();
+  ClutterColorState *scene_color = meta_anland_color_state_new (cc,TRUE,FALSE,203,100);
+  ClutterColorState *wire_color = meta_anland_color_state_new (cc,TRUE,TRUE,203,100);
+  ClutterColorState *sdr = meta_anland_color_state_new (cc,FALSE,FALSE,203,100);
+  ClutterColorState *pq_source = clutter_color_state_params_new_full (
+    cc, CLUTTER_COLORSPACE_BT2020, CLUTTER_TRANSFER_FUNCTION_PQ,
+    NULL, -1, 0.005f, 10000.005f, 203, 1000);
+  CoglFramebuffer *input = new_fbo (ctx,17,11,COGL_PIXEL_FORMAT_RGBA_FP_32323232);
+  CoglFramebuffer *alpha_input = new_fbo (ctx,17,11,COGL_PIXEL_FORMAT_RGBA_8888);
+  CoglFramebuffer *alpha_scene = new_fbo (ctx,17,11,COGL_PIXEL_FORMAT_RGBA_8888);
+  cogl_framebuffer_orthographic (alpha_scene,0,0,17,11,-1,1);
+  CoglFramebuffer *out[3];
+  for (int i=0;i<3;i++) {
+    if (debts[i]) mtk_region_unref (debts[i]);
+    debts[i] = mtk_region_copy (full);
+    out[i] = new_fbo (ctx,17,11,COGL_PIXEL_FORMAT_ABGR_2101010);
+  }
+  ClutterStageView *view = g_object_new (
+    hdr_test_view_get_type (), "name", "content-gain-test", "layout", &layout,
+    "framebuffer", out[0], "color-state", scene_color,
+    "output-color-state", wire_color, NULL);
+  clutter_stage_view_set_anland_hdr_copy_func (view,copy_region,NULL);
+  for (unsigned int g=0;g<G_N_ELEMENTS(gains);g++) {
+    ClutterColorState *next_scene = meta_anland_color_state_new (cc,TRUE,FALSE,203,gains[g]);
+    /* These descriptions intentionally have identical SDR luminances. The
+     * real StageView setter must still accept the fresh scene identity. */
+    CHECK (clutter_color_state_equals (next_scene,scene_color));
+    clutter_stage_view_set_color_state (view,next_scene);
+    CHECK (clutter_stage_view_get_color_state (view)==next_scene);
+    while (g_main_context_iteration (NULL,FALSE));
+    CoglFramebuffer *scene = clutter_stage_view_get_framebuffer (view);
+    cogl_framebuffer_orthographic (scene,0,0,17,11,-1,1);
+    ClutterColorState *adjusted = meta_anland_color_state_for_content (pq_source,next_scene);
+    const ClutterLuminance *original = clutter_color_state_params_get_luminance (CLUTTER_COLOR_STATE_PARAMS(pq_source));
+    CHECK (original->ref==203 && original->min==0.005f);
+    CHECK ((adjusted==pq_source)==(gains[g]==100));
+    ClutterColorState *again = meta_anland_color_state_for_content (pq_source,next_scene);
+    CHECK (again==adjusted); g_object_unref (again);
+    again = meta_anland_color_state_for_content (sdr,next_scene);
+    CHECK (again==sdr); g_object_unref (again);
+    again = meta_anland_color_state_for_content (next_scene,next_scene);
+    CHECK (again==next_scene); g_object_unref (again);
+    again = meta_anland_color_state_for_content (pq_source,wire_color);
+    CHECK (again==pq_source); g_object_unref (again);
+    for (unsigned int l=0;l<G_N_ELEMENTS(levels);l++) {
+      float pixel[4];
+      CoglPipeline *pipeline = cogl_pipeline_new (ctx);
+      clutter_color_pipeline_shader_set_color_state (pipeline,adjusted,next_scene,CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
+      cogl_pipeline_set_layer_texture (pipeline,0,cogl_offscreen_get_texture(COGL_OFFSCREEN(input)));
+      float code = (float) pq(levels[l]);
+      cogl_framebuffer_clear4f (input,COGL_BUFFER_BIT_COLOR,code,code,code,1);
+      cogl_framebuffer_draw_textured_rectangle (scene,pipeline,0,0,17,11,0,0,1,1);
+      for (int i=0;i<3;i++) {
+        current=i; clutter_stage_view_replace_framebuffer(view,out[i]);
+        clutter_stage_view_after_paint(view,i==0?full:empty);
+        read_pixel(out[i],8,5,pixel);
+        CHECK(fabs(pixel[0]-pq(fmin(levels[l]*gains[g]/100.0,1000)))*1023<1.2);
+        CHECK(fabs(pixel[3]-1)<0.001);
+      }
+      g_object_unref (pipeline);
+    }
+    /* SDR white remains 203 nits across repeated gain changes and rotating
+     * slots, while the PQ source uses the same unchanged protocol state. */
+    CoglPipeline *pipeline = cogl_pipeline_new (ctx);
+    clutter_color_pipeline_shader_set_color_state (pipeline,sdr,next_scene,CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
+    cogl_framebuffer_draw_rectangle (scene,pipeline,0,0,17,11);
+    for (int i=0;i<3;i++) {
+      float pixel[4]; current=i; clutter_stage_view_replace_framebuffer(view,out[i]);
+      clutter_stage_view_after_paint(view,i==0?full:empty); read_pixel(out[i],8,5,pixel);
+      CHECK(fabs(pixel[0]-pq(203))*1023<1.2);
+    }
+    g_object_unref (pipeline);
+    /* StageView deliberately prefers RGBX. Check source alpha in a separate
+     * RGBA attachment using the same native content conversion. */
+    pipeline = cogl_pipeline_new (ctx);
+    clutter_color_pipeline_shader_set_color_state (pipeline,adjusted,next_scene,0);
+    cogl_pipeline_set_layer_texture (pipeline,0,cogl_offscreen_get_texture(COGL_OFFSCREEN(alpha_input)));
+    cogl_pipeline_set_blend (pipeline,"RGBA = ADD (SRC_COLOR, 0)",NULL);
+    float code = (float) pq(100)*0.5f;
+    uint8_t pixel[4];
+    cogl_framebuffer_clear4f (alpha_input,COGL_BUFFER_BIT_COLOR,code,code,code,0.5f);
+    cogl_framebuffer_draw_textured_rectangle (alpha_scene,pipeline,0,0,17,11,0,0,1,1);
+    CHECK(cogl_framebuffer_read_pixels(alpha_scene,8,5,1,1,COGL_PIXEL_FORMAT_RGBA_8888,pixel));
+    CHECK(abs(pixel[3]-128)<=1);
+    g_object_unref (pipeline); g_object_unref (adjusted); g_object_unref(next_scene);
+    printf("HDR-only content gain %u%%: real PQ input/FP16 scene/RGB10 output, SDR white and alpha unchanged\n",gains[g]);
+  }
+  g_object_unref (view); g_object_unref (input); g_object_unref (alpha_scene); g_object_unref (alpha_input);
+  for (int i=0;i<3;i++) g_object_unref(out[i]);
+  g_object_unref(scene_color); g_object_unref(wire_color); g_object_unref(sdr); g_object_unref(pq_source);
+  mtk_region_unref(full); mtk_region_unref(empty);
+}
 int main (void)
 {
   GError *error = NULL;
@@ -138,8 +237,8 @@ int main (void)
   CoglContext *ctx = cogl_context_egl_new(COGL_DISPLAY(display),&error);
   if(!ctx) g_error("context: %s",error->message);
   ClutterContext *cc = g_object_new(CLUTTER_TYPE_CONTEXT,NULL);
-  ClutterColorState *scene_color = meta_anland_color_state_new(cc,TRUE,FALSE,203);
-  ClutterColorState *wire_color = meta_anland_color_state_new(cc,TRUE,TRUE,203);
+  ClutterColorState *scene_color = meta_anland_color_state_new(cc,TRUE,FALSE,203,100);
+  ClutterColorState *wire_color = meta_anland_color_state_new(cc,TRUE,TRUE,203,100);
   CHECK(clutter_color_state_required_format(scene_color)==CLUTTER_ENCODING_REQUIRED_FORMAT_FP16);
   const ClutterLuminance *lum = clutter_color_state_params_get_luminance(CLUTTER_COLOR_STATE_PARAMS(wire_color));
   CHECK(lum->min==0 && lum->max==10000 && lum->ref==203);
@@ -199,7 +298,7 @@ int main (void)
     clutter_stage_view_after_paint(view,pending); mtk_region_unref(pending);
     read_pixel(out[i],4,3,pixels); CHECK(fabs(pixels[0]-pq(203))*1023<1.1);
   }
-  ClutterColorState *sdr=meta_anland_color_state_new(cc,FALSE,FALSE,203);
+  ClutterColorState *sdr=meta_anland_color_state_new(cc,FALSE,FALSE,203,100);
   CoglPipeline *sdr_pipeline=cogl_pipeline_new(ctx);
   clutter_color_pipeline_shader_set_color_state(sdr_pipeline,sdr,scene_color,CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
   cogl_framebuffer_clear4f(scene,COGL_BUFFER_BIT_COLOR,0,0,0,1);
@@ -224,8 +323,8 @@ int main (void)
    * Every rotating slot is invalidated, including copy-only catch-up frames. */
   const unsigned int whites[] = {80, 300, 400, 500, 203};
   for (unsigned int w = 0; w < G_N_ELEMENTS(whites); w++) {
-    ClutterColorState *new_scene = meta_anland_color_state_new(cc,TRUE,FALSE,whites[w]);
-    ClutterColorState *new_wire = meta_anland_color_state_new(cc,TRUE,TRUE,whites[w]);
+    ClutterColorState *new_scene = meta_anland_color_state_new(cc,TRUE,FALSE,whites[w],100);
+    ClutterColorState *new_wire = meta_anland_color_state_new(cc,TRUE,TRUE,whites[w],100);
     lum = clutter_color_state_params_get_luminance(CLUTTER_COLOR_STATE_PARAMS(new_wire));
     CHECK(lum->ref == whites[w] && lum->min == 0 && lum->max == 10000 && lum->mastering_max == 1000);
     clutter_stage_view_set_color_state(view,new_scene);
@@ -254,6 +353,7 @@ int main (void)
   g_object_unref(hdr_client); g_object_unref(hdr_pipeline); g_object_unref(sdr_pipeline);
   g_object_unref(view);
   test_transforms(ctx,scene_color,wire_color);
+  test_content_gain(ctx,cc);
   printf("RESULT %s failures=%d\n",failures?"FAIL":"PASS",failures);
   return failures?1:0;
 }

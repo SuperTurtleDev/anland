@@ -85,3 +85,11 @@ void Anland::configureColorRule(SP<Aquamarine::IOutput> output, Config::CMonitor
     fixedOutputColorRule(rule, *hdr, NCMType::CM_HDR, NCMType::CM_SRGB, NTransferFunction::TF_SRGB,
                          owner->hdrSdrWhiteNits(), Aquamarine::CAnlandBackend::hdrPeakNits());
 }
+
+float Anland::hdrContentGain(SP<Aquamarine::IOutput> output) {
+    if (!output) return 1.0f;
+    const auto implementation = output->getBackend();
+    if (!implementation || implementation->type() != Aquamarine::AQ_BACKEND_ANLAND) return 1.0f;
+    const auto owner = Hyprutils::Memory::dynamicPointerCast<Aquamarine::CAnlandBackend>(implementation);
+    return owner ? owner->hdrContentGain() : 1.0f;
+}

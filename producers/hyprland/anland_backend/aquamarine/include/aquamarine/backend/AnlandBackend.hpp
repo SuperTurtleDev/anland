@@ -48,6 +48,7 @@ namespace Aquamarine {
         size_t renderBufferCount() const;
         bool hdrEnabled() const;
         float hdrSdrWhiteNits() const;
+        float hdrContentGain() const;
         static float hdrPeakNits();
         bool sendClipboardToConsumer(const std::string& text);
         void updateMouseCapture(bool active);

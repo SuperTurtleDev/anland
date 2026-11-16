@@ -10,6 +10,7 @@
 // type must be complete here (the header only forward-declares it).
 #include "anland_egl_backend.h"
 #include "anland_format.h"
+#include "anland_hdr_gain.h"
 #include "anland_logging.h"
 #include "libdisplay_producer/anland_hdr.h"
 
@@ -80,6 +81,7 @@ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
 
 AnlandOutput::~AnlandOutput()
 {
+    anlandUnregisterHdrGainTarget(this);
 }
 
 bool AnlandOutput::hdrAllowed() const
@@ -92,22 +94,32 @@ bool AnlandOutput::hdrEnabled() const
     return m_hdrEnabled;
 }
 
-void AnlandOutput::setConsumerHdrMode(bool hdr, unsigned int sdrWhiteNits)
+void AnlandOutput::setConsumerHdrMode(bool hdr, unsigned int sdrWhiteNits, unsigned int contentGainPercent)
 {
     Q_ASSERT(!hdr || m_hdrAllowed);
     if ((hdr && !m_hdrAllowed) || sdrWhiteNits < ANLAND_HDR_SDR_WHITE_MIN_NITS
-        || sdrWhiteNits > ANLAND_HDR_SDR_WHITE_MAX_NITS) {
+        || sdrWhiteNits > ANLAND_HDR_SDR_WHITE_MAX_NITS
+        || contentGainPercent < ANLAND_HDR_CONTENT_GAIN_MIN_PERCENT
+        || contentGainPercent > ANLAND_HDR_CONTENT_GAIN_MAX_PERCENT) {
         return;
     }
     const bool modeChanged = hdr != m_hdrEnabled;
     const bool referenceChanged = sdrWhiteNits != m_hdrSdrWhiteNits;
+    const bool gainChanged = contentGainPercent != m_hdrContentGainPercent;
     m_hdrSdrWhiteNits = sdrWhiteNits;
+    m_hdrContentGainPercent = contentGainPercent;
     if (!modeChanged && (!hdr || !referenceChanged)) {
+        anlandRegisterHdrGainTarget(this, m_renderColorDescription, m_hdrContentGainPercent, hdr);
+        if (hdr && gainChanged) {
+            Q_EMIT hdrContentGainChanged();
+            m_renderLoop->scheduleRepaint();
+        }
         return;
     }
     m_hdrEnabled = hdr;
     m_wireColorDescription = makeColorDescription(hdr, true, m_hdrSdrWhiteNits);
     m_renderColorDescription = makeColorDescription(hdr, false, m_hdrSdrWhiteNits);
+    anlandRegisterHdrGainTarget(this, m_renderColorDescription, m_hdrContentGainPercent, hdr);
 
     Information info = m_information;
     info.capabilities = hdr ? Capability::HighDynamicRange | Capability::WideColorGamut : Capabilities{};
@@ -154,13 +166,27 @@ bool AnlandOutput::setHdrSdrWhiteNits(unsigned int nits)
     if (nits < ANLAND_HDR_SDR_WHITE_MIN_NITS || nits > ANLAND_HDR_SDR_WHITE_MAX_NITS) {
         return false;
     }
-    setConsumerHdrMode(m_hdrEnabled, nits);
+    setConsumerHdrMode(m_hdrEnabled, nits, m_hdrContentGainPercent);
     return true;
 }
 
 unsigned int AnlandOutput::hdrSdrWhiteNits() const
 {
     return m_hdrSdrWhiteNits;
+}
+
+bool AnlandOutput::setHdrContentGainPercent(unsigned int percent)
+{
+    if (percent < ANLAND_HDR_CONTENT_GAIN_MIN_PERCENT || percent > ANLAND_HDR_CONTENT_GAIN_MAX_PERCENT) {
+        return false;
+    }
+    setConsumerHdrMode(m_hdrEnabled, m_hdrSdrWhiteNits, percent);
+    return true;
+}
+
+unsigned int AnlandOutput::hdrContentGainPercent() const
+{
+    return m_hdrContentGainPercent;
 }
 
 const AnlandColorDescription &AnlandOutput::renderColorDescription() const
@@ -415,6 +441,7 @@ AnlandEglLayer *AnlandOutput::eglLayer() const
 
 void AnlandOutput::stopRendering()
 {
+    anlandUnregisterHdrGainTarget(this);
     if (m_awaitingPresent) {
         m_awaitingPresent = false;
         // No buffer-ready will arrive for the in-flight frame now. Releasing the

@@ -121,6 +121,7 @@ void CAnlandBackend::onInputReadable() {
         }
         anland_device_input_t event = {};
         const uint32_t previousWhite = anland_device_hdr_sdr_white_nits(device);
+        const uint32_t previousGain = anland_device_hdr_content_gain_percent(device);
         const int result = anland_device_poll_input(device, &event, 0);
         if (result < 0) m_lost = true;
         if (result <= 0) break;
@@ -135,8 +136,9 @@ void CAnlandBackend::onInputReadable() {
         }
         switch (event.type) {
             case ANLAND_DEVICE_IN_ACTION:
-                if (event.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE && hdrEnabled() && m_output &&
-                    anland_device_hdr_sdr_white_nits(device) != previousWhite) {
+                if (hdrEnabled() && m_output &&
+                    ((event.input_action.action == ANLAND_HDR_ACTION_SDR_WHITE && anland_device_hdr_sdr_white_nits(device) != previousWhite) ||
+                     (event.input_action.action == ANLAND_HDR_ACTION_CONTENT_GAIN && anland_device_hdr_content_gain_percent(device) != previousGain))) {
                     // Notify the WM to refresh native CM without a modeset or
                     // replacing imported targets. The getter already changed.
                     m_output->events.state.emit(IOutput::SStateEvent{});

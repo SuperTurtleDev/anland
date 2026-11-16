@@ -662,6 +662,10 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
             for (AnlandOutput *output : m_outputs) {
                 output->setHdrSdrWhiteNits(anland_device_hdr_sdr_white_nits(m_device));
             }
+        } else if (ev.input_action.action == ANLAND_HDR_ACTION_CONTENT_GAIN) {
+            for (AnlandOutput *output : m_outputs) {
+                output->setHdrContentGainPercent(anland_device_hdr_content_gain_percent(m_device));
+            }
         }
         break;
     case ANLAND_DEVICE_IN_DISPLAY_REFRESH:

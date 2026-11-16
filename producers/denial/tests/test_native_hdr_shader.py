@@ -4,26 +4,19 @@
 Usage: test_native_hdr_shader.py /path/to/patched/denial/source
 The shader is extracted from upstream source, never reimplemented by the test.
 """
-import codecs
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
 
+from hdr_shader_source import load_native_shaders
+
 source = Path(sys.argv[1]) / "compositor/src/bin/deniald/flutter_runtime/renderer/gl.rs"
-rust = source.read_text()
-
-
-def shader(name):
-    match = re.search(rf'const {name}: &\[u8\] = b"(.*?)";', rust, re.S)
-    assert match, f"missing native shader {name}"
-    return codecs.decode(match[1].replace("\\\n", ""), "unicode_escape").rstrip("\0")
-
+_, shaders = load_native_shaders(source)
 
 header = '\n'.join(
-    f'const char *{kind} = R"shader({shader(name)})shader";'
+    f'const char *{kind} = R"shader({shaders[name]})shader";'
     for kind, name in (("vertex", "SCANOUT_VERTEX_SHADER"),
                        ("fragment", "SCANOUT_FRAGMENT_SHADER"))
 )

@@ -181,6 +181,10 @@ bool anland_device_is_connected(const anland_device *dev);
  * Defaults to 203 on every new session and for old apps. Set by the existing
  * ACTION input when polled; does not change the consumer's HDR/SDR mode. */
 uint32_t anland_device_hdr_sdr_white_nits(const anland_device *dev);
+/* Independent gain for native HDR content only, in percent (50..200).
+ * Defaults to 100 for each new session; updated by optional HDRG ACTION input.
+ * Does not change SDR reference white or the output color mode. */
+uint32_t anland_device_hdr_content_gain_percent(const anland_device *dev);
 /* Poll target-ready and peer hangups together without consuming any bytes.
  * 1 ready / 0 pending / -1 lost (fallback callback run); timeout is per-call.
  * Detects closure before the first target as well as during normal ACK waits. */

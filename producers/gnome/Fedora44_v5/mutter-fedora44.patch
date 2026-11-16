@@ -1207,3 +1207,62 @@ diff --git a/src/backends/meta-stage-impl.c b/src/backends/meta-stage-impl.c
 
    /* XXX: It seems there will be a race here in that the stage
     * window may be resized before the cogl_onscreen_swap_region
+diff --git a/src/compositor/meta-shaped-texture.c b/src/compositor/meta-shaped-texture.c
+--- a/src/compositor/meta-shaped-texture.c
++++ b/src/compositor/meta-shaped-texture.c
+@@ -33,6 +33,10 @@
+  */
+
+ #include "config.h"
++
++#ifdef HAVE_ANLAND
++#include "backends/anland/meta-anland-color.h"
++#endif
+
+ #include "compositor/meta-multi-texture-format-private.h"
+ #include "compositor/meta-shaped-texture-private.h"
+@@ -501,6 +505,14 @@
+   target_color_state =
+     clutter_paint_context_get_target_color_state (paint_context);
+
++#ifdef HAVE_ANLAND
++  /* Use a render-local source state before the native cache lookup too, so
++   * changing HDR gain cannot reuse a texture converted at the old gain. */
++  g_autoptr (ClutterColorState) content_color_state =
++    meta_anland_color_state_for_content (color_state, target_color_state);
++  color_state = content_color_state;
++#endif
++
+   if (stex->texture == tex)
+     {
+       CoglPipeline *pipeline;
+@@ -559,6 +571,14 @@
+   target_color_state =
+     clutter_paint_context_get_target_color_state (paint_context);
+
++#ifdef HAVE_ANLAND
++  /* Use a render-local source state before the native cache lookup too, so
++   * changing HDR gain cannot reuse a texture converted at the old gain. */
++  g_autoptr (ClutterColorState) content_color_state =
++    meta_anland_color_state_for_content (color_state, target_color_state);
++  color_state = content_color_state;
++#endif
++
+   g_assert (meta_multi_texture_get_n_planes (stex->texture) == 1);
+
+   if (stex->texture == tex)
+@@ -624,6 +644,14 @@
+   color_state = stex->color_state;
+   target_color_state =
+     clutter_paint_context_get_target_color_state (paint_context);
++
++#ifdef HAVE_ANLAND
++  /* Use a render-local source state before the native cache lookup too, so
++   * changing HDR gain cannot reuse a texture converted at the old gain. */
++  g_autoptr (ClutterColorState) content_color_state =
++    meta_anland_color_state_for_content (color_state, target_color_state);
++  color_state = content_color_state;
++#endif
+
+   if (stex->texture == tex)
+     {

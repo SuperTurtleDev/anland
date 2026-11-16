@@ -9,7 +9,7 @@ pub(crate) mod event_sources;
 mod ffi;
 pub(crate) mod graphics;
 #[cfg(feature = "anland-runtime-v2")]
-mod hdr;
+pub(crate) mod hdr;
 pub mod input;
 pub(crate) mod lifetime;
 pub(crate) mod native;

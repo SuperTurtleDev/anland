@@ -29,6 +29,7 @@ pub(crate) struct ImportedPool {
     pub identity: Pool,
     pub hdr: bool,
     pub sdr_white_nits: u32,
+    pub hdr_content_gain_percent: u32,
     buffers: Vec<Dmabuf>,
     scenes: Vec<SceneBuffer>,
 }
@@ -173,6 +174,7 @@ impl ImportedPool {
             identity,
             hdr,
             sdr_white_nits: client.hdr_sdr_white_nits(),
+            hdr_content_gain_percent: client.hdr_content_gain_percent(),
             buffers,
             scenes,
         })
@@ -268,7 +270,12 @@ impl ImportedPool {
         let prepared =
             launcher.prepare_with_pools(context, [self.descriptor()], atlas.pixel_size)?;
         #[cfg(feature = "anland-runtime-v2")]
-        super::hdr::activate(self.identity.output, self.hdr, self.sdr_white_nits);
+        super::hdr::activate(
+            self.identity.output,
+            self.hdr,
+            self.sdr_white_nits,
+            self.hdr_content_gain_percent,
+        );
         let mut runtime = launcher.start_with_pools(
             context,
             [self.descriptor()],

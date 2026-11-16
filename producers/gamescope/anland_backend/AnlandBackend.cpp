@@ -228,6 +228,8 @@ namespace gamescope
             m_HDR = hdr;
             m_SdrWhite = hdr ? anland_device_hdr_sdr_white_nits(anland_gamescope_session_device(s_session))
                              : uint32_t(ANLAND_HDR_SDR_WHITE_NITS);
+            m_ContentGain = hdr ? anland_device_hdr_content_gain_percent(anland_gamescope_session_device(s_session))
+                                : ANLAND_HDR_CONTENT_GAIN_DEFAULT_PERCENT;
             m_HDRInfo.bExposeHDRSupport = hdr;
             m_HDRInfo.eOutputEncodingEOTF = hdr ? EOTF_PQ : EOTF_Gamma22;
             m_ImportFailureLogged = false;
@@ -242,7 +244,12 @@ namespace gamescope
             return float(m_SdrWhite);
         }
 
-        void UpdateConsumerSdrWhite()
+        float HDRContentGain() const
+        {
+            return float(m_ContentGain) / 100.f;
+        }
+
+        void UpdateConsumerHdrControls()
         {
             if (!m_HDR || !m_BufferCount || !s_session)
                 return;
@@ -251,12 +258,14 @@ namespace gamescope
                 return;
             // The existing input ACTION is cached by the shared device before
             // the input pump ignores it. No pool import or encoding change is
-            // needed: UpdateColorMgmt regenerates the native SDR LUT next frame.
+            // needed: UpdateColorMgmt regenerates the separate SDR/HDR LUTs.
             const auto white = anland_device_hdr_sdr_white_nits(device);
-            if (white == m_SdrWhite)
+            const auto gain = anland_device_hdr_content_gain_percent(device);
+            if (white == m_SdrWhite && gain == m_ContentGain)
                 return;
             m_SdrWhite = white;
-            fprintf(stderr, "Anland: HDR SDR white %u nits\n", m_SdrWhite);
+            m_ContentGain = gain;
+            fprintf(stderr, "Anland: HDR SDR white %u nits, content gain %u%%\n", m_SdrWhite, m_ContentGain);
             force_repaint();
         }
 
@@ -360,6 +369,7 @@ namespace gamescope
         const bool m_AllowHDR = !anland_hdr_environment_disabled(getenv("ANLAND_HDR"));
         bool m_HDR = false;
         uint32_t m_SdrWhite = uint32_t(ANLAND_HDR_SDR_WHITE_NITS);
+        uint32_t m_ContentGain = ANLAND_HDR_CONTENT_GAIN_DEFAULT_PERCENT;
         bool m_ImportFailureLogged = false;
         std::chrono::steady_clock::time_point m_NextImportRetry{};
         uint64_t m_Generation = 0;
@@ -374,6 +384,12 @@ namespace gamescope
     {
         auto *connector = dynamic_cast<CAnlandConnector *>(GetBackend()->GetCurrentConnector());
         return connector ? std::optional<bool>(connector->IsHDRActive()) : std::nullopt;
+    }
+
+    float AnlandOutputHDRContentGain()
+    {
+        auto *connector = dynamic_cast<CAnlandConnector *>(GetBackend()->GetCurrentConnector());
+        return connector ? connector->HDRContentGain() : 1.f;
     }
 
     float AnlandOutputSDRWhiteNits()
@@ -576,7 +592,7 @@ namespace gamescope
                 dirty |= DrainEvents();
             }
             if (rc >= 0)
-                m_Connector.UpdateConsumerSdrWhite();
+                m_Connector.UpdateConsumerHdrControls();
             wlserver_lock();
             bool capture = wlserver.GetCursorConstraint() != nullptr;
             wlserver_unlock();

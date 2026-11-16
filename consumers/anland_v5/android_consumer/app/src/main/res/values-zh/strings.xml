@@ -405,4 +405,10 @@
     <string name="hdr_brightness_hint">调节 SDR 参考白，范围 80～500 nit，默认 203。整个桌面偏暗时可试试 300 或 400 nit。修改会自动保存，并即时应用到使用新版后端的已打开 HDR 窗口。这会调整桌面亮度，不改变黑位或 1000 nit 的 HDR 峰值。</string>
     <string name="hdr_brightness_value">%1$d nit</string>
     <string name="hdr_brightness_reset">恢复 203 nit</string>
+    <string name="hdr_content_gain_button">HDR 亮度增益 · %1$.2f×</string>
+    <string name="hdr_content_gain_accessibility">HDR 内容亮度增益：%1$.2f 倍，调节增益</string>
+    <string name="hdr_content_gain_title">HDR 亮度增益</string>
+    <string name="hdr_content_gain_hint">调节原生 HDR 内容亮度，范围 0.5×～2.0×，默认 1.0×。SDR 桌面亮度保持不变。修改会自动保存，并在更新后的后端中即时生效。高光仍受输出峰值限制；应用绘制在同一 HDR 画面内的菜单、字幕也会一起变化。</string>
+    <string name="hdr_content_gain_value">%1$.2f×</string>
+    <string name="hdr_content_gain_reset">恢复 1.0×</string>
 </resources>
