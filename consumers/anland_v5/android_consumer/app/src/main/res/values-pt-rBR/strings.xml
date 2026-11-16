@@ -100,15 +100,6 @@
     <string name="accessibility_switch">Interceptação das Teclas via Acessibilidade</string>
     <string name="accessibility_hint">Intercepta as teclas de função (Fn, F1-F12 etc.) via AccessibilityService e converte o Voltar do teclado de tablet/Voltar do navegador em ESC. Ative isso se combinações Fn ou o ESC de um teclado externo não estiverem chegando corretamente ao desktop. Requer a permissão de Acessibilidade concedida em Configurações do sistema &gt; Acessibilidade (uma única vez).</string>
     <!-- Extra keys bar -->
-    <string name="extra_keys_mode_label">Modo da barra de teclas extras</string>
-    <string name="extra_keys_mode_hint">Controla quando a barra inferior estilo Termux com ESC/TAB/CTRL/ALT/setas/PgUp etc. é exibida. Aplica-se na próxima vez que você voltar para a área de exibição do desktop.</string>
-    <string-array name="extra_keys_mode_options">
-        <item>Sempre mostrar</item>
-        <item>Nunca mostrar</item>
-        <item>Mostrar com o teclado virtual</item>
-    </string-array>
-    <string name="back_opens_switch">Tecla Voltar alterna rapidamente a barra de teclas extras</string>
-    <string name="back_opens_hint">Quando ativado, pressionar Voltar enquanto a barra de teclas extras está escondida a exibe; pressionar Voltar novamente a esconde.</string>
     <!-- Custom layout editor -->
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">Modo Touchpad (movimento relativo)</string>
@@ -380,14 +371,4 @@
     <string name="hud_combo_apply">APLICAR COMBO</string>
     <string name="hud_combo_empty">(vazio)</string>
     <!-- Legacy custom layout editor -->
-    <string name="section_extra_keys">Barra de Teclas Extras</string>
-    <string name="section_custom_layout">Layout Customizado de Teclas Extras</string>
-    <string name="section_touchpad">Configurações de Touchpad</string>
-    <string name="immersive_entering">Modo imersivo: toda a entrada vai para o desktop. Pressione %1$s novamente para sair.</string>
-    <string name="btn_load_default">Carregar template original</string>
-    <string name="btn_load_file">Carregar de um arquivo…</string>
-    <string name="layout_hint">Personalize o layout das teclas extras.</string>
-    <string name="layout_status_default">Layout padrão</string>
-    <string name="layout_status_valid">✓ Layout Válido</string>
-    <string name="layout_status_invalid">✗ %1$s</string>
 </resources>
