@@ -1,81 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="settings_short_label">Configurações</string>
-
-    <!-- Titles / section headers -->
-    <string name="settings_title">Configurações</string>
-    <string name="section_virtual_keyboard">Tecla de Alternância do Teclado Virtual</string>
-    <string name="section_extra_keys">Barra de Teclas Extras</string>
-    <string name="section_custom_layout">Layout Customizado de Teclas Extras</string>
-    <string name="section_touchpad">Configurações de Touchpad</string>
-    <string name="section_connection">Conexão</string>
-    <string name="section_resolution">Resolução da Tela</string>
-    <string name="section_notification">Configuração da Notificação</string>
-
-    <!-- Settings home: category rows and back navigation -->
-    <string name="nav_back">‹ Voltar</string>
-    <string name="cat_keyboard_title">Teclado e Teclas</string>
-    <string name="cat_keyboard_subtitle">Mapeamento de teclas, acessibilidade e barra de teclas extras</string>
-    <string name="cat_touchpad_title">Touchpad e Mouse</string>
-    <string name="cat_touchpad_subtitle">Modo touchpad, captura de ponteiro e sensibilidade</string>
-    <string name="cat_connection_subtitle">Socket, root, mic, câmera e latência do áudio</string>
-    <string name="cat_resolution_subtitle">Resolução de saída e presets</string>
-    <string name="cat_general_title">Geral</string>
-    <string name="cat_general_subtitle">Orientação da tela e notificação das configurações</string>
-
-    <!-- Screen orientation -->
-    <string name="section_orientation">Orientação da Tela</string>
-    <string name="orientation_label">Forçar orientação da tela</string>
-    <string-array name="orientation_options">
-        <item>Padrão (sistema)</item>
-        <item>Forçar paisagem</item>
-        <item>Forçar retrato</item>
-    </string-array>
-
-    <!-- Bind key -->
-    <string name="bind_key_button">Mapear Tecla de Alternância do Teclado Virtual</string>
-    <string name="raise_desktop_for_soft_keyboard">Elevar o desktop ao abrir o teclado virtual</string>
-    <string name="raise_desktop_for_soft_keyboard_hint">Quando ativado, o desktop encolhe e sobe para que você veja o que está digitando.</string>
-    <string name="listening_countdown">Ouvindo… (%1$ds)</string>
-    <string name="status_current_none">Atual: Nenhum</string>
-    <string name="status_current">Atual: %1$s</string>
-    <string name="status_current_no_scancode">Atual: %1$s — essa tecla não reporta um scan code, então o modo imersivo não pode usá-la. Mapeie uma tecla física como Aumentar Volume.</string>
-    <string name="keycode_unknown">Keycode %1$d</string>
-    <string name="scancode_unknown">Scan code %1$d</string>
-
-    <!-- Immersive mode -->
-    <string name="section_immersive">Modo Imersivo</string>
-    <string name="immersive_switch">Ativar Modo Imersivo</string>
-    <string name="immersive_hint">Envia toque, teclado e mouse diretamente para o desktop Linux, mantendo os gestos do Android fora do caminho. Precisa de root. Defina uma tecla de alternância abaixo: pressione uma vez para entrar e novamente para sair. O modo também termina quando você troca de app.</string>
-    <string name="bind_immersive_key_button">Mapear Tecla do Modo Imersivo</string>
-    <string name="immersive_entering">Modo imersivo: toda a entrada vai para o desktop. Pressione %1$s novamente para sair.</string>
-    <string name="immersive_exited">Modo imersivo desativado</string>
-    <string name="immersive_no_scancode">Mapeie uma tecla para o modo imersivo primeiro</string>
-    <string name="immersive_failed">Não foi possível iniciar o modo imersivo: root foi negado ou está indisponível</string>
-    <string name="immersive_no_devices">Não foi possível iniciar o modo imersivo: nenhum dispositivo de entrada pôde ser assumido</string>
-    <string name="immersive_interrupted">Modo imersivo encerrado; a entrada voltou para o Android</string>
-    <string name="immersive_inputs_system_power">✕ %1$s — mantido no Android para preservar o controle do botão liga/desliga</string>
-
-    <!-- Accessibility -->
-    <string name="accessibility_switch">Interceptação das Teclas via Acessibilidade</string>
-    <string name="accessibility_hint">Intercepta as teclas de função (Fn, F1-F12 etc.) via AccessibilityService e converte o Voltar do teclado de tablet/Voltar do navegador em ESC. Ative isso se combinações Fn ou o ESC de um teclado externo não estiverem chegando corretamente ao desktop. Requer a permissão de Acessibilidade concedida em Configurações do sistema &gt; Acessibilidade (uma única vez).</string>
-
-    <!-- Extra keys bar -->
-    <string name="extra_keys_mode_label">Modo da barra de teclas extras</string>
-    <string name="extra_keys_mode_hint">Controla quando a barra inferior estilo Termux com ESC/TAB/CTRL/ALT/setas/PgUp etc. é exibida. Aplica-se na próxima vez que você voltar para a área de exibição do desktop.</string>
-    <string-array name="extra_keys_mode_options">
-        <item>Sempre mostrar</item>
-        <item>Nunca mostrar</item>
-        <item>Mostrar com o teclado virtual</item>
-    </string-array>
-    <string name="back_opens_switch">Tecla Voltar alterna rapidamente a barra de teclas extras</string>
-    <string name="back_opens_hint">Quando ativado, pressionar Voltar enquanto a barra de teclas extras está escondida a exibe; pressionar Voltar novamente a esconde.</string>
-
-    <!-- Custom layout editor -->
-    <string name="btn_load_default">Carregar template original</string>
-    <string name="btn_load_file">Carregar de um arquivo…</string>
-    <string name="layout_hint">Define a barra de teclas extras como JSON: \"rows\" é um array de linhas, cada uma um array de teclas. Uma tecla tem um \"label\" e um \"type\" (key/text/modifier/keyboard/vkeyboard/settings). \"key\"/\"modifier\" usam um evdev \"code\"; \"text\" usa \"text\"; qualquer tecla pode adicionar \"repeat\":true ou um \"popup\" aninhado. JSON inválido retorna para o padrão. Tem efeito na próxima volta ao desktop.</string>
-    <string name="layout_status_default">Usando o layout padrão embutido</string>
     <string name="layout_status_valid">✓ Layout Válido</string>
     <string name="layout_status_invalid">✗ %1$s</string>
 
@@ -93,7 +15,7 @@
     <string name="scroll_speed_value">%1$.2f</string>
     <string name="threshold_factor_value">%1$.2f× tolerância de toque</string>
     <string name="scroll_threshold_label">Limite de detecção de rolagem</string>
-    <string name="scroll_threshold_hint">Até onde um dedo precisa se mover para contar como movimento. Diminua isso se um pinça estiver sendo tratado como rolagem.</string>
+    <string name="scroll_threshold_hint">Até onde um dedo precisa se mover para contar como movimento. Diminua isso se uma pinça estiver sendo tratada como rolagem.</string>
     <string name="move_threshold_label">Limite de confirmação de gesto</string>
     <string name="move_threshold_hint">Até onde o dedo principal precisa se mover antes que um gesto ambíguo de dois dedos seja resolvido. Diminua isso se a rolagem demorar para começar.</string>
     <string name="gesture_scale_label">Magnitude do gesto</string>
@@ -107,7 +29,7 @@
     <string name="second_window_label">Abrir uma segunda janela (daemon e título próprios)</string>
     <string name="second_window_name_hint">Nome da Janela (ex: meu workspace)</string>
     <string name="second_window_open">Abrir uma segunda janela</string>
-    <string name="root_switch">Conecta com root (Helper)</string>
+    <string name="root_switch">Conectar como root (auxiliar)</string>
     <string name="root_hint">Executa um helper root (su) que conecta no socket e passa a conexão de volta para o app. Faz efeito na próxima sessão (Reabra o app).</string>
     <string name="topapp_switch">Ativar escalonamento em primeiro plano (root)</string>
     <string name="topapp_hint">Dá ao desktop Linux prioridade de CPU de primeiro plano do Android. Selecione o escopo de escalonamento abaixo; as mudanças têm efeito na próxima conexão.</string>
@@ -140,7 +62,7 @@
 
     <!-- Settings notification -->
     <string name="notification_switch">Mostrar a notificação de abrir as configurações</string>
-    <string name="notification_hint">Mostra uma notificação persistente enquanto o app está aberto; apertando-o abre as configurações. Desative para esconder. Faz efeito na próxima sessão do app.</string>
+    <string name="notification_hint">Mostra uma notificação persistente enquanto o app está aberto; ao tocar nela abre as configurações. Desative para esconder. Faz efeito na próxima sessão do app.</string>
     <string name="notification_channel_name">Anland</string>
     <string name="notification_channel_desc">Acesso Rápido do Anland</string>
     <string name="notification_title">Anland</string>
