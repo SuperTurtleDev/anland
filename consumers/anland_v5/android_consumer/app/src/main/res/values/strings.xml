@@ -105,9 +105,6 @@
     <string name="hud_group_detach">Take out</string>
     <string name="hud_group_drop_hint">Drop keys here</string>
     <string name="hud_group_moved_in">Key moved into group</string>
-    <string name="hud_group_detached">Key taken out of group</string>
-    <string name="hud_group_no_candidates">No standalone keys on screen</string>
-    <string name="hud_group_move_in_title">Move key into group</string>
     <string name="hud_overlay_add_widget_title">Add Widget</string>
     <string name="hud_overlay_daemon_connected">DAEMON CONNECTED</string>
     <string name="hud_overlay_daemon_offline">DAEMON OFFLINE</string>
@@ -328,7 +325,6 @@
     <string name="hud_title_button_properties">BUTTON PROPERTIES</string>
     <string name="hud_properties_title">%1$s PROPERTIES</string>
     <string name="hud_dock_button_properties">DOCK BUTTON PROPERTIES</string>
-    <string name="hud_widget_button">BUTTON</string>
     <string name="hud_widget_super_gesture">SUPER GESTURE</string>
     <string name="hud_widget_trackpoint">TRACKPOINT</string>
     <string name="hud_widget_touchpad">TOUCHPAD</string>

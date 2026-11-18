@@ -341,9 +341,4 @@ final class ImmersiveInputController {
     private void toast(int stringRes) {
         Toast.makeText(ctx, stringRes, Toast.LENGTH_SHORT).show();
     }
-
-    /** For messages that need a formatted argument, such as the bound key's name. */
-    private void toast(String message) {
-        Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show();
-    }
 }

@@ -77,8 +77,6 @@ public class SettingsActivity extends Activity {
             VirtualKeyboardView.KEY_KEYBOARD_HANDEDNESS;
     private static final String KEY_KEYBOARD_THEME = VirtualKeyboardView.KEY_KEYBOARD_THEME;
     private static final String KEY_HAPTIC_FEEDBACK = VirtualKeyboardView.KEY_HAPTIC_FEEDBACK;
-    private static final String KEY_SPLIT_ARC_TOP_WINGS =
-            VirtualKeyboardView.KEY_SPLIT_ARC_TOP_WINGS;
     private static final String KEY_USE_HUD_OVERLAY = "use_hud_overlay";
     private static final String KEY_HUD_LAYOUT_PROFILE = "hud_layout_profile_v2";
     private static final String KEY_NOTIFICATION_ENABLED = "settings_notification";

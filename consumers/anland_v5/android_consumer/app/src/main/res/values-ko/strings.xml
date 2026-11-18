@@ -280,9 +280,6 @@
     <string name="hud_group_detach">빼기</string>
     <string name="hud_group_drop_hint">여기에 키를 놓으세요</string>
     <string name="hud_group_moved_in">키를 그룹으로 옮겼습니다</string>
-    <string name="hud_group_detached">키를 그룹에서 빼냈습니다</string>
-    <string name="hud_group_no_candidates">화면에 옮길 독립 키가 없습니다</string>
-    <string name="hud_group_move_in_title">그룹으로 키 옮기기</string>
     <string name="hud_overlay_add_widget_title">위젯 추가</string>
     <string name="hud_overlay_daemon_connected">데몬 연결됨</string>
     <string name="hud_overlay_daemon_offline">데몬 오프라인</string>
@@ -311,7 +308,6 @@
     <string name="hud_title_button_properties">버튼 속성</string>
     <string name="hud_properties_title">%1$s 속성</string>
     <string name="hud_dock_button_properties">독 버튼 속성</string>
-    <string name="hud_widget_button">버튼</string>
     <string name="hud_widget_super_gesture">SUPER 제스처</string>
     <string name="hud_widget_trackpoint">트랙포인트</string>
     <string name="hud_widget_touchpad">터치패드</string>
