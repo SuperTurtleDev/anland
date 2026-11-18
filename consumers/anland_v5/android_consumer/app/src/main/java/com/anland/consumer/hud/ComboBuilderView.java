@@ -390,9 +390,6 @@ public final class ComboBuilderView {
         return root;
     }
 
-    private void updatePreview() {
-    }
-
     private static int dp(Context ctx, int v) {
         return Math.round(v * ctx.getResources().getDisplayMetrics().density);
     }

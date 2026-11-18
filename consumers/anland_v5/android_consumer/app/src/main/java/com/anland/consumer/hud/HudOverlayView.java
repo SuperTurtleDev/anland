@@ -119,7 +119,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     private HudButton mInspectorSessionButton;
     private HudButton mInspectorOriginalButton;
     private HudLayout mInspectorSessionLayout;
-    private final java.util.List<HudButton> mInspectorDetachedChildren = new java.util.ArrayList<>();
     private final java.util.List<HudButton> mInspectorMovedButtons = new java.util.ArrayList<>();
     private final java.util.List<Integer> mInspectorMovedIndices = new java.util.ArrayList<>();
     private final java.util.Set<String> mInspectorInitialFloatingIds = new java.util.HashSet<>();
@@ -689,75 +688,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                     }
                 });
             }
-            @Override
-            public void onGroupAddKeyRequested(HudButton group) {
-                if (group == null) return;
-                mInspectorView.setVisibility(GONE);
-                HudKeyPickerDialog.show(getContext(), (action, displayLabel) -> {
-                    HudButton child = new HudButton();
-                    child.widgetType = HudButton.WIDGET_STANDARD;
-                    child.action = action;
-                    child.label = displayLabel != null ? displayLabel : "";
-                    child.widthDp = 44;
-                    child.heightDp = 36;
-                    child.cornerRadiusDp = 8;
-                    group.children.add(child);
-                    // Children are arranged automatically by HudGroupView; the
-                    // container only has to be large enough for the new grid.
-                    ensureGroupFits(group);
-                    mHasUnsavedChanges = true;
-                    mInspectorView.setVisibility(VISIBLE);
-                    selectButton(group, null);
-                    rebuildActiveLayout();
-                    mInspectorView.bindButton(group);
-                });
-            }
-
-            @Override
-            public void onGroupAddExistingRequested(HudButton group) {
-                if (group == null) return;
-                showMoveIntoGroupChooser(group);
-            }
-
-            @Override
-            public void onGroupChildDetachRequested(HudButton group, HudButton child) {
-                if (group == null || child == null) return;
-                if (!group.children.remove(child)) return;
-                if (group == mInspectorSessionButton) mInspectorDetachedChildren.add(child);
-                // Drop it back on the canvas just below-right of the group so it
-                // does not end up hidden underneath its former container.
-                child.posXPercent = Math.min(0.95f, group.posXPercent + 0.08f);
-                child.posYPercent = Math.min(0.95f, group.posYPercent + 0.10f);
-                getActiveLayout().floatingButtons.add(child);
-                mHasUnsavedChanges = true;
-                selectButton(group, null);
-                rebuildActiveLayout();
-                mInspectorView.bindButton(group);
-                Toast.makeText(getContext(), R.string.hud_group_detached, Toast.LENGTH_SHORT).show();
-            }
-
-            @Override
-            public void onGroupChildRebindRequested(HudButton group, HudButton child) {
-                if (group == null || child == null) return;
-                mInspectorView.setVisibility(GONE);
-                HudKeyPickerDialog.show(getContext(), (action, displayLabel) -> {
-                    child.action = action;
-                    if (displayLabel != null) child.label = displayLabel;
-                    mHasUnsavedChanges = true;
-                    mInspectorView.setVisibility(VISIBLE);
-                    bindGroupView(group);
-                    mInspectorView.bindButton(group);
-                });
-            }
-
-            @Override
-            public void onGroupChildRemoveRequested(HudButton group, HudButton child) {
-                if (group == null || child == null) return;
-                group.children.remove(child);
-                mHasUnsavedChanges = true;
-                bindGroupView(group);
-                mInspectorView.bindButton(group);
-            }
 
             public void onCloseRequested() {
                 selectButton(null, null);
@@ -1099,31 +1029,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         card.addView(sub);
 
         return card;
-    }
-
-    /**
-     * Lists the standalone keys currently on the canvas so they can be moved
-     * into a group container. Dragging a key onto the container does the same
-     * thing, but the list is the reliable path when the target is small.
-     */
-    private void showMoveIntoGroupChooser(HudButton group) {
-        if (group == null) return;
-        final List<HudButton> candidates = new ArrayList<>();
-        final List<CharSequence> labels = new ArrayList<>();
-        for (HudButton b : getActiveLayout().floatingButtons) {
-            if (b == group || !HudButton.WIDGET_STANDARD.equals(b.widgetType)) continue;
-            candidates.add(b);
-            boolean hasLabel = b.label != null && !b.label.isEmpty();
-            labels.add(hasLabel ? b.label : getContext().getString(R.string.hud_widget_button));
-        }
-        if (candidates.isEmpty()) {
-            Toast.makeText(getContext(), R.string.hud_group_no_candidates,
-                    Toast.LENGTH_SHORT).show();
-            return;
-        }
-        showItemChooser(R.string.hud_group_move_in_title,
-                labels.toArray(new CharSequence[0]),
-                which -> moveWidgetIntoGroup(group, candidates.get(which)));
     }
 
     private void addWidgetOfKind(HudButton.WidgetKind kind) {
@@ -1717,22 +1622,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         invalidate();
     }
 
-    /** Re-render a group's children after the model changed. */
-    private void bindGroupView(HudButton group) {
-        if (mFloatingContainer == null || group == null) return;
-        for (int i = 0; i < mFloatingContainer.getChildCount(); i++) {
-            View child = mFloatingContainer.getChildAt(i);
-            if (child instanceof HudGroupView) {
-                HudGroupView gv = (HudGroupView) child;
-                if (gv.getModel() == group) {
-                    gv.rebuildChildren();
-                    return;
-                }
-            }
-        }
-        rebuildActiveLayout();
-    }
-
     private void attachTouchAndLayout(View view, HudButton model) {
         float density = getResources().getDisplayMetrics().density;
         int w = Math.round(model.widthDp * density);
@@ -1901,25 +1790,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         return dialog;
     }
 
-    /**
-     * List chooser with the inspector hidden behind it. The inspector comes
-     * back only if a widget is still selected, which is the behaviour every
-     * chooser in this editor wants.
-     */
-    private void showItemChooser(int titleRes, CharSequence[] items,
-                                 java.util.function.IntConsumer onPick) {
-        mInspectorView.setVisibility(GONE);
-        AlertDialog dialog = styleDialog(darkDialog()
-                .setTitle(titleRes)
-                .setItems(items, (d, which) -> onPick.accept(which))
-                .setOnDismissListener(d -> {
-                    if (mSelectedButton != null) mInspectorView.setVisibility(VISIBLE);
-                })
-                .setNegativeButton(R.string.hud_overlay_cancel, null)
-                .create());
-        dialog.show();
-    }
-
     private void clearGuides() {
         mActiveVerticalGuides.clear();
         mActiveHorizontalGuides.clear();
@@ -2062,7 +1932,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         mInspectorSessionButton = button;
         mInspectorOriginalButton = copyForInspector(button);
         mInspectorSessionLayout = button != null ? getActiveLayout() : null;
-        mInspectorDetachedChildren.clear();
         mInspectorMovedButtons.clear();
         mInspectorMovedIndices.clear();
         mInspectorInitialFloatingIds.clear();
@@ -2078,7 +1947,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         if (layout != null && mInspectorOriginalButton != null) {
             int index = layout.floatingButtons.indexOf(mInspectorSessionButton);
             if (index >= 0) {
-                boolean changed = !mInspectorDetachedChildren.isEmpty() || !mInspectorMovedButtons.isEmpty();
+                boolean changed = !mInspectorMovedButtons.isEmpty();
                 try {
                     changed |= !mInspectorSessionButton.toJSON().toString()
                             .equals(mInspectorOriginalButton.toJSON().toString());
@@ -2086,7 +1955,6 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                     changed = true;
                 }
                 layout.floatingButtons.set(index, mInspectorOriginalButton);
-                layout.floatingButtons.removeAll(mInspectorDetachedChildren);
                 for (int i = mInspectorMovedButtons.size() - 1; i >= 0; i--) {
                     HudButton original = mInspectorMovedButtons.get(i);
                     for (int j = layout.floatingButtons.size() - 1; j >= 0; j--) {

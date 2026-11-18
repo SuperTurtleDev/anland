@@ -191,7 +191,6 @@ public class MainActivity extends Activity
     // Cached "immersive_hud_touch" preference: read once per session instead of
     // once per evdev frame.
     private boolean immersiveHudTouch = ImmersiveMode.DEFAULT_HUD_TOUCH;
-    private float mDensity = 1f;
     // Layout JSON the current bar was built from; used to detect edits on resume.
 
     public static MainActivity sInstance;
@@ -907,7 +906,6 @@ public class MainActivity extends Activity
         root.addView(systemIme.getInputView(), new FrameLayout.LayoutParams(1, 1));
 
         mRoot = root;
-        mDensity = getResources().getDisplayMetrics().density;
         mKeyboardFloating = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getBoolean(KEY_KEYBOARD_FLOATING, false);
 
@@ -2295,11 +2293,7 @@ public class MainActivity extends Activity
     // focused window relayouts into the upper region instead of hiding behind
     // the keyboard. Reset when the IME goes away.
     private void applyImeInset(WindowInsets insets) {
-        int newImeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
-        boolean imeVisible = newImeBottom > 0;
-        boolean wasImeVisible = mImeBottom > 0;
-    
-        mImeBottom = newImeBottom;
+        mImeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
         // The HUD is a floating layer: it deliberately does NOT follow the IME,
         // so its controls stay where the user placed them.
         if (mHudOverlay != null) {

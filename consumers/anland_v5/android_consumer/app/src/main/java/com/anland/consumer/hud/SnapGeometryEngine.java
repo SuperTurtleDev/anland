@@ -38,12 +38,10 @@ public final class SnapGeometryEngine {
         }
     }
 
-    private final float mDensity;
     private final float mSnapThresholdPx;
     private final float mGapPx;
 
     public SnapGeometryEngine(float density) {
-        this.mDensity = density;
         // 6dp magnetic snap threshold (matches Zalith Launcher 4-6dp sweet spot)
         this.mSnapThresholdPx = 6f * density;
         this.mGapPx = 4f * density;

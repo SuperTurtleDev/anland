@@ -278,9 +278,6 @@ public final class HudKeyPickerDialog {
         });
     }
 
-    private static void resetTabRowToNormal(LinearLayout tabRow, Context context) {
-    }
-
     private static Button createTabButton(Context ctx, String text) {
         Button b = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
         b.setText(text);
@@ -406,15 +403,6 @@ public final class HudKeyPickerDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         container.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-    }
-
-    private static int computeColumnCount(Context ctx, int minColumns) {
-        int widthDp = ctx.getResources().getConfiguration().screenWidthDp;
-        if (widthDp <= 0) widthDp = 360;
-        int cols = widthDp / 80;
-        if (cols < minColumns) cols = minColumns;
-        if (cols > minColumns + 2) cols = minColumns + 2;
-        return cols;
     }
 
     // Modifiers, nav / editing keys, and system actions all share the

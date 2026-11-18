@@ -15,10 +15,10 @@
  * The playback AAudio stream stays open and is driven by an AAudio callback. The
  * socket thread appends PCM into a small ring buffer; the callback outputs an
  * inaudible keepalive when Linux is idle. This keeps Android's mixer awake across
- * short UI sounds without reconnecting the display pipeline. The capture stream is
- * opened once and only started while the mic is enabled. The active display_ctx
- * (and thus the live audio fd) is swapped via audio_set_ctx(). The audio fd is
- * owned by the display library -- never closed here.
+ * short UI sounds without reconnecting the display pipeline. The capture worker
+ * opens the input stream while forwarding is enabled and a session is live.
+ * The active display_ctx (and thus the live audio fd) is swapped via
+ * audio_set_ctx(). The display library owns the audio fd.
  *
  * The bridge is per-instance: each consumer window owns its own audio_bridge (its
  * own AAudio playback + capture streams, connected to its own producer). Multiple

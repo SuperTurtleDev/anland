@@ -15,7 +15,6 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.SeekBar;
 import android.widget.Switch;
-import com.anland.consumer.hud.HudVectorIcons;
 
 /**
  * Anland Material 3 Purist Design System (M3 Purist / Catppuccin & Linear Hybrid).
@@ -163,70 +162,6 @@ public final class M3 {
         };
         sw.setTrackTintList(new ColorStateList(states, trackColors));
         sw.setThumbTintList(new ColorStateList(states, thumbColors));
-    }
-
-    // ============================================================
-    // VECTOR DRAWN CHEVRON & BACK ARROW VIEWS (Anti-aliased Canvas)
-    // ============================================================
-
-    public static final class DragGripView extends View {
-        private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        public DragGripView(Context ctx) {
-            super(ctx);
-            mPaint.setColor(COLOR_TEXT_MUTED);
-            mPaint.setStyle(Paint.Style.FILL);
-        }
-
-        @Override
-        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-            float density = getResources().getDisplayMetrics().density;
-            setMeasuredDimension(Math.round(24 * density), Math.round(20 * density));
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float density = getResources().getDisplayMetrics().density;
-            float r = 1.6f * density;
-            float cx = getWidth() * 0.5f;
-            float cy = getHeight() * 0.5f;
-            float dx = 3.5f * density;
-            float dy = 4.0f * density;
-
-            // 6 dots in 2 columns of 3
-            canvas.drawCircle(cx - dx, cy - dy, r, mPaint);
-            canvas.drawCircle(cx + dx, cy - dy, r, mPaint);
-            canvas.drawCircle(cx - dx, cy, r, mPaint);
-            canvas.drawCircle(cx + dx, cy, r, mPaint);
-            canvas.drawCircle(cx - dx, cy + dy, r, mPaint);
-            canvas.drawCircle(cx + dx, cy + dy, r, mPaint);
-        }
-    }
-
-    public static class VectorIconView extends View {
-        private final String mIconId;
-        private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        public VectorIconView(Context ctx, String iconId, int color) {
-            super(ctx);
-            this.mIconId = iconId;
-            this.mPaint.setColor(color);
-        }
-
-        public void setColor(int color) {
-            this.mPaint.setColor(color);
-            invalidate();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            if (mIconId != null && !mIconId.isEmpty()) {
-                float size = Math.min(getWidth(), getHeight()) * 0.65f;
-                HudVectorIcons.drawIcon(canvas, mIconId, getWidth() * 0.5f, getHeight() * 0.5f, size, mPaint);
-            }
-        }
     }
 
     public static final class BackArrowView extends View {

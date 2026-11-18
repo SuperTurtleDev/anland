@@ -72,13 +72,6 @@ public final class HudGroupView extends FrameLayout {
         invalidate();
     }
 
-    /** Re-read the model after the editor added, removed or rebound a child. */
-    public void rebuildChildren() {
-        buildChildren();
-        requestLayout();
-        invalidate();
-    }
-
     private void buildChildren() {
         removeAllViews();
         float density = getResources().getDisplayMetrics().density;

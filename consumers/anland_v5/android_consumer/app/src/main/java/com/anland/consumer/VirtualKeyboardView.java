@@ -313,7 +313,6 @@ public class VirtualKeyboardView extends View {
 
     private boolean mIsSplitArcMode = false;
     private float mAnimProgress = 1.0f;
-    private boolean mIsAnimating = false;
     private ValueAnimator mAnimator = null;
 
     private final Handler mLongPressHandler = new Handler(Looper.getMainLooper());
@@ -465,7 +464,6 @@ public class VirtualKeyboardView extends View {
         setRotation(0f);
         setVisibility(VISIBLE);
         bringToFront();
-        mIsAnimating = true;
         mAnimProgress = 0f;
 
         mAnimator = ValueAnimator.ofFloat(0f, 1f);
@@ -478,7 +476,6 @@ public class VirtualKeyboardView extends View {
         mAnimator.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                mIsAnimating = false;
                 mAnimProgress = 1f;
                 invalidate();
             }
@@ -488,7 +485,6 @@ public class VirtualKeyboardView extends View {
 
     public void hideWithAnimation(Runnable onComplete) {
         cancelAnimation();
-        mIsAnimating = true;
         mAnimator = ValueAnimator.ofFloat(mAnimProgress, 0f);
         mAnimator.setDuration(150);
         mAnimator.setInterpolator(new AccelerateInterpolator(1.5f));
@@ -499,7 +495,6 @@ public class VirtualKeyboardView extends View {
         mAnimator.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                mIsAnimating = false;
                 mAnimProgress = 0f;
                 setVisibility(GONE);
                 if (onComplete != null) onComplete.run();
@@ -2500,10 +2495,6 @@ public class VirtualKeyboardView extends View {
     }
 
     /** Resting vs. active (pressed / latched) tonal fill, per MD3. */
-    private int resolveKeyBg(KeyData k) {
-        return resolveKeyBg(k, false);
-    }
-
     private int resolveKeyBg(KeyData k, boolean actionKey) {
         if (k.pressed || k.modActive) return MD_PRIMARY_CONTAINER;
         return actionKey ? MD_SURFACE_CONTAINER : MD_SURFACE_CONTAINER_HIGH;

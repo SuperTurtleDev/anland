@@ -266,9 +266,6 @@
     <string name="hud_group_detach">移出</string>
     <string name="hud_group_drop_hint">把按鍵拖到這裡</string>
     <string name="hud_group_moved_in">已移入聚合</string>
-    <string name="hud_group_detached">已移出聚合</string>
-    <string name="hud_group_no_candidates">螢幕上沒有可移入的獨立按鍵</string>
-    <string name="hud_group_move_in_title">移入聚合</string>
     <string name="hud_overlay_add_widget_title">新增小工具</string>
     <string name="hud_overlay_daemon_connected">守護程序已連線</string>
     <string name="hud_overlay_daemon_offline">守護程序離線</string>
@@ -311,7 +308,6 @@
     <string name="hud_title_button_properties">按鈕屬性</string>
     <string name="hud_properties_title">%1$s 屬性</string>
     <string name="hud_dock_button_properties">停駐按鈕屬性</string>
-    <string name="hud_widget_button">按鈕</string>
     <string name="hud_widget_super_gesture">SUPER 手勢</string>
     <string name="hud_widget_trackpoint">軌跡點</string>
     <string name="hud_widget_touchpad">觸控板</string>

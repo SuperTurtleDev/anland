@@ -37,8 +37,6 @@ else()
     add_executable(display_daemon daemon/daemon.c)
     target_link_libraries(display_daemon display_daemon_lib socket_utils pthread)
 
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
     add_subdirectory(libdisplay_producer)
 
     add_library(display_consumer SHARED libdisplay_consumer/display_consumer.c)

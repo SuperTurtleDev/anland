@@ -105,9 +105,6 @@
     <string name="hud_group_detach">Sacar</string>
     <string name="hud_group_drop_hint">Suelta las teclas aquí</string>
     <string name="hud_group_moved_in">Tecla movida al grupo</string>
-    <string name="hud_group_detached">Tecla sacada del grupo</string>
-    <string name="hud_group_no_candidates">No hay teclas sueltas en la pantalla</string>
-    <string name="hud_group_move_in_title">Mover tecla al grupo</string>
     <string name="hud_overlay_add_widget_title">Añadir widget</string>
     <string name="hud_overlay_daemon_connected">DAEMON CONECTADO</string>
     <string name="hud_overlay_daemon_offline">DAEMON SIN CONEXIÓN</string>
@@ -326,7 +323,6 @@
     <string name="hud_title_button_properties">PROPIEDADES DEL BOTÓN</string>
     <string name="hud_properties_title">PROPIEDADES: %1$s</string>
     <string name="hud_dock_button_properties">PROPIEDADES DEL BOTÓN DEL DOCK</string>
-    <string name="hud_widget_button">BOTÓN</string>
     <string name="hud_widget_super_gesture">GESTO SUPER</string>
     <string name="hud_widget_trackpoint">TRACKPOINT</string>
     <string name="hud_widget_touchpad">PANEL TÁCTIL</string>

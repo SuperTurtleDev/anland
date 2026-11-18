@@ -47,11 +47,6 @@ public final class HudPropertyInspectorView extends LinearLayout {
         void onDeleteRequested(HudButton button);
         void onDuplicateRequested(HudButton button);
         void onPickActionRequested(HudButton button, int targetSlot); // 0=main, 1=popup, 2..5=directions, 6=long press
-        void onGroupAddKeyRequested(HudButton group);
-        void onGroupAddExistingRequested(HudButton group);
-        void onGroupChildRebindRequested(HudButton group, HudButton child);
-        void onGroupChildDetachRequested(HudButton group, HudButton child);
-        void onGroupChildRemoveRequested(HudButton group, HudButton child);
         void onCloseRequested();
         void onCancelRequested();
     }
@@ -133,10 +128,6 @@ public final class HudPropertyInspectorView extends LinearLayout {
     private Button mBtnTrackPointMode;
     private SeekBar mTrackSensitivitySeekBar;
     private TextView mTrackSensitivityBadge;
-    private SeekBar mTrackDeadzoneSeekBar;
-    private TextView mTrackDeadzoneBadge;
-    private LinearLayout mGroupOptions;
-    private LinearLayout mGroupChildList;
 
     // Tab 4: Style
     private SeekBar mOpacitySeekBar;

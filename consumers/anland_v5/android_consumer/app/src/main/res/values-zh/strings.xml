@@ -101,9 +101,6 @@
     <string name="hud_group_detach">移出</string>
     <string name="hud_group_drop_hint">把按键拖到这里</string>
     <string name="hud_group_moved_in">已移入聚合</string>
-    <string name="hud_group_detached">已移出聚合</string>
-    <string name="hud_group_no_candidates">屏幕上没有可移入的独立按键</string>
-    <string name="hud_group_move_in_title">移入聚合</string>
     <string name="hud_overlay_add_widget_title">添加控件</string>
     <string name="hud_overlay_daemon_connected">守护进程已连接</string>
     <string name="hud_overlay_daemon_offline">守护进程未连接</string>
@@ -312,7 +309,6 @@
     <string name="hud_title_button_properties">按钮属性</string>
     <string name="hud_properties_title">%1$s 属性</string>
     <string name="hud_dock_button_properties">扩展栏按钮属性</string>
-    <string name="hud_widget_button">按钮</string>
     <string name="hud_widget_super_gesture">超级手势</string>
     <string name="hud_widget_trackpoint">指点杆</string>
     <string name="hud_widget_touchpad">触摸板</string>
