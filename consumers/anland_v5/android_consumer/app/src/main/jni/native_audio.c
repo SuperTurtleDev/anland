@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,8 @@
 #define WANT_CAP_CHANNELS  1
 #define MAX_DGRAM          (64 * 1024)
 #define MIC_MAX_FRAMES     1024   /* upper bound on frames per mic read */
+#define MIC_MAX_CHANNELS   2      /* protocol supports mono and stereo */
+#define MIC_RETRY_MS       250
 #define PLAY_POLL_MS       100
 #define PLAY_RING_MS       160
 #define PLAY_RING_MIN      (32 * 1024)
@@ -40,8 +43,8 @@
 #define PLAY_IDLE_STOP_MS  1500
 
 struct audio_bridge {
-    volatile bool running;
-    volatile bool mic_enabled;
+    atomic_bool running;
+    atomic_bool mic_enabled;
 
     /* The live connection. Set by audio_set_ctx() from the render thread, read by
      * the audio threads -- same lightweight convention as the event thread's
@@ -53,15 +56,12 @@ struct audio_bridge {
     pthread_t cap_thread;
 
     AAudioStream *play;   /* output: desktop -> speaker */
-    AAudioStream *rec;    /* input:  mic -> producer    */
-
-    /* Actual device-chosen formats, read back after the streams open. */
+    /* Actual device-chosen playback format, read back after the stream opens. */
     int play_rate, play_channels;
-    int cap_rate, cap_channels;
 
     /* Latency presets in ms (0 = engine default), set from the settings UI. */
     volatile int play_latency_ms;
-    volatile int cap_latency_ms;
+    atomic_int cap_latency_ms;
     volatile bool resend_formats;   /* a preset/device change -> re-announce */
 
     /* User "audio keep-alive" toggle. On: keep the output stream running (fed
@@ -480,7 +480,7 @@ static uint32_t ms_to_frames(int ms, int rate)
 }
 
 /* Tell the producer the device-chosen format + latency preset for one direction. */
-static void send_format(int fd, uint32_t role, uint32_t rate, uint32_t channels,
+static bool send_format(int fd, uint32_t role, uint32_t rate, uint32_t channels,
                         uint32_t quantum)
 {
     struct audio_format f = {
@@ -496,7 +496,7 @@ static void send_format(int fd, uint32_t role, uint32_t rate, uint32_t channels,
         { .iov_base = &f, .iov_len = sizeof(f) },
     };
     struct msghdr m = { .msg_iov = iov, .msg_iovlen = 2 };
-    sendmsg(fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL);
+    return sendmsg(fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)(sizeof(h) + sizeof(f));
 }
 
 /* ---- playback: socket -> speaker ---- */
@@ -543,16 +543,13 @@ static void *play_thread_func(void *arg)
             continue;
         }
 
-        /* Hand the producer the real device formats + latency presets for both
-         * directions: once when the socket comes up (just left fallback), and again
-         * whenever a preset/device change needs to re-size its PipeWire nodes live. */
+        /* Announce the playback format when the socket comes up and whenever
+         * a preset or device change requires an update. */
         if (!had_fd || b->resend_formats) {
             ensure_play_stream_started(b);
             b->resend_formats = false;
             send_format(fd, AUDIO_ROLE_PLAYBACK, b->play_rate, b->play_channels,
                         ms_to_frames(b->play_latency_ms, b->play_rate));
-            send_format(fd, AUDIO_ROLE_CAPTURE, b->cap_rate, b->cap_channels,
-                        ms_to_frames(b->cap_latency_ms, b->cap_rate));
             had_fd = true;
         }
 
@@ -606,54 +603,91 @@ static void *play_thread_func(void *arg)
 
 /* ---- capture: mic -> socket ---- */
 
+static AAudioStream *start_capture_stream(struct audio_bridge *b, int *rate, int *channels)
+{
+    AAudioStream *stream = open_stream(b, AAUDIO_DIRECTION_INPUT, WANT_CAP_CHANNELS);
+    if (!stream)
+        return NULL;
+
+    *rate = AAudioStream_getSampleRate(stream);
+    *channels = AAudioStream_getChannelCount(stream);
+    if (*rate < 8000 || *rate > 384000 || *channels < 1 || *channels > MIC_MAX_CHANNELS
+            || AAudioStream_getFormat(stream) != AAUDIO_FORMAT_PCM_I16) {
+        LOGE("unsupported input stream format: %d Hz x%d, PCM format=%d",
+             *rate, *channels, AAudioStream_getFormat(stream));
+        AAudioStream_close(stream);
+        return NULL;
+    }
+
+    aaudio_result_t result = AAudioStream_requestStart(stream);
+    if (result != AAUDIO_OK) {
+        LOGE("start input stream failed: %s", AAudio_convertResultToText(result));
+        AAudioStream_close(stream);
+        return NULL;
+    }
+
+    LOGI("capture stream started at %d Hz x%d", *rate, *channels);
+    return stream;
+}
+
 static void *cap_thread_func(void *arg)
 {
     struct audio_bridge *b = arg;
     LOGI("capture thread started");
 
-    bool started = false;
-    int cap_channels = b->cap_channels > 0 ? b->cap_channels : WANT_CAP_CHANNELS;
-    int16_t *buf = malloc((size_t)MIC_MAX_FRAMES * (size_t)cap_channels * sizeof(*buf));
-    if (!buf) {
-        LOGE("allocate capture buffer failed");
-        return NULL;
-    }
-    /* ~10 ms per read at the device rate, capped to the buffer. */
-    int32_t mic_frames = b->cap_rate / 100;
-    if (mic_frames <= 0)
-        mic_frames = 1;
-    if (mic_frames > MIC_MAX_FRAMES)
-        mic_frames = MIC_MAX_FRAMES;
+    AAudioStream *stream = NULL;
+    int rate = 0, channels = 0;
+    int16_t buf[MIC_MAX_FRAMES * MIC_MAX_CHANNELS];
+    uint64_t retry_at = 0;
+    bool format_sent = false;
+    int format_fd = -1;
+    uint32_t format_quantum = 0;
 
     while (b->running) {
         int fd = current_fd(b);
         if (!b->mic_enabled || fd < 0) {
-            if (started && b->rec) {
-                AAudioStream_requestStop(b->rec);
-                started = false;
+            if (stream) {
+                AAudioStream_requestStop(stream);
+                AAudioStream_close(stream);
+                stream = NULL;
             }
+            retry_at = 0;
             usleep(20000);
             continue;
         }
-        if (!b->rec) {
-            usleep(20000);
-            continue;
-        }
-        if (!started) {
-            if (AAudioStream_requestStart(b->rec) != AAUDIO_OK) {
-                usleep(50000);
+        if (!stream) {
+            if (now_ms() < retry_at) {
+                usleep(20000);
                 continue;
             }
-            started = true;
+            /* Java enables capture after permission is granted. Opening earlier
+             * can fail, leaving the running bridge without a microphone. */
+            stream = start_capture_stream(b, &rate, &channels);
+            if (!stream) {
+                retry_at = now_ms() + MIC_RETRY_MS;
+                continue;
+            }
+            format_sent = false;
         }
 
+        /* Read about 10 ms at the device rate, limited by the buffer. */
+        int32_t mic_frames = rate / 100;
+        if (mic_frames > MIC_MAX_FRAMES)
+            mic_frames = MIC_MAX_FRAMES;
         TracyCZoneN(zMicRead, "mic read", 1);
-        int32_t got = AAudioStream_read(b->rec, buf, mic_frames, 100 * 1000 * 1000L);
+        int32_t got = AAudioStream_read(stream, buf, mic_frames, 100 * 1000 * 1000L);
         TracyCZoneEnd(zMicRead);
-        if (got <= 0)
+        if (got < 0) {
+            LOGE("read input stream failed: %s; reopening", AAudio_convertResultToText(got));
+            AAudioStream_close(stream);
+            stream = NULL;
+            retry_at = now_ms() + MIC_RETRY_MS;
+            continue;
+        }
+        if (got == 0)
             continue;
 
-        uint32_t bytes = (uint32_t)got * sizeof(int16_t) * (uint32_t)cap_channels;
+        uint32_t bytes = (uint32_t)got * sizeof(int16_t) * (uint32_t)channels;
         struct audio_msg h = { .type = AUDIO_MSG_PCM, .size = bytes };
         struct iovec iov[2] = {
             { .iov_base = &h, .iov_len = sizeof(h) },
@@ -661,14 +695,27 @@ static void *cap_thread_func(void *arg)
         };
         struct msghdr m = { .msg_iov = iov, .msg_iovlen = 2 };
         TracyCZoneN(zMicSend, "mic send", 1);
-        sendmsg(fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL);   /* drop if the socket is full */
+        if (b->mic_enabled && fd == current_fd(b)) {
+            uint32_t quantum = ms_to_frames(b->cap_latency_ms, rate);
+            /* The producer must receive the negotiated format before its PCM. */
+            if (!format_sent || format_fd != fd || format_quantum != quantum) {
+                format_sent = send_format(fd, AUDIO_ROLE_CAPTURE, rate, channels, quantum);
+                if (format_sent) {
+                    format_fd = fd;
+                    format_quantum = quantum;
+                }
+            }
+            if (format_sent)
+                sendmsg(fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL); /* drop if full */
+        }
         TracyCZoneEnd(zMicSend);
         TracyCFrameMark;
     }
 
-    if (started && b->rec)
-        AAudioStream_requestStop(b->rec);
-    free(buf);
+    if (stream) {
+        AAudioStream_requestStop(stream);
+        AAudioStream_close(stream);
+    }
     LOGI("capture thread stopped");
     return NULL;
 }
@@ -680,6 +727,9 @@ audio_bridge *audio_create(void)
     audio_bridge *b = calloc(1, sizeof(struct audio_bridge));
     if (!b)
         return NULL;
+    atomic_init(&b->running, false);
+    atomic_init(&b->mic_enabled, false);
+    atomic_init(&b->cap_latency_ms, 0);
     pthread_mutex_init(&b->play_lock, NULL);
     return b;
 }
@@ -707,22 +757,12 @@ void audio_start(audio_bridge *b)
     b->play_error = false;
     open_play_stream(b, true);
 
-    /* Open the input stream even before the mic is enabled; it is started/stopped
-     * by the capture thread. May be NULL if RECORD_AUDIO is not granted. */
-    b->cap_rate = 48000;
-    b->cap_channels = WANT_CAP_CHANNELS;
-    b->rec = open_stream(b, AAUDIO_DIRECTION_INPUT, WANT_CAP_CHANNELS);
-    if (b->rec) {
-        b->cap_rate = AAudioStream_getSampleRate(b->rec);
-        b->cap_channels = AAudioStream_getChannelCount(b->rec);
-    }
-    LOGI("device formats: playback %d Hz x%d, capture %d Hz x%d",
-         b->play_rate, b->play_channels, b->cap_rate, b->cap_channels);
+    LOGI("device playback format: %d Hz x%d", b->play_rate, b->play_channels);
 
     b->running = true;
     pthread_create(&b->play_thread, NULL, play_thread_func, b);
     pthread_create(&b->cap_thread, NULL, cap_thread_func, b);
-    LOGI("audio bridge started (play=%p rec=%p)", (void *)b->play, (void *)b->rec);
+    LOGI("audio bridge started (play=%p)", (void *)b->play);
 }
 
 void audio_stop(audio_bridge *b)
@@ -734,11 +774,6 @@ void audio_stop(audio_bridge *b)
     pthread_join(b->cap_thread, NULL);
 
     close_play_stream(b, true);
-    if (b->rec) {
-        AAudioStream_requestStop(b->rec);
-        AAudioStream_close(b->rec);
-        b->rec = NULL;
-    }
     pthread_mutex_lock(&b->play_lock);
     free(b->play_ring);
     b->play_ring = NULL;
