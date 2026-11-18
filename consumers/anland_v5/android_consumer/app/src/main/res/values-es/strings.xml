@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_short_label">Ajustes</string>
+
+    <!-- Titles / section headers -->
+    <string name="settings_title">Ajustes</string>
+    <string name="section_virtual_keyboard">Tecla para mostrar u ocultar el teclado en pantalla</string>
+    <string name="section_connection">Conexión</string>
+    <string name="section_resolution">Resolución de la pantalla</string>
+    <string name="section_notification">Notificación de ajustes</string>
+
+    <!-- Settings home: category rows and back navigation -->
+    <string name="nav_back">‹ Atrás</string>
+    <string name="cat_keyboard_title">Teclado y teclas</string>
+    <string name="cat_keyboard_subtitle">Asignación de teclas, accesibilidad, teclado virtual y controles del HUD</string>
+    <string name="cat_touchpad_title">Panel táctil y ratón</string>
+    <string name="cat_touchpad_subtitle">Modo panel táctil, captura del puntero y sensibilidad</string>
+    <string name="cat_connection_subtitle">Socket, root, micrófono, cámara y latencia de audio</string>
+    <string name="cat_resolution_subtitle">Resolución de salida y preajustes</string>
+    <string name="cat_general_title">General</string>
+    <string name="cat_general_subtitle">Orientación de la pantalla y notificación de ajustes</string>
+
+    <!-- Screen orientation -->
+    <string name="section_orientation">Orientación de la pantalla</string>
+    <string name="orientation_label">Forzar orientación de la pantalla</string>
+    <string-array name="orientation_options">
+        <item>Predeterminada (sistema)</item>
+        <item>Forzar horizontal</item>
+        <item>Forzar vertical</item>
+    </string-array>
+
+    <!-- Bind key -->
+    <string name="bind_key_button">Asignar tecla para mostrar u ocultar el teclado en pantalla</string>
+    <string name="landscape_split_keyboard">Usar teclado dividido en arco en horizontal</string>
+    <string name="landscape_split_keyboard_hint">Separa las teclas de letras en dos grupos, uno para cada pulgar, cuando la pantalla está en horizontal.</string>
+    <string name="customize_keyboard_wings">Personalizar alas de los pulgares…</string>
+    <string name="keyboard_layer_to_keyboard">Editar teclado</string>
+    <string name="keyboard_layer_to_hud">Volver al HUD</string>
+    <string name="keyboard_layer_settings">Ajustes del teclado</string>
+    <string name="keyboard_wings_title">Personalizar alas de los pulgares</string>
+    <string name="keyboard_wings_left">Ala izquierda</string>
+    <string name="keyboard_wings_right">Ala derecha</string>
+    <string name="keyboard_wings_picker_title">Elegir acción de la tecla</string>
+    <string name="keyboard_wings_use_default">Usar tecla predeterminada</string>
+    <string name="keyboard_wings_reset">Restablecer valores predeterminados</string>
+    <string name="keyboard_wings_done">Listo</string>
+    <string name="keyboard_handedness">Mano dominante</string>
+    <string-array name="keyboard_handedness_options">
+        <item>Zurdo</item>
+        <item>Diestro</item>
+    </string-array>
+    <string name="keyboard_theme">Aspecto de las teclas</string>
+    <string-array name="keyboard_theme_options">
+        <item>Relleno</item>
+        <item>Contorno</item>
+        <item>Transparente</item>
+    </string-array>
+    <string name="keyboard_haptic_feedback">Vibrar al pulsar teclas virtuales</string>
+    <string name="raise_desktop_for_soft_keyboard">Subir el escritorio al abrir el teclado en pantalla</string>
+    <string name="raise_desktop_for_soft_keyboard_hint">Si está activado, el escritorio se reduce y se desplaza hacia arriba para que veas lo que escribes.</string>
+    <string name="hud_controls_switch">Mostrar controles flotantes del HUD</string>
+    <string name="hud_controls_hint">Muestra controles editables de panel táctil, D-Pad, joystick y atajos.</string>
+    <string name="hud_edit_layout">Editar diseño de los controles flotantes</string>
+    <string name="hud_export_layout">Exportar diseño del HUD…</string>
+    <string name="hud_import_layout">Importar diseño del HUD…</string>
+    <string name="hud_export_done">Diseño del HUD exportado</string>
+    <string name="hud_export_failed">No se ha podido exportar el diseño del HUD</string>
+    <string name="hud_import_done">Diseño del HUD importado</string>
+    <string name="hud_import_failed">No se ha podido importar ese archivo de diseño</string>
+    <string name="hud_overlay_saved">Diseño guardado</string>
+    <string name="hud_overlay_hidden_on">HUD oculto — usa el control visible para restaurarlo</string>
+    <string name="hud_overlay_hidden_off">HUD restaurado</string>
+    <string name="hud_overlay_save_error">Error al guardar el diseño</string>
+    <string name="hud_overlay_changes_discarded">Cambios descartados</string>
+    <string name="hud_overlay_exit_title">SALIR DEL EDITOR DEL HUD</string>
+    <string name="hud_overlay_exit_message">¿Guardar los cambios del diseño antes de salir?</string>
+    <string name="hud_overlay_save_and_exit">GUARDAR Y SALIR</string>
+    <string name="hud_overlay_discard">DESCARTAR</string>
+    <string name="hud_overlay_cancel">CANCELAR</string>
+    <string name="hud_overlay_orientation_title">AVISO DE ORIENTACIÓN</string>
+    <string name="hud_overlay_orientation_message">Los diseños en vertical y en horizontal se guardan por separado.\n\nGira el dispositivo para personalizar los botones y las posiciones del dock en cada orientación.</string>
+    <string name="hud_overlay_got_it">ENTENDIDO</string>
+    <string name="hud_overlay_copy_portrait_here">Copiar aquí el diseño vertical</string>
+    <string name="hud_overlay_copy_landscape_here">Copiar aquí el diseño horizontal</string>
+    <string name="hud_overlay_productivity_preset">Preajuste de escritorio / productividad (margen del 10 %)</string>
+    <string name="hud_overlay_user_portrait_hotkeys_layout">Diseño vertical de atajos del usuario</string>
+    <string name="hud_overlay_clear_active_layout">Borrar diseño activo</string>
+    <string name="hud_overlay_layout_options_title">Opciones y preajustes de diseño</string>
+    <string name="hud_overlay_copied">Diseño copiado</string>
+    <string name="hud_overlay_productivity_preset_loaded">Preajuste de escritorio / productividad (margen del 10 %) cargado</string>
+    <string name="hud_overlay_user_portrait_layout_loaded">Diseño vertical del usuario cargado</string>
+    <string name="hud_overlay_layout_cleared">Diseño borrado</string>
+    <string name="hud_overlay_add_standard_key_button">Botón de tecla estándar</string>
+    <string name="hud_overlay_add_super_gesture_nub">Botón de gestos Super</string>
+    <string name="hud_overlay_add_trackpoint">TrackPoint (ratón / desplazamiento)</string>
+    <string name="hud_overlay_add_steam_deck_trackpad">Trackpad de Steam Deck (panel táctil / ratón)</string>
+    <string name="hud_overlay_add_scroll_bar">Barra de desplazamiento (vertical / horizontal)</string>
+    <string name="hud_overlay_add_dpad">D-Pad (cruz deslizante)</string>
+    <string name="hud_overlay_add_group">Contenedor de grupo</string>
+    <string name="hud_widget_group">GRUPO</string>
+    <string name="hud_group_children">Teclas del grupo</string>
+    <string name="hud_group_add_key">Añadir tecla al grupo</string>
+    <string name="hud_group_empty">Aún no hay teclas en este grupo</string>
+    <string name="hud_group_add_existing">Mover aquí una tecla existente</string>
+    <string name="hud_group_detach">Sacar</string>
+    <string name="hud_group_drop_hint">Suelta las teclas aquí</string>
+    <string name="hud_group_moved_in">Tecla movida al grupo</string>
+    <string name="hud_group_detached">Tecla sacada del grupo</string>
+    <string name="hud_group_no_candidates">No hay teclas sueltas en la pantalla</string>
+    <string name="hud_group_move_in_title">Mover tecla al grupo</string>
+    <string name="hud_overlay_add_widget_title">Añadir widget</string>
+    <string name="hud_overlay_daemon_connected">DAEMON CONECTADO</string>
+    <string name="hud_overlay_daemon_offline">DAEMON SIN CONEXIÓN</string>
+    <string name="hud_overlay_toolbar_save">GUARDAR</string>
+    <string name="hud_overlay_toolbar_add">AÑADIR</string>
+    <string name="hud_overlay_toolbar_layout">DISEÑO</string>
+    <string name="hud_overlay_toolbar_exit">SALIR</string>
+    <string name="hud_overlay_label_key">TECLA</string>
+    <string name="hud_overlay_label_super">SUPER</string>
+    <string name="hud_overlay_label_mouse">RATÓN</string>
+    <string name="hud_overlay_label_touchpad">PANEL TÁCTIL</string>
+    <string name="hud_overlay_label_scroll">DESPLAZAR</string>
+    <string name="hud_overlay_label_dpad">D-PAD</string>
+    <string name="listening_countdown">Esperando una tecla… (%1$d s)</string>
+    <string name="status_current_none">Actual: ninguna</string>
+    <string name="status_current">Actual: %1$s</string>
+    <string name="status_current_no_scancode">Actual: %1$s — esta tecla no envía ningún código de escaneo, así que el modo inmersivo no puede usarla. Asigna una tecla física, como Subir volumen.</string>
+    <string name="keycode_unknown">Código de tecla %1$d</string>
+    <string name="scancode_unknown">Código de escaneo %1$d</string>
+
+    <!-- Immersive mode -->
+    <string name="section_immersive">Modo inmersivo</string>
+    <string name="immersive_switch">Activar modo inmersivo</string>
+    <string name="immersive_hint">Envía la entrada táctil, de teclado, de ratón y de mando directamente al escritorio Linux, sin que interfieran los gestos de Android. Requiere root. Configura abajo una tecla de activación: púlsala una vez para entrar y otra vez para salir. El modo también termina cuando cambias de aplicación.</string>
+    <string name="immersive_hud_touch_switch">Usar los controles del HUD en modo inmersivo</string>
+    <string name="immersive_hud_touch_hint">Mantiene en funcionamiento las teclas, el D-Pad y el panel táctil del HUD mientras la pantalla táctil está capturada. Desactívalo para enviar todos los toques directamente al escritorio; el HUD solo se mostrará, sin responder al tacto.</string>
+    <string name="immersive_oplus_refresh_rate_switch">Mantener fija la frecuencia de actualización en OnePlus</string>
+    <string name="immersive_oplus_refresh_rate_hint">Evita caídas de la frecuencia de actualización en algunos dispositivos OnePlus cuando no se reciben eventos de entrada.</string>
+    <string name="bind_immersive_key_button">Asignar tecla del modo inmersivo</string>
+    <string name="immersive_exited">Modo inmersivo desactivado</string>
+    <string name="immersive_no_scancode">Primero asigna una tecla para el modo inmersivo</string>
+    <string name="immersive_failed">No se ha podido iniciar el modo inmersivo: se ha denegado el acceso root o no está disponible</string>
+    <string name="immersive_no_devices">No se ha podido iniciar el modo inmersivo: no se ha podido tomar el control de ningún dispositivo de entrada</string>
+    <string name="immersive_controller_failed">No se ha podido iniciar el modo inmersivo: ha fallado la supresión de mandos de Android; se ha cancelado la toma de control de la entrada</string>
+    <string name="immersive_controller_interrupted">El modo inmersivo ha terminado: se ha perdido la supresión de mandos de Android; se ha liberado el control de la entrada</string>
+    <string name="immersive_interrupted">El modo inmersivo ha terminado; la entrada ha vuelto a Android</string>
+    <string name="immersive_entering_mode">Modo inmersivo activado: %1$s</string>
+
+    <string name="immersive_gold_unknown">No se ha podido comprobar qué dispositivos ocupa Gold; se inicia sin dejar ninguno libre</string>
+    <string name="immersive_selection_invalid">La selección de dispositivos guardada no es válida; corrígela en los ajustes de Entrada inmersiva</string>
+    <string name="immersive_selection_filtered">Gold ocupa todos los dispositivos seleccionados, así que no queda ninguno que tomar</string>
+
+    <!-- Immersive input sources -->
+    <string name="cat_immersive_title">Modo inmersivo</string>
+    <string name="cat_immersive_subtitle">Control de la entrada a pantalla completa, tecla de activación y origen de la entrada</string>
+    <string name="immersive_inputs_title">Entrada inmersiva</string>
+    <string name="immersive_inputs_subtitle">Elige de dónde obtiene la entrada el modo inmersivo</string>
+    <string name="section_immersive_inputs_source">Origen de la entrada</string>
+    <string name="section_immersive_inputs_direct">Nodos de eventos que se tomarán</string>
+    <string name="section_immersive_inputs_scope">Qué abarca</string>
+
+    <string name="immersive_inputs_direct_blurb">Actualmente: Anland toma directamente los nodos de eventos físicos y Android no puede verlos mientras tanto. Requiere root.</string>
+    <string name="immersive_inputs_bus_hint">Gold reasigna el teclado; Anland toma su salida en exclusiva y la envía directamente al escritorio.</string>
+    <string name="immersive_inputs_combined_hint">Anland toma la entrada táctil, los punteros y los mandos junto con la salida del teclado reasignado por Gold.</string>
+    <string name="immersive_inputs_bus_scope">Requiere root y el módulo Gold Keyboard Remaps. Todas las teclas reasignadas del teclado, incluidas Meta y los atajos del sistema, van al escritorio durante la sesión. La entrada táctil, el ratón y los gestos de Android siguen disponibles. Al salir de la aplicación o bloquear la pantalla se libera el teclado.</string>
+    <string name="immersive_inputs_direct_hint">Solo se toman los dispositivos marcados abajo, incluidos los mandos. Los dispositivos que Gold ha confirmado que ocupa se muestran, pero no se pueden seleccionar. Los mandos solo pausan la entrada de Android; el escritorio Linux los lee directamente a través del /dev/input montado.</string>
+    <string name="immersive_inputs_auto">Elegir dispositivos automáticamente</string>
+    <string-array name="immersive_source_options">
+        <item>Anland toma los dispositivos (directo)</item>
+        <item>Teclado de Gold directamente al escritorio</item>
+        <item>Entrada táctil, punteros y mandos directos + teclado de Gold</item>
+    </string-array>
+    <string name="immersive_source_unavailable">Requiere el módulo Gold Keyboard Remaps, que no está instalado o no se está ejecutando</string>
+    <string name="immersive_auto_enter">Entrar automáticamente en el modo inmersivo</string>
+    <string name="immersive_auto_enter_hint">Envía automáticamente el teclado de Gold al escritorio cuando esta aplicación vuelve a primer plano. La entrada táctil y los gestos de Android siguen disponibles.</string>
+    <string name="immersive_inputs_loading">Comprobando dispositivos…</string>
+    <string name="immersive_inputs_found">Los dispositivos ocupados por Gold se muestran, pero no se pueden seleccionar.</string>
+    <string name="immersive_inputs_unknown">No se ha podido comprobar qué dispositivos ocupa Gold, así que ninguno aparece como ocupado. No hay garantía de que alguno esté libre.</string>
+    <string name="immersive_inputs_occupied">✕ %1$s — ocupado por Gold</string>
+    <string name="immersive_inputs_system_power">✕ %1$s — se mantiene en Android para conservar el control del botón de encendido</string>
+    <string name="device_class_keyboard">Teclado</string>
+    <string name="device_class_keys">Nodo de botones</string>
+    <string name="device_class_mouse">Ratón</string>
+    <string name="device_class_gamepad">Mando / joystick</string>
+    <string name="device_class_touchpad">Panel táctil</string>
+    <string name="device_class_touchscreen">Pantalla táctil</string>
+    <string name="bus_usb">USB</string>
+    <string name="bus_bluetooth">Bluetooth</string>
+    <string name="bus_builtin">Integrado</string>
+    <string name="bus_virtual">Virtual</string>
+    <string name="bus_i2c">I2C</string>
+    <string name="bus_spi">SPI</string>
+    <string name="bus_other">Bus %1$s</string>
+    <string name="immersive_inputs_remembered">Guardados: %1$s. Disponibles ahora: %2$s.</string>
+    <string name="immersive_inputs_all_filtered">Gold ocupa todos los dispositivos que has guardado. El modo inmersivo no se iniciará hasta que eso cambie; tu selección no se ha modificado.</string>
+    <string name="immersive_inputs_none">No se ha encontrado ningún dispositivo de entrada.</string>
+    <string name="immersive_inputs_unavailable">No se han podido enumerar los dispositivos de entrada: se ha denegado el acceso root o no está disponible.</string>
+
+    <!-- Accessibility -->
+    <string name="accessibility_switch">Interceptación de teclas mediante accesibilidad</string>
+    <string name="accessibility_hint">Intercepta las teclas de función (Fn, F1-F12, etc.) mediante AccessibilityService y convierte las teclas Atrás del teclado de tablet y Atrás del navegador en ESC. Actívalo si las combinaciones con Fn o la tecla ESC de un teclado externo no llegan correctamente al escritorio. Requiere conceder el permiso de accesibilidad en Ajustes del sistema &gt; Accesibilidad (solo una vez).</string>
+
+    <!-- Extra keys bar -->
+    <!-- Custom layout editor -->
+
+    <!-- Touchpad -->
+    <string name="touchpad_mode_switch">Modo panel táctil (movimiento relativo)</string>
+    <string name="touchpad_hint">Activado: al deslizar el dedo se mueve el cursor del ratón (relativo). Desactivado: cada toque corresponde directamente a un punto de la pantalla (absoluto).</string>
+    <string name="pointer_capture_switch">Capturar puntero externo</string>
+    <string name="pointer_capture_hint">Fija un ratón o panel táctil externo a la vista del escritorio y usa movimiento relativo, de modo que al llegar al borde superior o inferior no aparecen las barras del sistema de Android. Usa Atrás de Android para liberarlo temporalmente; haz clic en la vista del escritorio para volver a capturarlo. La entrada táctil de la pantalla no se ve afectada.</string>
+    <string name="pointer_capture_released">Puntero externo liberado. Haz clic en la vista del escritorio para volver a capturarlo.</string>
+    <string name="mouse_sensitivity_label">Sensibilidad del puntero del panel táctil (aceleración)</string>
+    <string name="mouse_accel_value">%1$.1fx</string>
+    <string name="scroll_reverse_switch">Invertir dirección de desplazamiento</string>
+    <string name="scroll_reverse_hint">Activado: el contenido sigue a los dedos (desplazamiento «natural»). Se aplica al desplazamiento con dos dedos tanto en el panel táctil en pantalla como en el físico.</string>
+    <string name="scroll_speed_label">Velocidad de desplazamiento con dos dedos</string>
+    <string name="scroll_speed_value">%1$.2f</string>
+    <string name="threshold_factor_value">%1$.2f× tolerancia de toque</string>
+    <string name="scroll_threshold_label">Umbral de detección de desplazamiento</string>
+    <string name="scroll_threshold_hint">Distancia que debe recorrer un dedo para que se considere que se está moviendo. Redúcelo si un pellizco se interpreta como desplazamiento.</string>
+    <string name="move_threshold_label">Umbral de confirmación de gestos</string>
+    <string name="move_threshold_hint">Distancia que debe recorrer el dedo principal antes de resolver un gesto ambiguo con dos dedos. Redúcelo si el desplazamiento tarda en activarse.</string>
+    <string name="gesture_scale_label">Magnitud de los gestos</string>
+    <string name="gesture_scale_value">%1$.0f px</string>
+    <string name="gesture_scale_hint">Los gestos que se reenvían como toques (pellizcar, tres o más dedos) se asignan a un cuadrado de este tamaño centrado en el puntero. Con valores más altos, el mismo movimiento del dedo recorre más distancia.</string>
+    <string name="disable_multi_finger_switch">Desactivar el pellizco y los gestos con varios dedos</string>
+    <string name="disable_multi_finger_hint">Activado: el pellizco o zoom con dos dedos y los gestos con tres o más dedos se descartan y nunca llegan al escritorio; el desplazamiento y el clic derecho con dos dedos siguen funcionando. Desactivado: el pellizco y los gestos con varios dedos se reenvían al escritorio como toques.</string>
+
+    <!-- Connection -->
+    <string name="socket_path_label">Ruta del socket del daemon</string>
+    <string name="second_window_label">Abrir una segunda ventana (con su propio daemon y título)</string>
+    <string name="second_window_name_hint">Nombre de la ventana (p. ej., trabajo)</string>
+    <string name="second_window_open">Abrir segunda ventana</string>
+    <string name="root_switch">Conectar con root (proceso auxiliar)</string>
+    <string name="root_hint">Inicia un proceso auxiliar con root (su) que se conecta al socket y pasa la conexión a la aplicación. Se aplica en la próxima conexión (vuelve a abrir la aplicación).</string>
+    <string name="topapp_switch">Activar planificación de primer plano (root)</string>
+    <string name="topapp_hint">Da al escritorio Linux la prioridad de CPU de primer plano de Android. Selecciona abajo el alcance de la planificación; los cambios se aplican en la próxima conexión.</string>
+    <string name="topapp_mode_label">Alcance de la planificación de primer plano</string>
+    <string-array name="topapp_mode_options">
+        <item>1 - Aplicación activa</item>
+        <item>2 - Toda la sesión de escritorio</item>
+    </string-array>
+    <string name="topapp_mode_focused_hint">Modo 1: mantiene KWin y el ámbito de la aplicación activa en top-app. Se incluyen los procesos existentes de ese ámbito y sus procesos hijo; la aplicación anterior se restaura cuando cambia el foco.</string>
+    <string name="topapp_mode_whole_hint">Modo 2: mueve todo el árbol de procesos del escritorio de Anland a top-app hasta la desconexión. Las aplicaciones y los servicios en segundo plano también reciben prioridad, lo que consume más energía, pero da a la sesión la máxima prioridad.</string>
+    <string name="topapp_stops_label">Nombres de procesos donde detener el escaneo (opcional)</string>
+    <string name="topapp_stops_hint">p. ej., systemd:init (separados por «:»); si se deja vacío, se usan los valores integrados predeterminados</string>
+    <string name="mic_switch">Reenviar el micrófono al escritorio</string>
+    <string name="mic_hint">El audio del escritorio siempre se reproduce por el altavoz de este dispositivo. Si activas esta opción, el micrófono también se envía en sentido contrario. Se aplica en la próxima conexión (vuelve a abrir la aplicación).</string>
+    <string name="camera_switch">Reenviar la cámara al escritorio</string>
+    <string name="camera_hint">Permite que el escritorio abra las cámaras de este dispositivo como fuente de vídeo. La cámara solo se enciende mientras el escritorio está grabando. Se aplica la próxima vez que vuelvas a la aplicación; la primera vez se solicita el permiso de cámara.</string>
+    <string name="audio_keepalive_switch">Mantener el audio activo</string>
+    <string name="audio_keepalive_hint">Mantiene en marcha el flujo de salida de audio para que los sonidos cortos de Linux (cambios de volumen, clics de teclas) se reproduzcan siempre al instante. Consume un poco de energía en reposo. Desactivado: la ruta de audio entra en reposo tras ~1,5 s de silencio en el escritorio y se reactiva con el siguiente sonido. Si la latencia audible no se ajusta a tus preferencias, puede que tengas que cambiar los preajustes de latencia de audio de abajo.</string>
+    <string name="audio_latency_title">Latencia de audio</string>
+    <string name="latency_speaker_label">Altavoz (escritorio → teléfono)</string>
+    <string name="latency_mic_label">Micrófono (teléfono → escritorio)</string>
+    <string name="latency_hint">Los preajustes más bajos reducen la latencia, pero pueden causar chasquidos o cortes en un dispositivo con mucha carga. Se aplica al volver a la vista del escritorio.</string>
+
+    <!-- Resolution -->
+    <string name="width_hint">Ancho (p. ej., 1920)</string>
+    <string name="height_hint">Alto (p. ej., 1080)</string>
+    <string name="resolution_hint">Elige un preajuste o introduce los valores manualmente. Deja 0 para usar la resolución nativa. «Pantalla ×» escala el panel de este dispositivo (en horizontal). Se aplica en la próxima conexión.</string>
+    <string name="auto_stretch_switch">Estirar la imagen automáticamente</string>
+    <string name="auto_stretch_hint">Si está activado, la imagen ocupa toda la pantalla (estirada si es necesario). Si está desactivado, la imagen mantiene la relación de aspecto de la resolución personalizada con bandas negras (formato buzón). Las coordenadas de entrada se ajustan automáticamente.</string>
+
+    <!-- Settings notification -->
+    <string name="notification_switch">Mostrar notificación de ajustes</string>
+    <string name="notification_hint">Muestra una notificación persistente mientras la aplicación está abierta; al tocarla, se abren directamente los ajustes. Desactívala para ocultarla. Se aplica la próxima vez que vuelvas a la aplicación.</string>
+    <string name="notification_channel_name">Anland</string>
+    <string name="notification_channel_desc">Acceso rápido a Anland</string>
+    <string name="notification_title">Anland</string>
+    <string name="notification_text">Toca para abrir los ajustes</string>
+
+    <!-- Toasts -->
+    <string name="toast_no_picker">No hay ningún selector de archivos disponible</string>
+    <string name="toast_read_failed">No se ha podido leer el archivo</string>
+
+    <!-- Hardware key names -->
+    <string name="key_volume_up">Subir volumen</string>
+    <string name="key_volume_down">Bajar volumen</string>
+    <string name="key_volume_mute">Silenciar</string>
+    <string name="key_power">Encendido</string>
+    <string name="key_camera">Cámara</string>
+    <string name="key_headset_hook">Botón de los auriculares</string>
+    <string name="key_media_play_pause">Multimedia: reproducir/pausar</string>
+    <string name="key_media_next">Multimedia: siguiente</string>
+    <string name="key_media_previous">Multimedia: anterior</string>
+    <string name="key_brightness_up">Subir brillo</string>
+    <string name="key_brightness_down">Bajar brillo</string>
+    <string name="key_home">Inicio</string>
+    <string name="key_back">Atrás</string>
+
+    <!-- Audio latency presets -->
+    <string-array name="latency_labels">
+        <item>Automática (predeterminada del motor)</item>
+        <item>Ultrabaja (~1 ms)</item>
+        <item>Baja (~3 ms)</item>
+        <item>Equilibrada (~5 ms)</item>
+        <item>Segura (~10 ms)</item>
+        <item>Holgada (~20 ms)</item>
+    </string-array>
+
+    <!-- Resolution presets -->
+    <string-array name="res_preset_labels">
+        <item>Preajuste…</item>
+        <item>Automática (0×0, nativa)</item>
+        <item>4K (3840×2160)</item>
+        <item>2K (2560×1440)</item>
+        <item>1080p (1920×1080)</item>
+        <item>720p (1280×720)</item>
+        <item>480p (854×480)</item>
+        <item>Pantalla × 1,0</item>
+        <item>Pantalla × 0,8</item>
+        <item>Pantalla × 0,75</item>
+        <item>Pantalla × 0,5</item>
+        <item>Pantalla × 0,25</item>
+    </string-array>
+    <string name="pad_tap">Panel táctil externo: clics sintéticos</string>
+    <string name="pad_tip">Controla los toques con uno y dos dedos y el arrastre con pulsación larga en paneles táctiles externos capturados o en modo inmersivo. Los botones físicos siguen funcionando aunque esté desactivado. El panel táctil en pantalla no cambia.</string>
+    <string name="pad_guard">Ignorar los toques del panel táctil externo durante %1$d ms después de desplazarse (0 = desactivado)</string>
+    <string name="pad_debug">Registro de depuración del panel táctil (AnlandTouchpad)</string>
+
+    <!-- HUD editor -->
+    <string name="hud_delete_short">SUPR</string>
+    <string name="hud_duplicate_short">DUPL</string>
+    <string name="hud_delete_confirm">¿CONFIRMAR?</string>
+    <string name="hud_title_button_properties">PROPIEDADES DEL BOTÓN</string>
+    <string name="hud_properties_title">PROPIEDADES: %1$s</string>
+    <string name="hud_dock_button_properties">PROPIEDADES DEL BOTÓN DEL DOCK</string>
+    <string name="hud_widget_button">BOTÓN</string>
+    <string name="hud_widget_super_gesture">GESTO SUPER</string>
+    <string name="hud_widget_trackpoint">TRACKPOINT</string>
+    <string name="hud_widget_touchpad">PANEL TÁCTIL</string>
+    <string name="hud_widget_scrollbar">BARRA DE DESPLAZAMIENTO</string>
+    <string name="hud_widget_dpad">D-PAD</string>
+    <string name="hud_display_label">Etiqueta visible</string>
+    <string name="hud_width_dp">Ancho (dp):</string>
+    <string name="hud_height_dp">Alto (dp):</string>
+    <string name="hud_corner_dp">Esquina (dp):</string>
+    <string name="hud_opacity_percent">Opacidad (%):</string>
+    <string name="hud_action_mapping">Asignación de acciones:</string>
+    <string name="hud_main_action">Acción principal</string>
+    <string name="hud_popup_swipe_up">Emergente (deslizar hacia arriba)</string>
+    <string name="hud_swipe_actions">Acciones por dirección</string>
+    <string name="hud_direction_left">Izquierda</string>
+    <string name="hud_direction_right">Derecha</string>
+    <string name="hud_direction_up">Arriba</string>
+    <string name="hud_direction_down">Abajo</string>
+    <string name="hud_trackpoint_mode">Modo TrackPoint:</string>
+    <string name="hud_mode">Modo</string>
+    <string name="hud_mode_mouse">RATÓN</string>
+    <string name="hud_mode_scroll">DESPLAZAMIENTO</string>
+    <string name="hud_orientation_vertical">VERTICAL</string>
+    <string name="hud_orientation_horizontal">HORIZONTAL</string>
+    <string name="hud_sensitivity_x10">Sensibilidad (x10):</string>
+    <string name="hud_deadzone_dp">Zona muerta (dp):</string>
+    <string name="hud_color_theme">Tema de color:</string>
+    <string name="hud_haptic_feedback">Respuesta háptica</string>
+    <string name="hud_hold_to_repeat">Repetir al mantener pulsado</string>
+    <string name="hud_nudge_position">Ajuste fino de la posición (paso a paso):</string>
+    <string name="hud_unassigned">Sin asignar</string>
+    <string name="hud_text_action">Texto: %1$s</string>
+    <string name="hud_system_action">Sistema: %1$s</string>
+    <string name="hud_key_code">Tecla %1$d</string>
+    <string-array name="hud_color_theme_names">
+        <item>Pizarra</item>
+        <item>Cian</item>
+        <item>Carmesí</item>
+        <item>Ámbar</item>
+        <item>Esmeralda</item>
+        <item>Sigilo</item>
+    </string-array>
+
+    <string name="hud_picker_back">ATRÁS</string>
+    <string name="hud_picker_title">SELECCIONAR TECLA / ACCIÓN</string>
+    <string name="hud_picker_search">Buscar teclas…</string>
+    <string name="hud_tab_keys">TECLAS</string>
+    <string name="hud_tab_mods_system">MODIF. Y SIST.</string>
+    <string name="hud_tab_combo">COMBINACIÓN</string>
+    <string name="hud_none">Ninguna</string>
+    <string name="hud_system_soft_keyboard">Teclado en pantalla</string>
+    <string name="hud_system_virtual_keyboard">Teclado virtual</string>
+    <string name="hud_system_settings">Ajustes</string>
+    <string name="hud_system_mouse_left">Clic izquierdo</string>
+    <string name="hud_system_mouse_right">Clic derecho</string>
+    <string name="hud_system_mouse_middle">Clic central</string>
+    <string name="hud_system_scroll_up">Desplazar hacia arriba</string>
+    <string name="hud_system_scroll_down">Desplazar hacia abajo</string>
+    <string name="hud_combo_slot">Casilla %1$d</string>
+    <string name="hud_combo_builder_hint">Elige hasta 3 teclas. La casilla activa aparece resaltada; elige una tecla para rellenarla.</string>
+    <string name="hud_combo_clear_all">BORRAR TODO</string>
+    <string name="hud_combo_apply">APLICAR COMBINACIÓN</string>
+    <string name="hud_combo_empty">(vacía)</string>
+    <string name="hud_layout_1">Cambiar al diseño 1</string>
+    <string name="hud_layout_2">Cambiar al diseño 2</string>
+    <string name="hud_layout_3">Cambiar al diseño 3</string>
+    <string name="hud_slot_1">Diseño 1</string>
+    <string name="hud_slot_2">Diseño 2</string>
+    <string name="hud_slot_3">Diseño 3</string>
+    <string name="hud_export_choose">Elige el diseño que quieres exportar</string>
+    <string name="hud_import_choose">Elige el diseño que quieres sustituir</string>
+    <string name="hud_import_source_choose">Elige un diseño de la copia de seguridad</string>
+    <string name="hud_appearance">Aspecto</string>
+    <string name="hud_conditions">Condiciones de activación</string>
+    <string name="hud_send_on_release">Enviar al soltar (sin repetición)</string>
+    <string name="hud_send_immediately">Enviar inmediatamente al pulsar</string>
+    <string name="hud_system_toggle_hud_hidden">Ocultar / restaurar HUD</string>
+    <string name="hud_long_press_action">Acción al mantener pulsado</string>
+    <string name="hud_long_press_delay">Tiempo de pulsación (ms)</string>
+    <string name="hud_long_press_hint">Con «Enviar al soltar», la acción principal no se envía después de una pulsación larga. En el modo inmediato, la acción principal ya se habrá enviado.</string>
+    <string name="hud_resize_panel">Arrastra para cambiar el tamaño del panel de propiedades</string>
+
+    <!-- The app selects the mode; KDE follows the reported buffer format. -->
+    <string name="hdr_switch">HDR de 10 bits (experimental)</string>
+    <string name="hdr_hint">Para pantallas HDR10 y backends actualizados de KDE, GNOME, Hyprland, Gamescope o Denial. El backend aplica este ajuste cuando el escritorio se vuelve a conectar. Después de cambiarlo, cierra y vuelve a abrir la ventana del escritorio; las ventanas existentes mantienen su modo. Salida fija BT.2020/PQ con un pico de 1000 nits. Usa el botón de brillo contiguo para ajustar en directo el blanco de referencia SDR. No hay cambio automático a SDR ni negociación de metadatos HDR.</string>
+    <string name="hdr_error_title">Conexión HDR rechazada</string>
+    <string name="hdr_error_unsupported">El modo de pantalla actual no indica compatibilidad con HDR10/PQ. Esta ventana se ha detenido sin volver a SDR. Para usar SDR, cierra la ventana del escritorio, desactiva este ajuste y vuelve a abrirla. Los backends compatibles se adaptan automáticamente.</string>
+    <string name="hdr_error_surface">Android no ha podido configurar o mantener una superficie BT.2020/PQ de 10 bits. Esta ventana se ha detenido sin volver a SDR. Consulta el registro de Anland para ver el error del formato de búfer o de la superficie. Para usar SDR, cierra la ventana del escritorio, desactiva este ajuste y vuelve a abrirla. Los backends compatibles se adaptan automáticamente.</string>
+    <string name="hdr_brightness_button">Brillo · %1$d nits</string>
+    <string name="hdr_brightness_accessibility">Blanco de referencia SDR en HDR: %1$d nits. Ajustar el brillo</string>
+    <string name="hdr_brightness_title">Brillo del escritorio en HDR</string>
+    <string name="hdr_brightness_hint">Ajusta el blanco de referencia SDR entre 80 y 500 nits (203 de forma predeterminada). Prueba con 300 o 400 nits si todo el escritorio se ve oscuro. Los cambios se guardan y se aplican al instante en las ventanas HDR abiertas con backends actualizados. Esto cambia el brillo del escritorio, no el nivel de negro ni el pico HDR de 1000 nits.</string>
+    <string name="hdr_brightness_value">%1$d nits</string>
+    <string name="hdr_brightness_reset">Restablecer 203 nits</string>
+    <string name="hdr_content_gain_button">Ganancia de brillo HDR · %1$.2f×</string>
+    <string name="hdr_content_gain_accessibility">Ganancia de brillo del contenido HDR: %1$.2f veces. Ajustar la ganancia</string>
+    <string name="hdr_content_gain_title">Ganancia de brillo HDR</string>
+    <string name="hdr_content_gain_hint">Ajusta el contenido HDR nativo entre 0,5× y 2,0× (1,0× de forma predeterminada). El brillo del escritorio SDR no cambia. Los cambios se guardan y se aplican al instante con backends actualizados. Las altas luces siguen limitadas por el pico de salida; los menús o subtítulos dibujados dentro de una superficie HDR también cambian.</string>
+    <string name="hdr_content_gain_value">%1$.2f×</string>
+    <string name="hdr_content_gain_reset">Restablecer 1,0×</string>
+</resources>
