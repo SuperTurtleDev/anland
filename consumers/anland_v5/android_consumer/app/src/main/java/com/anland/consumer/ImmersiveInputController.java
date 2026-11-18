@@ -36,7 +36,7 @@ final class ImmersiveInputController {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private ImmersiveInputSource runningSource = ImmersiveInputSource.DIRECT_EVENT_NODES;
-    private KeyEvent consumedTrigger;
+    private final KeyPresses consumedKeys = new KeyPresses();
 
     ImmersiveInputController(ImmersiveMode.Host host) {
         this.ctx = host.context();
@@ -109,7 +109,6 @@ final class ImmersiveInputController {
      * leaving it is what takes Gold off again.
      */
     void onSessionActiveChanged(boolean active) {
-        direct.clearToggleKeys();
         setAnlandProfileRequest(active);
     }
 
@@ -174,25 +173,18 @@ final class ImmersiveInputController {
             runningSource = current;
         }
 
-        if (!direct.isBoundToggle(event))
-            return false;
-        boolean matches = direct.updateToggleKeys(event);
-        boolean wasConsumed = consumedTrigger != null
-                && event.getDeviceId() == consumedTrigger.getDeviceId()
-                && event.getScanCode() == consumedTrigger.getScanCode()
-                && event.getKeyCode() == consumedTrigger.getKeyCode();
-        boolean freshDown = event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0;
-        if (wasConsumed && (freshDown || event.getAction() == KeyEvent.ACTION_UP))
-            consumedTrigger = null;
-        if (direct.consumeSuppressedToggle(event))
+        boolean tail = consumedKeys.consumeTail(event);
+        boolean matches = direct.isBoundToggle(event) && direct.updateToggleKeys(event);
+        if (tail)
             return true;
-
-        if (!freshDown)
-            return wasConsumed;
+        if (direct.consumeNativeToggle(event)) {
+            consumedKeys.add(event);
+            return true;
+        }
         if (!matches)
             return false;
 
-        consumedTrigger = new KeyEvent(event);
+        consumedKeys.add(event);
         if (isActive()) {
             stopSession();
         } else {
@@ -231,8 +223,6 @@ final class ImmersiveInputController {
     }
 
     private void stopSession() {
-        // Leaves the toggle's own release swallowed, so the key that ended the
-        // session does not then reach the desktop.
         direct.requestStop();
     }
 
@@ -335,7 +325,7 @@ final class ImmersiveInputController {
      */
     void stop() {
         direct.clearToggleKeys();
-        consumedTrigger = null;
+        consumedKeys.clear();
         direct.stop();
         // Warm the occupancy answer for the next press. Left to the resume
         // refresh, a session started more than a few seconds later finds the

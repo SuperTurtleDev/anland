@@ -30,7 +30,7 @@
     </string-array>
 
     <!-- Bind key -->
-    <string name="bind_key_button">Bind Soft Keyboard Toggle Key</string>
+    <string name="bind_key_button">Bind Soft Keyboard Shortcut</string>
     <string name="landscape_split_keyboard">Use split arc keyboard in landscape</string>
     <string name="landscape_split_keyboard_hint">Separates letter keys into left and right thumb clusters when the screen is landscape.</string>
     <string name="customize_keyboard_wings">Customize thumb wings…</string>
@@ -122,6 +122,7 @@
     <string name="hud_overlay_label_scroll">SCROLL</string>
     <string name="hud_overlay_label_dpad">D-PAD</string>
     <string name="listening_countdown">Listening… (%1$ds)</string>
+    <string name="key_binding_release">Release keys to save</string>
     <string name="status_current_none">Current: None</string>
     <string name="status_current">Current: %1$s</string>
     <string name="status_current_no_scancode">Current: %1$s — this key reports no scan code, so immersive mode cannot use it. Bind a hardware key such as Volume Up.</string>

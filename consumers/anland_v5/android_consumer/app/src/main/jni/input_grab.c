@@ -148,7 +148,7 @@ struct dev_entry {
     int  grabbed;    /* 0 =>
                         watched only (toggle detection), events not forwarded */
     int  gold;
-    int  waiting_idle; /* finish Android's held keys before taking Gold output */
+    int  waiting_idle; /* finish Android's held keys before grabbing */
     int  announced;  /* the app has received this entry's DEVICE record */
     int  alpha;      /* a full keyboard, not just a node that happens to have keys */
     int  watch_only; /* classified as tracked-but-never-grabbed */
@@ -161,7 +161,8 @@ struct dev_entry {
     int  min_x, max_x, min_y, max_y;
     int  tablet_range_count;
     struct tablet_axis_range tablet_ranges[IGRAB_MAX_TABLET_RANGES];
-    int  toggle_capable; /* cached: the session toggle key exists on this node */
+    int  toggle_capable; /* all of the toggle keys exist on this node */
+    int  monotonic_events;
     struct toggle_state toggle_state;
     char name[256]; /* full identity, not the shortened discovery/display label */
 };
@@ -173,6 +174,7 @@ static int g_gamepad_setup_failed = 0;
 struct toggle_watch {
     int fd;
     struct toggle_state toggle_state;
+    int monotonic_events;
     char name[80];
 };
 static struct toggle_watch g_toggle_watches[IGRAB_MAX_DEVICES];
@@ -185,6 +187,9 @@ static int g_session_toggle = -1;
 #define MAX_TOGGLE_KEYS 3
 static unsigned int g_toggle_keys[MAX_TOGGLE_KEYS];
 static unsigned int g_toggle_key_count;
+/* When Android also receives the exit key, identify that exact down. */
+static unsigned int g_shared_toggle_scan;
+static uint64_t g_shared_toggle_time_ms;
 static int start_gamepad_lease(struct dev_entry *entry, const char *path);
 static int stop_gamepad_lease(struct dev_entry *entry);
 static int update_gamepad_leases(void);
@@ -730,7 +735,7 @@ static int controlled_device_count(void)
     return count;
 }
 
-static int pending_gold(void)
+static int pending_keyboard_grabs(void)
 {
     for (int i = 0; i < g_ndevs; i++)
         if (g_devs[i].fd >= 0 && g_devs[i].waiting_idle)
@@ -740,7 +745,7 @@ static int pending_gold(void)
 
 static int pending_setup(void)
 {
-    return pending_gamepad_leases() || pending_gold();
+    return pending_gamepad_leases() || pending_keyboard_grabs();
 }
 
 static int has_gold_output(void)
@@ -885,6 +890,11 @@ static int send_bye(int fd, int reason)
     memset(&rec, 0, sizeof(rec));
     rec.rtype = IGRAB_REC_BYE;
     rec.value = reason;
+    if (reason == IGRAB_BYE_TOGGLE && g_shared_toggle_scan) {
+        rec.code = (uint16_t)g_shared_toggle_scan;
+        rec.aux[IGRAB_BYE_TIME_LO] = (int32_t)(uint32_t)g_shared_toggle_time_ms;
+        rec.aux[IGRAB_BYE_TIME_HI] = (int32_t)(uint32_t)(g_shared_toggle_time_ms >> 32);
+    }
     /* Blocking on purpose: this is the last record and the socket has a send
      * timeout, so it cannot hang. Losing it would leave the app waiting for a
      * stream that has already ended. */
@@ -1028,7 +1038,7 @@ static int is_builtin_bus(unsigned int bus)
 }
 
 /* Preserve Android's matching key releases before switching the output owner. */
-static int grab_idle_gold(struct dev_entry *entry)
+static int grab_idle_keyboard(struct dev_entry *entry)
 {
     unsigned long held[NBITS(KEY_MAX + 1)] = {0};
     if (query_input(entry->fd, EVIOCGKEY(sizeof(held)), held) < 0)
@@ -1161,14 +1171,14 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
         return -1;
     }
 
-    if (rel_xy) {
+    out->toggle_capable = has_toggle_keys(key, g_session_toggle);
+    if (rel_xy || out->toggle_capable) {
         int clock_id = CLOCK_MONOTONIC;
-        if (query_input(fd, EVIOCSCLOCKID, &clock_id) < 0)
-            LOGE("%s: monotonic mouse timestamps unavailable: %s; using device clock",
-                 path, strerror(errno));
+        out->monotonic_events = query_input(fd, EVIOCSCLOCKID, &clock_id) >= 0;
+        if (!out->monotonic_events)
+            LOGE("%s: monotonic timestamps unavailable: %s", path, strerror(errno));
     }
     out->multitouch = mt;
-    out->toggle_capable = has_toggle_keys(key, g_session_toggle);
     /* A clickpad has one button under the whole surface, so every press comes in
      * as BTN_LEFT and the app has to work out left vs right from where the
      * finger is. INPUT_PROP_BUTTONPAD is the authoritative bit; a pad that
@@ -1246,12 +1256,12 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
         return 0;
     }
 
-    if (out->gold) {
-        /* These are already remapped events. Taking the output leaves Gold's
-         * physical grab and Anland profile intact, while Android gets no keys.
-         * If the entry key is still held, let its UP reach Android first. */
+    if (out->gold || (g_toggle_key_count
+            && (out->cls == IGRAB_CLASS_KEYBOARD || out->toggle_capable))) {
+        /* Android may have forwarded keys before the chord was completed.
+         * Let the matching releases go through Android before taking over. */
         out->waiting_idle = 1;
-        if (grab_idle_gold(out) >= 0)
+        if (grab_idle_keyboard(out) >= 0)
             return 0;
         close(fd);
         return -1;
@@ -1526,7 +1536,7 @@ static int scan_devices(void)
             drop_inspected(&g_devs[g_ndevs]);
             continue;
         }
-        if (g_toggle_key_count && g_devs[g_ndevs].toggle_capable)
+        if (g_toggle_key_count && g_devs[g_ndevs].toggle_capable && !g_devs[g_ndevs].grabbed)
             read_toggle_keys(&g_devs[g_ndevs].toggle_state, g_devs[g_ndevs].fd);
         LOGI("%s '%s' class=%d %s", path, g_devs[g_ndevs].name,
              g_devs[g_ndevs].cls, g_devs[g_ndevs].grabbed ? "GRABBED" :
@@ -1722,7 +1732,7 @@ static int scan_new_devices(void)
             drop_inspected(&de);
             continue;
         }
-        if (g_toggle_key_count && de.toggle_capable)
+        if (g_toggle_key_count && de.toggle_capable && !de.grabbed)
             read_toggle_keys(&de.toggle_state, de.fd);
         g_devs[idx] = de;
         if (idx == g_ndevs)
@@ -1795,6 +1805,8 @@ static void scan_toggle_devices(int toggle)
         struct toggle_watch *watch = &g_toggle_watches[idx];
         watch->fd = fd;
         watch->toggle_state = (struct toggle_state){0};
+        int clock_id = CLOCK_MONOTONIC;
+        watch->monotonic_events = query_input(fd, EVIOCSCLOCKID, &clock_id) >= 0;
         if (g_toggle_key_count)
             read_toggle_keys(&watch->toggle_state, fd);
         if (query_input(fd, EVIOCGNAME(sizeof(watch->name)), watch->name) < 0)
@@ -1853,6 +1865,14 @@ static int toggle_matches(struct toggle_state *state, int fd,
     return 0;
 }
 
+static void record_shared_toggle(const struct input_event *event, int monotonic_events)
+{
+    if (!monotonic_events)
+        return;
+    g_shared_toggle_scan = event->code;
+    g_shared_toggle_time_ms = (uint64_t)event->time.tv_sec * 1000 + event->time.tv_usec / 1000;
+}
+
 static int pump_toggle_watch(int idx, int toggle)
 {
     struct input_event evs[DEVICE_EVENT_BATCH_SIZE];
@@ -1865,8 +1885,9 @@ static int pump_toggle_watch(int idx, int toggle)
     for (int i = 0; i < count; i++) {
         if (toggle_matches(&g_toggle_watches[idx].toggle_state, g_toggle_watches[idx].fd,
                            &evs[i], toggle)) {
-            LOGI("immersive exit key: read-only '%s' scancode=%d",
-                 g_toggle_watches[idx].name, toggle);
+            record_shared_toggle(&evs[i], g_toggle_watches[idx].monotonic_events);
+            LOGI("immersive exit key: read-only '%s' scancode=%u",
+                 g_toggle_watches[idx].name, evs[i].code);
             return 0;
         }
     }
@@ -1896,7 +1917,7 @@ static int send_device_list(int sock, int grabbed)
     }
 
     if (pending_setup())
-        return 0; // READY requires Android suppression and the Gold output grab.
+        return 0; // READY requires Android suppression and all selected grabs.
     memset(&rec, 0, sizeof(rec));
     rec.rtype = IGRAB_REC_READY;
     rec.aux[0] = controlled_device_count();
@@ -1925,25 +1946,19 @@ static int pump_device(int sock, int idx, int toggle)
     if (n == 0)
         return -2;      /* would otherwise spin: poll keeps reporting POLLIN */
 
-    if (g_devs[idx].waiting_idle) {
-        int ready = grab_idle_gold(&g_devs[idx]);
-        if (ready < 0)
-            return -2;
-        if (ready > 0)
-            g_devs[idx].announced = 0;
-        return 1; /* this batch belonged to Android before the grab */
-    }
-
     int count = (int)(n / (ssize_t)sizeof(struct input_event));
     for (int i = 0; i < count; i++) {
         struct input_event *e = &evs[i];
 
-        if ((g_toggle_key_count == 0 || g_devs[idx].toggle_capable)
+        if ((!g_devs[idx].waiting_idle || g_toggle_key_count)
+                && (g_toggle_key_count == 0 || g_devs[idx].toggle_capable)
                 && toggle_matches(&g_devs[idx].toggle_state, g_devs[idx].fd, e, toggle)) {
             /* Check before forwarding or the grabbed test: watched controllers
              * must also exit without Android KeyEvents. Forwarded devices swallow
              * this key; a direct desktop evdev reader still sees its own copy. */
-            LOGI("immersive exit key: device=%d scancode=%d", idx, toggle);
+            if (!g_devs[idx].grabbed)
+                record_shared_toggle(e, g_devs[idx].monotonic_events);
+            LOGI("immersive exit key: device=%d scancode=%u", idx, e->code);
             return 0;
         }
         if (g_toggle_key_count == 0 && e->type == EV_KEY && e->code == toggle)
@@ -1992,6 +2007,13 @@ static int pump_device(int sock, int idx, int toggle)
                  g_drops);
             return -3;
         }
+    }
+    if (g_devs[idx].waiting_idle) {
+        int ready = grab_idle_keyboard(&g_devs[idx]);
+        if (ready < 0)
+            return -2;
+        if (ready > 0)
+            g_devs[idx].announced = 0;
     }
     return 1; /* More queued input is handled on the next poll turn. */
 }
@@ -2133,7 +2155,7 @@ int main(int argc, char **argv)
         close(sock);
         return 4;
     }
-    if ((grabbed <= 0 && !pending_gold()) ||
+    if ((grabbed <= 0 && !pending_keyboard_grabs()) ||
             (g_source != SOURCE_PHYSICAL && !has_gold_output())) {
         LOGE("no grabbable input devices");
         release_all();
@@ -2145,8 +2167,8 @@ int main(int argc, char **argv)
     scan_toggle_devices(toggle);
     if (!toggle_chord_available()) {
         LOGE("no readable input node supports all toggle chord keys");
-        send_bye(sock, IGRAB_BYE_ERROR);
         release_all();
+        send_bye(sock, IGRAB_BYE_ERROR);
         close(sock);
         return 4;
     }
@@ -2253,7 +2275,7 @@ int main(int argc, char **argv)
             }
             if (!ready_sent && !pending_setup() && announced > 0) {
                 int controlled = controlled_device_count();
-                if (controlled == 0 && !pending_gold()) {
+                if (controlled == 0) {
                     reason = IGRAB_BYE_ERROR;
                     break;
                 }
@@ -2367,7 +2389,7 @@ int main(int argc, char **argv)
             if (device_is_live(&g_devs[i]))
                 alive++;
         }
-        if (alive == 0 && !pending_gold() && g_source != SOURCE_GOLD) {
+        if (alive == 0 && !pending_keyboard_grabs() && g_source != SOURCE_GOLD) {
             LOGI("all grabbed devices are gone; ending session");
             reason = IGRAB_BYE_ERROR;
             break;

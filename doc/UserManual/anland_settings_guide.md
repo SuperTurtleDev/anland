@@ -35,9 +35,9 @@ The version number at the bottom of the Settings home screen is only for identif
 <a id="bind-soft-keyboard"></a>
 #### Bind Soft Keyboard Toggle Key
 
-**Bind a key:** tap the button, then press the target hardware key within five seconds. If you do not press a key before the countdown ends, the binding is cleared.
+To bind the shortcut, tap the button and start pressing keys within five seconds. Hold one to three physical keys on the same keyboard, then release them to save. To clear the binding, tap the button and let the countdown finish without pressing a key.
 
-**Use the key:** while the Anland desktop has focus, press it to show or hide the Android system soft keyboard. The key is not sent to Linux, so choose one you do not normally need there.
+While the Anland desktop has focus and Android receives the keyboard's input, press all the bound keys together in any order to show or hide the system soft keyboard. Earlier keys reach Linux normally. Anland consumes the key that completes the shortcut.
 
 <a id="raise-desktop"></a>
 #### Raise desktop when soft keyboard opens

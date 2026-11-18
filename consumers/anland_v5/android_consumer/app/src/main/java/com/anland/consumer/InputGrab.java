@@ -400,7 +400,7 @@ final class InputGrab implements InputGrabTransport {
                          String chord) {
         if (running)
             return true;
-        ImmersiveShortcut shortcut = ImmersiveShortcut.parse(chord);
+        KeyChord shortcut = KeyChord.parse(chord);
         if (source == null || toggleScanCode < 0
                 || (!chord.isEmpty() && (!shortcut.isBound() || shortcut.firstKey() != toggleScanCode))
                 || (toggleScanCode == 0 && !source.allowsUnboundToggle()))
@@ -721,6 +721,14 @@ final class InputGrab implements InputGrabTransport {
                         break;
                     case REC_BYE:
                         batchLen = flush(batch, batchLen);
+                        if (value == REASON_TOGGLE && code > 0) {
+                            long time = (bb.getInt(rec + AUX0) & 0xffffffffL)
+                                    | ((long) bb.getInt(rec + AUX0 + 4) << 32);
+                            main.post(() -> {
+                                if (running && !stopping)
+                                    listener.onNativeToggle(code, time);
+                            });
+                        }
                         // The helper only sends this on its way out, so no kill
                         // is needed for this session.
                         finishedToken = token;

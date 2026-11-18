@@ -33,6 +33,9 @@ interface InputGrabTransport {
          */
         void onEvents(int[] batch, int count);
 
+        /** The helper saw an exit press also visible to Android. */
+        default void onNativeToggle(int scanCode, long eventTime) {}
+
         /** The session ended, for any reason, exactly once per {@code start}. */
         void onEnded(int reason);
     }

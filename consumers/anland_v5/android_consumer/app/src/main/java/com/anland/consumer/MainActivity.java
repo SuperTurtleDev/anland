@@ -69,7 +69,10 @@ public class MainActivity extends Activity
     private long lastReconnectTimeMs;
     private int connectedW;
     private int connectedH;
-    private static final String KEY_BOUND_KEYCODE = "bound_keycode";
+    static final String KEY_BOUND_KEYCODE = "bound_keycode";
+    static final String KEY_BOUND_SCANCODE = "bound_scancode";
+    static final String KEY_BOUND_CHORD = "bound_chord";
+    static final String KEY_BOUND_CHORD_LABEL = "bound_chord_label";
     private static final String KEY_SOCKET_PATH = "socket_path";
     private static final String KEY_USE_ROOT = "use_root";
     static final String KEY_TOPAPP = "topapp_scheduling";
@@ -370,6 +373,7 @@ public class MainActivity extends Activity
             lifecycleHandler.postDelayed(delayedFocusStop, FOCUS_STOP_DELAY_MS);
         }
         if (!hasFocus) {
+            softKeyboardChord.clearHeld();
             cancelOverlayTouches();
             tabletInput.cancelAll(SystemClock.uptimeMillis());
             releaseAllMouseButtons();
@@ -2425,23 +2429,43 @@ public class MainActivity extends Activity
         }
     }
 
-    /**
-     * Handle the user-bound soft-keyboard toggle in every key dispatch path.
-     * Accessibility interception runs before the Activity, so keeping this in
-     * one helper keeps the setting consistent for both routes.
-     */
-    private boolean handleSoftKeyboardToggleKey(KeyEvent event) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        int boundKeycode = prefs.getInt(KEY_BOUND_KEYCODE, -1);
-        if (boundKeycode == -1 || event.getKeyCode() != boundKeycode)
-            return false;
+    private String softKeyboardChordPreference = "";
+    private KeyChord softKeyboardChord = KeyChord.parse("");
+    private final KeyPresses softKeyboardPresses = new KeyPresses();
 
-        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0)
-            systemIme.toggleSystemKeyboard();
-        // Consume both the press and release. Once the IME owns focus, allowing
-        // the release to continue through the normal dispatch path can send a
-        // stray key-up to Linux and leave its key state stuck.
-        return true;
+    private boolean updateSoftKeyboardShortcut(KeyEvent event) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String saved = prefs.getString(KEY_BOUND_CHORD, "");
+        if (!saved.equals(softKeyboardChordPreference)) {
+            softKeyboardChordPreference = saved;
+            softKeyboardChord = KeyChord.parse(saved);
+        }
+        if (softKeyboardChord.isBound())
+            return softKeyboardChord.update(event);
+        if (!KeyPresses.isFreshDown(event))
+            return false;
+        int scan = prefs.getInt(KEY_BOUND_SCANCODE, -1);
+        int code = prefs.getInt(KEY_BOUND_KEYCODE, -1);
+        return scan > 0 ? event.getScanCode() == scan : event.getKeyCode() == code;
+    }
+
+    private void toggleSoftKeyboard(KeyEvent event) {
+        softKeyboardPresses.add(event);
+        if (softKeyboardChord.isBound()) {
+            // The IME can take focus before Android delivers the prefix keys' UPs.
+            java.util.List<Long> held = new java.util.ArrayList<>(forwardedKeys.keySet());
+            for (int i = held.size() - 1; i >= 0; i--) {
+                long key = held.get(i);
+                if ((int) (key >> 32) != event.getDeviceId()
+                        || softKeyboardChord.keyBit((int) key) == 0)
+                    continue;
+                int evdev = forwardedKeys.remove(key);
+                softKeyboardPresses.add(key);
+                if (mNative != null && !forwardedKeys.containsValue(evdev))
+                    mNative.sendKey(1, evdev);
+            }
+        }
+        systemIme.toggleSystemKeyboard();
     }
 
     // Apply the screen-orientation preference (default / landscape / portrait).
@@ -2975,10 +2999,18 @@ public class MainActivity extends Activity
      * @return true when the event was consumed
      */
     private boolean handleSourceAwareKey(KeyEvent event) {
+        boolean softShortcut = updateSoftKeyboardShortcut(event);
+        boolean softTail = softKeyboardPresses.consumeTail(event);
         // First: the immersive toggle is the way out of a session that has taken
         // every input device, so nothing else may consume it.
         if (immersive != null && immersive.handleKey(event))
             return true;
+        if (softTail)
+            return true;
+        // Android can deliver the matching UP after a keyboard's grab began.
+        if (event.getAction() == KeyEvent.ACTION_UP
+                && forwardedKeys.containsKey(KeyPresses.identity(event)))
+            return false;
         InputDevice controller = event.getDevice();
         if (immersive != null && immersive.usesDirectControllers() && controller != null
                 && (controller.supportsSource(InputDevice.SOURCE_GAMEPAD)
@@ -2990,17 +3022,23 @@ public class MainActivity extends Activity
         // Swallow Android's duplicate KEYCODE_BACK so it does not release capture.
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
             return true;
-        if (handleSoftKeyboardToggleKey(event))
+        if (softShortcut) {
+            toggleSoftKeyboard(event);
             return true;
+        }
         // Discard Android events queued just before the helper's exclusive grab.
         return immersive != null && immersive.ownsGoldKeyboard()
                 && GoldKeyboard.matches(event.getDevice());
     }
 
     @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // The focused EditText can consume keys while the soft keyboard is open.
+        return handleSourceAwareKey(event) || super.dispatchKeyEvent(event);
+    }
+
+    @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (handleSourceAwareKey(event))
-            return true;
         // Before the repeat swallow: each repeat must become one more tap, so
         // held-key auto-repeat still works (see handleImeDelTap).
         if (handleImeDelTap(event))
@@ -3091,8 +3129,8 @@ public class MainActivity extends Activity
      * still held when the window went away stayed held on the desktop -- until
      * the user pressed and released that same key again.
      */
-    private final java.util.LinkedHashSet<Integer> forwardedKeys =
-            new java.util.LinkedHashSet<>();
+    private final java.util.LinkedHashMap<Long, Integer> forwardedKeys =
+            new java.util.LinkedHashMap<>();
 
     /**
      * Releases every key this window forwarded and never saw released, in
@@ -3102,10 +3140,13 @@ public class MainActivity extends Activity
      * into, for the same reason the mouse buttons are.
      */
     private void releaseAllForwardedKeys() {
+        softKeyboardChord.clearHeld();
+        softKeyboardPresses.clear();
         if (forwardedKeys.isEmpty())
             return;
         if (mNative != null) {
-            java.util.List<Integer> held = new java.util.ArrayList<>(forwardedKeys);
+            java.util.List<Integer> held = new java.util.ArrayList<>(
+                    new java.util.LinkedHashSet<>(forwardedKeys.values()));
             for (int index = held.size() - 1; index >= 0; index--)
                 mNative.sendKey(1, held.get(index));
         }
@@ -3117,11 +3158,17 @@ public class MainActivity extends Activity
                 convertBackToEscape);
         if (evdev < 0)
             return false;
-        if (event.getAction() == KeyEvent.ACTION_DOWN)
-            forwardedKeys.add(evdev);
-        else
-            forwardedKeys.remove(evdev);
-        mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
+        long key = KeyPresses.identity(event);
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            boolean alreadyHeld = forwardedKeys.containsValue(evdev);
+            forwardedKeys.put(key, evdev);
+            if (!alreadyHeld)
+                mNative.sendKey(0, evdev);
+        } else {
+            Integer downCode = forwardedKeys.remove(key);
+            if (downCode != null && !forwardedKeys.containsValue(downCode))
+                mNative.sendKey(1, downCode);
+        }
         return true;
     }
 
@@ -3132,8 +3179,6 @@ public class MainActivity extends Activity
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (handleSourceAwareKey(event))
-            return true;
         if (handleImeDelTap(event))
             return true;
         forwardKeyToLinux(event);

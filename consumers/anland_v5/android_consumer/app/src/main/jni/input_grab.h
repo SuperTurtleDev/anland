@@ -49,6 +49,11 @@
 #define IGRAB_DEV_CLICKPAD   (1 << 2)  /* one physical button under the whole pad */
 #define IGRAB_DEV_PASSTHROUGH (1 << 3) /* Android reader suppressed; desktop evdev direct */
 
+/* BYE.code is an exit scan code if the Android reader can also see the press.
+ * BYE.aux then carries the matching CLOCK_MONOTONIC timestamp in milliseconds. */
+#define IGRAB_BYE_TIME_LO 0
+#define IGRAB_BYE_TIME_HI 1
+
 /* BYE.value */
 #define IGRAB_BYE_TOGGLE    1  /* the toggle key was pressed */
 #define IGRAB_BYE_PEER_GONE 2  /* app closed the socket */

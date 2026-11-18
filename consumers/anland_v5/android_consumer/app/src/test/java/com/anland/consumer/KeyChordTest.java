@@ -5,18 +5,18 @@ import org.junit.Test;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-public class ImmersiveShortcutTest {
+public class KeyChordTest {
     @Test
     public void rejectsMalformedOrOversizedBindings() {
         for (String codes : new String[]{"30", "30,30", "30,0", "30,768", "30,48,46,32",
                 "30,", "30,+48", "30,048"}) {
-            assertFalse(codes, ImmersiveShortcut.parse(codes).isBound());
+            assertFalse(codes, KeyChord.parse(codes).isBound());
         }
     }
 
     @Test
     public void requiresSimultaneousKeysFromOneDeviceInEitherOrder() {
-        ImmersiveShortcut chord = ImmersiveShortcut.parse("30,48");
+        KeyChord chord = KeyChord.parse("30,48");
         assertFalse(chord.update(1, 48, true));
         assertFalse(chord.update(2, 30, true));
         assertTrue(chord.update(1, 30, true));
@@ -27,7 +27,7 @@ public class ImmersiveShortcutTest {
 
     @Test
     public void clearingStatePreventsStaleKeysAcrossSessions() {
-        ImmersiveShortcut chord = ImmersiveShortcut.parse("30,48,46");
+        KeyChord chord = KeyChord.parse("30,48,46");
         assertFalse(chord.update(1, 46, true));
         assertFalse(chord.update(1, 48, true));
         chord.clearHeld();

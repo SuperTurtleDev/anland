@@ -26,7 +26,7 @@
         <item>强制竖屏</item>
     </string-array>
     <!-- Bind key -->
-    <string name="bind_key_button">绑定软键盘切换键</string>
+    <string name="bind_key_button">绑定软键盘切换键或组合键</string>
     <string name="landscape_split_keyboard">横屏使用分体弧形键盘</string>
     <string name="landscape_split_keyboard_hint">横屏时将字母键分到左右拇指区域。</string>
     <string name="customize_keyboard_wings">自定义两侧翼键…</string>
@@ -118,6 +118,7 @@
     <string name="hud_overlay_label_scroll">滚动</string>
     <string name="hud_overlay_label_dpad">方向键</string>
     <string name="listening_countdown">正在监听…（%1$d 秒）</string>
+    <string name="key_binding_release">松开按键以保存</string>
     <string name="status_current_none">当前：无</string>
     <string name="status_current">当前：%1$s</string>
     <string name="status_current_no_scancode">当前：%1$s —— 该按键不上报扫描码，沉浸模式无法使用它。请改绑音量+等硬件按键。</string>

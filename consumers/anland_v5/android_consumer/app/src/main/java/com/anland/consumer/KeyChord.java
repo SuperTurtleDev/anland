@@ -8,7 +8,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-final class ImmersiveShortcut {
+final class KeyChord {
     static final int MAX_KEYS = 3;
     static final int MAX_SCAN_CODE = 0x2ff; // Linux KEY_MAX
 
@@ -16,27 +16,27 @@ final class ImmersiveShortcut {
     private final int[] keys;
     private final Map<Integer, Integer> heldByDevice = new HashMap<>();
 
-    static ImmersiveShortcut parse(String codes) {
+    static KeyChord parse(String codes) {
         String[] parts = codes.split(",", -1);
         if (parts.length < 2 || parts.length > MAX_KEYS)
-            return new ImmersiveShortcut("", new int[0]);
+            return new KeyChord("", new int[0]);
         int[] keys = new int[parts.length];
         for (int i = 0; i < parts.length; i++) {
             try {
                 keys[i] = Integer.parseInt(parts[i]);
             } catch (NumberFormatException e) {
-                return new ImmersiveShortcut("", new int[0]);
+                return new KeyChord("", new int[0]);
             }
             if (keys[i] <= 0 || keys[i] > MAX_SCAN_CODE || !parts[i].equals(Integer.toString(keys[i])))
-                return new ImmersiveShortcut("", new int[0]);
+                return new KeyChord("", new int[0]);
             for (int j = 0; j < i; j++)
                 if (keys[j] == keys[i])
-                    return new ImmersiveShortcut("", new int[0]);
+                    return new KeyChord("", new int[0]);
         }
-        return new ImmersiveShortcut(codes, keys);
+        return new KeyChord(codes, keys);
     }
 
-    private ImmersiveShortcut(String codes, int[] keys) {
+    private KeyChord(String codes, int[] keys) {
         this.codes = codes;
         this.keys = keys;
     }

@@ -57,7 +57,6 @@ import java.util.TreeSet;
 public class SettingsActivity extends Activity {
     private static final String TAG = "AnlandSettings";
     private static final String PREFS_NAME = "anland_settings";
-    private static final String KEY_BOUND_KEYCODE = "bound_keycode";
     private static final String KEY_SOCKET_PATH = "socket_path";
     private static final String KEY_USE_ROOT = "use_root";
     private static final String KEY_MIC_ENABLED = "mic_enabled";
@@ -144,6 +143,7 @@ public class SettingsActivity extends Activity {
     // The key-binding row currently counting down, if any: it gets the next key
     // press. The rows themselves live in the page's view hierarchy.
     private KeyBinding listeningBinding;
+    private final KeyPresses bindingPresses = new KeyPresses();
 
     // Custom extra-keys layout editor (JSON), and the SAF file-picker request code.
     private static final int REQ_EXPORT_HUD_LAYOUT = 2002;
@@ -792,7 +792,7 @@ public class SettingsActivity extends Activity {
     private void buildVirtualKeyboardSection(LinearLayout root) {
         addSectionHeader(root, R.string.section_virtual_keyboard, 0);
         // Constructing the row appends it to `root`.
-        new KeyBinding(root, KEY_BOUND_KEYCODE, null, R.string.bind_key_button);
+        new KeyBinding(root, false, R.string.bind_key_button);
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         Switch splitKeyboardSwitch = new Switch(this);
@@ -978,8 +978,7 @@ public class SettingsActivity extends Activity {
         root.addView(refreshRateHint);
 
         // Constructing the row appends it to `root`.
-        new KeyBinding(root, KEY_IMMERSIVE_KEYCODE, KEY_IMMERSIVE_SCANCODE,
-                R.string.bind_immersive_key_button);
+        new KeyBinding(root, true, R.string.bind_immersive_key_button);
     }
 
     private void addSectionHeader(LinearLayout root, int titleRes, int topPadding) {
@@ -997,25 +996,25 @@ public class SettingsActivity extends Activity {
      * listening state lives per row instead of on the activity.
      */
     private final class KeyBinding {
+        private final boolean immersive;
         private final String keyPref;
-        /**
-         * Where to store the raw evdev scan code, or null when only the Android
-         * key code matters. Immersive mode needs it: {@link KeyCodeMapper} has no
-         * entry for the volume keys, and its root helper only ever sees evdev
-         * codes.
-         */
         private final String scanPref;
+        private final String chordPref;
+        private final String labelPref;
         private final int buttonLabelRes;
         private final Button button;
         private final TextView status;
         private CountDownTimer timer;
-        private final LinkedHashMap<Integer, KeyEvent> held = new LinkedHashMap<>();
+        private final LinkedHashMap<Long, KeyEvent> held = new LinkedHashMap<>();
+        private boolean attempted;
         private boolean invalidChord;
 
-        KeyBinding(LinearLayout root, String keyPref, String scanPref,
-                   int buttonLabelRes) {
-            this.keyPref = keyPref;
-            this.scanPref = scanPref;
+        KeyBinding(LinearLayout root, boolean immersive, int buttonLabelRes) {
+            this.immersive = immersive;
+            keyPref = immersive ? KEY_IMMERSIVE_KEYCODE : MainActivity.KEY_BOUND_KEYCODE;
+            scanPref = immersive ? KEY_IMMERSIVE_SCANCODE : MainActivity.KEY_BOUND_SCANCODE;
+            chordPref = immersive ? ImmersiveMode.KEY_CHORD : MainActivity.KEY_BOUND_CHORD;
+            labelPref = immersive ? ImmersiveMode.KEY_CHORD_LABEL : MainActivity.KEY_BOUND_CHORD_LABEL;
             this.buttonLabelRes = buttonLabelRes;
 
             status = new TextView(SettingsActivity.this);
@@ -1033,10 +1032,15 @@ public class SettingsActivity extends Activity {
         }
 
         private void startListening() {
-            if (listeningBinding == this)
-                return;
+            boolean wasListening = listeningBinding == this;
             stopListening();
+            if (wasListening)
+                return;
             listeningBinding = this;
+            startCountdown();
+        }
+
+        private void startCountdown() {
             button.setText(getString(R.string.listening_countdown, 5));
             timer = new CountDownTimer(5000, 1000) {
                 @Override
@@ -1047,9 +1051,10 @@ public class SettingsActivity extends Activity {
 
                 @Override
                 public void onFinish() {
-                    // Timed out with no key: clear the binding, matching the
-                    // original behaviour of "listen, then store whatever came".
-                    bind(UNBOUND, UNBOUND, "", "");
+                    if (attempted)
+                        stopListening();
+                    else
+                        bind(UNBOUND, UNBOUND, "", "");
                 }
             }.start();
         }
@@ -1057,12 +1062,17 @@ public class SettingsActivity extends Activity {
         /** Stop listening without changing what is bound. */
         void cancel() {
             held.clear();
+            attempted = false;
             invalidChord = false;
+            stopCountdown();
+            button.setText(buttonLabelRes);
+        }
+
+        private void stopCountdown() {
             if (timer != null) {
                 timer.cancel();
                 timer = null;
             }
-            button.setText(buttonLabelRes);
         }
 
         void bind(int keycode, int scancode, String chord, String label) {
@@ -1070,13 +1080,10 @@ public class SettingsActivity extends Activity {
             listeningBinding = null;
             SharedPreferences.Editor edit =
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
-            edit.putInt(keyPref, keycode);
-            if (scanPref != null) {
-                edit.putInt(scanPref, scancode);
+            edit.putInt(keyPref, keycode).putInt(scanPref, scancode)
+                    .putString(chordPref, chord).putString(labelPref, label);
+            if (immersive)
                 edit.remove(ImmersiveMode.KEY_MODIFIERS);
-                edit.putString(ImmersiveMode.KEY_CHORD, chord);
-                edit.putString(ImmersiveMode.KEY_CHORD_LABEL, label);
-            }
             edit.apply();
             updateStatus();
         }
@@ -1084,33 +1091,24 @@ public class SettingsActivity extends Activity {
         void updateStatus() {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
             int bound = prefs.getInt(keyPref, UNBOUND);
-            int scan = scanPref == null ? UNBOUND : prefs.getInt(scanPref, UNBOUND);
-            if (scanPref != null) {
-                ImmersiveShortcut chord = ImmersiveShortcut.parse(
-                        prefs.getString(ImmersiveMode.KEY_CHORD, ""));
-                if (chord.isBound()) {
-                    status.setText(getString(R.string.status_current,
-                            chord.statusLabel(SettingsActivity.this,
-                                    prefs.getString(ImmersiveMode.KEY_CHORD_LABEL, ""))));
-                    status.setTextColor(Color.GRAY);
-                    return;
-                }
-                if (prefs.getInt(ImmersiveMode.KEY_MODIFIERS, 0) != 0) {
-                    status.setText(R.string.status_current_none);
-                    status.setTextColor(Color.GRAY);
-                    return;
-                }
+            int scan = prefs.getInt(scanPref, UNBOUND);
+            KeyChord chord = KeyChord.parse(prefs.getString(chordPref, ""));
+            if (chord.isBound()) {
+                status.setText(getString(R.string.status_current,
+                        chord.statusLabel(SettingsActivity.this, prefs.getString(labelPref, ""))));
+                status.setTextColor(Color.GRAY);
+                return;
             }
-            if (bound == UNBOUND && scan <= 0) {
+            if ((bound == UNBOUND && scan <= 0)
+                    || (immersive && prefs.getInt(ImmersiveMode.KEY_MODIFIERS, 0) != 0)) {
                 status.setText(R.string.status_current_none);
                 status.setTextColor(Color.GRAY);
                 return;
             }
-            String name = scanPref == null ? KeyCodeMapper.keyName(SettingsActivity.this, bound, scan)
-                    : ImmersiveShortcut.statusLabel(SettingsActivity.this, bound, scan);
+            String name = KeyChord.statusLabel(SettingsActivity.this, bound, scan);
             // A binding that resolves to no evdev code is useless to the root
             // helper, so say so here rather than let the key quietly do nothing.
-            if (scanPref != null && resolveEvdev(bound, scan) <= 0) {
+            if (immersive && resolveEvdev(bound, scan) <= 0) {
                 status.setText(getString(R.string.status_current_no_scancode, name));
                 status.setTextColor(0xFFC62828);  // red
                 return;
@@ -1125,49 +1123,45 @@ public class SettingsActivity extends Activity {
         }
 
         void onKeyDown(KeyEvent event) {
-            int keycode = event.getKeyCode();
-            int scan = event.getScanCode();
-            if (event.getRepeatCount() != 0
-                    || (keycode == KeyEvent.KEYCODE_UNKNOWN && (scanPref == null || scan <= 0)))
+            if (!KeyPresses.isFreshDown(event)
+                    || (event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN && event.getScanCode() <= 0))
                 return;
-            if (scanPref == null) {
-                bind(keycode, scan, "", "");
-                return;
+            if (held.isEmpty()) {
+                attempted = true;
+                stopCountdown();
+                button.setText(R.string.key_binding_release);
+            } else if (held.values().iterator().next().getDeviceId() != event.getDeviceId()) {
+                invalidChord = true;
             }
-            if (held.isEmpty() || held.values().iterator().next().getDeviceId() == event.getDeviceId())
-                held.putIfAbsent(bindingKey(event), new KeyEvent(event));
+            held.putIfAbsent(KeyPresses.identity(event), new KeyEvent(event));
+            invalidChord |= held.size() > KeyChord.MAX_KEYS;
         }
 
         void onKeyUp(KeyEvent event) {
-            KeyEvent released = held.get(bindingKey(event));
-            if (released == null || released.getDeviceId() != event.getDeviceId())
+            long key = KeyPresses.identity(event);
+            KeyEvent released = held.get(key);
+            if (released == null)
                 return;
-            if (invalidChord) {
-                held.remove(bindingKey(event));
-                invalidChord = !held.isEmpty();
-                return;
-            }
-            if (held.size() == 1) {
-                bind(released.getKeyCode(), released.getScanCode(), "", "");
-                return;
-            }
-            if (held.size() <= ImmersiveShortcut.MAX_KEYS) {
+            if (!invalidChord && !event.isCanceled()) {
+                if (held.size() == 1) {
+                    bind(released.getKeyCode(), released.getScanCode(), "", "");
+                    return;
+                }
                 ArrayList<String> codes = new ArrayList<>(held.size());
-                for (KeyEvent key : held.values())
-                    codes.add(Integer.toString(key.getScanCode()));
+                for (KeyEvent member : held.values())
+                    codes.add(Integer.toString(member.getScanCode()));
                 String chord = String.join(",", codes);
-                if (ImmersiveShortcut.parse(chord).isBound()) {
-                    bind(UNBOUND, UNBOUND, chord, ImmersiveShortcut.label(held.values()));
+                if (KeyChord.parse(chord).isBound()) {
+                    bind(UNBOUND, UNBOUND, chord, KeyChord.label(held.values()));
                     return;
                 }
             }
-            // Discard this attempt. Wait for the held keys to be released before retrying.
-            held.remove(bindingKey(event));
-            invalidChord = true;
-        }
 
-        private int bindingKey(KeyEvent event) {
-            return event.getScanCode() > 0 ? event.getScanCode() : -1 - event.getKeyCode();
+            // Let the whole rejected attempt lift before starting another one.
+            held.remove(key);
+            invalidChord = !held.isEmpty();
+            if (!invalidChord)
+                startCountdown();
         }
     }
 
@@ -2095,18 +2089,17 @@ public class SettingsActivity extends Activity {
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (listeningBinding == null) return super.onKeyDown(keyCode, event);
-
-        listeningBinding.onKeyDown(event);
-        return true;
-    }
-
-    @Override
-    public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (listeningBinding == null || listeningBinding.scanPref == null)
-            return super.onKeyUp(keyCode, event);
-        listeningBinding.onKeyUp(event);
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        boolean tail = bindingPresses.consumeTail(event);
+        if (listeningBinding == null)
+            return tail || super.dispatchKeyEvent(event);
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (KeyPresses.isFreshDown(event))
+                bindingPresses.add(event);
+            listeningBinding.onKeyDown(event);
+        } else if (event.getAction() == KeyEvent.ACTION_UP) {
+            listeningBinding.onKeyUp(event);
+        }
         return true;
     }
 
