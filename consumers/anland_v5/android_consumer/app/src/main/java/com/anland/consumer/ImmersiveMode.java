@@ -64,6 +64,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     static final String KEY_KEYCODE  = "immersive_keycode";
     /** Raw evdev scan code of the bound key: what the helper actually compares. */
     static final String KEY_SCANCODE = "immersive_scancode";
+    static final String KEY_MODIFIERS = "immersive_modifiers";
+    static final String KEY_CHORD = "immersive_chord";
+    static final String KEY_CHORD_LABEL = "immersive_chord_label";
 
     // evdev event types / codes (linux/input-event-codes.h).
     private static final int EV_SYN = 0x00, EV_KEY = 0x01, EV_REL = 0x02, EV_ABS = 0x03;
@@ -199,9 +202,10 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     private boolean stopping = false;
     /** The user asked to leave, so the closing toast is theirs to see. */
     private boolean userExitPending = false;
-    private boolean suppressToggleUntilUp = false;
-    private long suppressToggleDeadlineMs = 0L;
-    private static final long TOGGLE_SUPPRESS_MS = 2000L;
+    private String chordPreference = "";
+    private KeyChord toggleChord = KeyChord.parse("");
+    private int nativeToggleScan;
+    private long nativeToggleTime;
 
     // Session telemetry: events per second, per-device event counts and the
     // panel's current rate, logged once a second while a session runs. It is the
@@ -274,19 +278,49 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     }
 
     /**
-     * Evdev code of the bound key. Recorded straight from the KeyEvent at bind
-     * time because {@link KeyCodeMapper} has no entry for the volume keys — the
-     * obvious thing to bind on a tablet — and the helper compares evdev codes,
-     * not Android key codes.
-     */
-    /**
      * The bound key's name, for the "press X again to leave" line.
      */
     String boundKeyName() {
-        return KeyCodeMapper.keyName(ctx, prefs().getInt(KEY_KEYCODE, -1), boundScanCode());
+        KeyChord chord = chord();
+        if (chord.isBound())
+            return prefs().getString(KEY_CHORD_LABEL, chord.codes);
+        if (legacyChordNeedsRebind())
+            return KeyCodeMapper.keyName(ctx, -1, -1);
+        int keycode = prefs().getInt(KEY_KEYCODE, -1);
+        return KeyCodeMapper.keyName(ctx, keycode, boundScanCode());
+    }
+
+    private KeyChord chord() {
+        String saved = prefs().getString(KEY_CHORD, "");
+        if (!saved.equals(chordPreference)) {
+            chordPreference = saved;
+            toggleChord = KeyChord.parse(saved);
+        }
+        return toggleChord;
+    }
+
+    private boolean legacyChordNeedsRebind() {
+        // Old modifier-only bindings did not retain the physical key identities.
+        return prefs().getInt(KEY_MODIFIERS, 0) != 0;
+    }
+
+    void clearToggleKeys() {
+        chord().clearHeld();
+        nativeToggleTime = 0;
+    }
+
+    boolean updateToggleKeys(KeyEvent event) {
+        KeyChord chord = chord();
+        return chord.isBound() ? chord.update(event)
+                : event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0;
     }
 
     private int boundScanCode() {
+        KeyChord chord = chord();
+        if (chord.isBound())
+            return chord.firstKey();
+        if (legacyChordNeedsRebind())
+            return -1;
         SharedPreferences p = prefs();
         int scan = p.getInt(KEY_SCANCODE, -1);
         if (scan > 0)
@@ -301,29 +335,21 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     }
 
     int toggleScanCodeFor(KeyEvent event) {
-        return resolveToggleScanCode(boundScanCode(), event.getScanCode());
+        return chord().isBound() ? boundScanCode()
+                : resolveToggleScanCode(boundScanCode(), event.getScanCode());
     }
 
-    /**
-     * Swallow the rest of the toggle press, up to its release.
-     */
-    void suppressToggleTail() {
-        suppressToggleUntilUp = true;
-        suppressToggleDeadlineMs = SystemClock.uptimeMillis() + TOGGLE_SUPPRESS_MS;
+    @Override
+    public void onNativeToggle(int scanCode, long eventTime) {
+        nativeToggleScan = scanCode;
+        nativeToggleTime = eventTime;
     }
 
-    boolean consumeSuppressedToggle(KeyEvent event) {
-        if (!suppressToggleUntilUp)
+    boolean consumeNativeToggle(KeyEvent event) {
+        if (!KeyPresses.isFreshDown(event) || event.getScanCode() != nativeToggleScan
+                || nativeToggleTime <= 0 || event.getEventTime() != nativeToggleTime)
             return false;
-        if (SystemClock.uptimeMillis() > suppressToggleDeadlineMs) {
-            suppressToggleUntilUp = false;
-            suppressToggleDeadlineMs = 0L;
-            return false;
-        }
-        if (event.getAction() == KeyEvent.ACTION_UP) {
-            suppressToggleUntilUp = false;
-            suppressToggleDeadlineMs = 0L;
-        }
+        nativeToggleTime = 0;
         return true;
     }
 
@@ -338,6 +364,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     boolean isBoundToggle(KeyEvent event) {
         if (!isEnabled())
             return false;
+        KeyChord chord = chord();
+        if (chord.isBound())
+            return chord.keyBit(event.getScanCode()) != 0;
         SharedPreferences p = prefs();
         int scan = p.getInt(KEY_SCANCODE, -1);
         int keycode = p.getInt(KEY_KEYCODE, -1);
@@ -369,7 +398,6 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
      */
     void requestStop() {
         userExitPending = true;
-        suppressToggleTail();
         stop();
     }
 
@@ -404,7 +432,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         readyMessage = null;
         userExitPending = false;
         Log.i(TAG, "immersive toggle: configured=" + boundScanCode() + ", session=" + scan);
-        if (!grab.start(scan, selectedNodes, excludedNodes, source)) {
+        if (!grab.start(scan, selectedNodes, excludedNodes, source, chord().codes)) {
             starting = false;
             toast(ctx.getString(R.string.immersive_failed));
             return false;
@@ -542,8 +570,6 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         boolean wasRunning = active || starting;
         Log.i(TAG, "immersive ended: reason=" + reason + ", active=" + wasActive
                 + ", userExit=" + userExitPending);
-        if (wasRunning && reason == InputGrab.REASON_TOGGLE)
-            suppressToggleTail();
         unregisterScreenOff();
         active = false;
         starting = false;

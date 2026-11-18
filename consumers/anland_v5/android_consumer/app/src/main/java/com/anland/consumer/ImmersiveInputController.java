@@ -36,6 +36,7 @@ final class ImmersiveInputController {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private ImmersiveInputSource runningSource = ImmersiveInputSource.DIRECT_EVENT_NODES;
+    private final KeyPresses consumedKeys = new KeyPresses();
 
     ImmersiveInputController(ImmersiveMode.Host host) {
         this.ctx = host.context();
@@ -172,17 +173,22 @@ final class ImmersiveInputController {
             runningSource = current;
         }
 
-        if (!direct.isBoundToggle(event))
-            return false;
-        if (direct.consumeSuppressedToggle(event))
+        boolean tail = consumedKeys.consumeTail(event);
+        boolean matches = direct.isBoundToggle(event) && direct.updateToggleKeys(event);
+        if (tail)
             return true;
+        if (direct.consumeNativeToggle(event)) {
+            consumedKeys.add(event);
+            return true;
+        }
+        if (!matches)
+            return false;
 
-        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-            if (isActive()) {
-                stopSession();
-            } else {
-                startSession(current, direct.toggleScanCodeFor(event));
-            }
+        consumedKeys.add(event);
+        if (isActive()) {
+            stopSession();
+        } else {
+            startSession(current, direct.toggleScanCodeFor(event));
         }
         return true;
     }
@@ -217,8 +223,6 @@ final class ImmersiveInputController {
     }
 
     private void stopSession() {
-        // Leaves the toggle's own release swallowed, so the key that ended the
-        // session does not then reach the desktop.
         direct.requestStop();
     }
 
@@ -320,6 +324,8 @@ final class ImmersiveInputController {
      * switches alike: a session must never outlive the foreground.
      */
     void stop() {
+        direct.clearToggleKeys();
+        consumedKeys.clear();
         direct.stop();
         // Warm the occupancy answer for the next press. Left to the resume
         // refresh, a session started more than a few seconds later finds the

@@ -35,9 +35,9 @@ The version number at the bottom of the Settings home screen is only for identif
 <a id="bind-soft-keyboard"></a>
 #### Bind Soft Keyboard Toggle Key
 
-**Bind a key:** tap the button, then press the target hardware key within five seconds. If you do not press a key before the countdown ends, the binding is cleared.
+To bind the shortcut, tap the button and start pressing keys within five seconds. Hold one to three physical keys on the same keyboard, then release them to save. To clear the binding, tap the button and let the countdown finish without pressing a key.
 
-**Use the key:** while the Anland desktop has focus, press it to show or hide the Android system soft keyboard. The key is not sent to Linux, so choose one you do not normally need there.
+While the Anland desktop has focus and Android receives the keyboard's input, press all the bound keys together in any order to show or hide the system soft keyboard. Earlier keys reach Linux normally. Anland consumes the key that completes the shortcut.
 
 <a id="raise-desktop"></a>
 #### Raise desktop when soft keyboard opens
@@ -113,7 +113,7 @@ While active, the selected input source is sent to the Linux desktop, reducing A
 <a id="bind-immersive"></a>
 ### Bind Immersive Mode Key
 
-To enter and leave manually, bind a dedicated physical key: press it once in the desktop to enter, then press it again to exit.
+Bind one to three physical keys on the same keyboard. Hold all the desired keys, then release them to save. Examples include A+B, Ctrl+Alt, and Ctrl+Alt+Esc. Press order is flexible. The shortcut fires when all of its keys are down. Use it once to enter and again to exit. Individual keys reach the desktop normally until the shortcut is complete.
 
 Use a volume key or another hardware key that reports a scan code; avoid Android on-screen navigation gestures. Gold keyboard auto-entry does not need a bound key.
 

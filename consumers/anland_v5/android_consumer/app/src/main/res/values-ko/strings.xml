@@ -26,14 +26,16 @@
         <item>세로 모드 강제</item>
     </string-array>
     <!-- Bind key -->
-    <string name="bind_key_button">소프트 키보드 전환 키 바인딩</string>
+    <string name="bind_key_button">소프트 키보드 전환 단축키 바인딩</string>
     <string name="raise_desktop_for_soft_keyboard">소프트 키보드가 열리면 데스크톱 올리기</string>
     <string name="raise_desktop_for_soft_keyboard_hint">이 옵션을 켜면 데스크톱 화면이 줄어들고 위로 이동하여 입력 중인 내용을 볼 수 있습니다.</string>
     <string name="listening_countdown">키 입력 대기 중… (%1$d초)</string>
+    <string name="key_binding_release">키를 놓아 저장</string>
     <string name="status_current_none">현재: 없음</string>
     <string name="status_current">현재: %1$s</string>
     <string name="status_current_no_scancode">현재: %1$s — 이 키는 스캔 코드를 보고하지 않아 몰입 모드에서 사용할 수 없습니다. 볼륨 업과 같은 하드웨어 키를 바인딩하세요.</string>
     <string name="keycode_unknown">키코드 %1$d</string>
+    <string name="immersive_status_keycode">키코드 %1$d</string>
     <string name="scancode_unknown">스캔 코드 %1$d</string>
     <!-- Immersive mode -->
     <string name="section_immersive">몰입 모드</string>

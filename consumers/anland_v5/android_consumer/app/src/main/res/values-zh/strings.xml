@@ -26,7 +26,7 @@
         <item>强制竖屏</item>
     </string-array>
     <!-- Bind key -->
-    <string name="bind_key_button">绑定软键盘切换键</string>
+    <string name="bind_key_button">绑定软键盘切换键或组合键</string>
     <string name="landscape_split_keyboard">横屏使用分体弧形键盘</string>
     <string name="landscape_split_keyboard_hint">横屏时将字母键分到左右拇指区域。</string>
     <string name="customize_keyboard_wings">自定义两侧翼键…</string>
@@ -118,10 +118,12 @@
     <string name="hud_overlay_label_scroll">滚动</string>
     <string name="hud_overlay_label_dpad">方向键</string>
     <string name="listening_countdown">正在监听…（%1$d 秒）</string>
+    <string name="key_binding_release">松开按键以保存</string>
     <string name="status_current_none">当前：无</string>
     <string name="status_current">当前：%1$s</string>
     <string name="status_current_no_scancode">当前：%1$s —— 该按键不上报扫描码，沉浸模式无法使用它。请改绑音量+等硬件按键。</string>
     <string name="keycode_unknown">键码 %1$d</string>
+    <string name="immersive_status_keycode">键码%1$d</string>
     <string name="scancode_unknown">扫描码 %1$d</string>
     <!-- Immersive mode -->
     <string name="section_immersive">沉浸模式</string>
@@ -131,7 +133,7 @@
     <string name="immersive_hud_touch_hint">开启后，触摸屏被独占期间 HUD 按键、方向键、触摸板仍然可用；关闭则所有触摸直接交给桌面，HUD 只显示不响应。</string>
     <string name="immersive_oplus_refresh_rate_switch">固定 OnePlus 高刷新率</string>
     <string name="immersive_oplus_refresh_rate_hint">解决某些 OnePlus 设备接收不到输入事件导致的刷新率降低</string>
-    <string name="bind_immersive_key_button">绑定沉浸模式按键</string>
+    <string name="bind_immersive_key_button">绑定沉浸模式按键或组合键</string>
     <string name="immersive_exited">已退出沉浸模式</string>
     <string name="immersive_no_scancode">请先为沉浸模式绑定按键</string>
     <string name="immersive_failed">无法进入沉浸模式：root 被拒绝或不可用</string>

@@ -26,14 +26,16 @@
         <item>Forçar retrato</item>
     </string-array>
     <!-- Bind key -->
-    <string name="bind_key_button">Mapear Tecla de Alternância do Teclado Virtual</string>
+    <string name="bind_key_button">Mapear Atalho do Teclado Virtual</string>
     <string name="raise_desktop_for_soft_keyboard">Elevar o desktop ao abrir o teclado virtual</string>
     <string name="raise_desktop_for_soft_keyboard_hint">Quando ativado, o desktop encolhe e sobe para que você veja o que está digitando.</string>
     <string name="listening_countdown">Ouvindo… (%1$ds)</string>
+    <string name="key_binding_release">Solte as teclas para salvar</string>
     <string name="status_current_none">Atual: Nenhum</string>
     <string name="status_current">Atual: %1$s</string>
     <string name="status_current_no_scancode">Atual: %1$s — essa tecla não reporta um scan code, então o modo imersivo não pode usá-la. Mapeie uma tecla física como Aumentar Volume.</string>
     <string name="keycode_unknown">Keycode %1$d</string>
+    <string name="immersive_status_keycode">Keycode %1$d</string>
     <string name="scancode_unknown">Scan code %1$d</string>
     <!-- Immersive mode -->
     <string name="section_immersive">Modo Imersivo</string>

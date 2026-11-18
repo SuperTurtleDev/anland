@@ -33,6 +33,9 @@ interface InputGrabTransport {
          */
         void onEvents(int[] batch, int count);
 
+        /** The helper saw an exit press also visible to Android. */
+        default void onNativeToggle(int scanCode, long eventTime) {}
+
         /** The session ended, for any reason, exactly once per {@code start}. */
         void onEnded(int reason);
     }
@@ -75,6 +78,12 @@ interface InputGrabTransport {
                           Collection<String> excludedNodes, ImmersiveInputSource source) {
         return source == ImmersiveInputSource.DIRECT_EVENT_NODES
                 && start(toggleScanCode, selectedNodes, excludedNodes);
+    }
+
+    default boolean start(int toggleScanCode, Collection<String> selectedNodes,
+                          Collection<String> excludedNodes, ImmersiveInputSource source,
+                          String chord) {
+        return chord.isEmpty() && start(toggleScanCode, selectedNodes, excludedNodes, source);
     }
 
     void stop();
