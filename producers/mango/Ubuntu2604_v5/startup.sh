@@ -1,1 +1,1 @@
-../Debian13_v5/startup.sh
+../../common/startup/mango-deb.sh

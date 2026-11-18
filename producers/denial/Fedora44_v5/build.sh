@@ -2,7 +2,6 @@
 # Fedora 44 ARM64: the same locked Denial/Flutter build, native RPM packaging.
 # ANLAND_WITH_DEPS=1 JOBS=4 ANLAND_INSTALL=0 bash build.sh [--noconfirm]
 # ANLAND_STAGE=check validates the recipe without compiling or touching services.
-# Fedora build/package functions are local to this WM recipe.
 fedora_die() { printf 'fedora-build: %s\n' "$*" >&2; exit 1; }
 
 fedora_run() { "$@" || fedora_die "failed: $*"; }
@@ -106,17 +105,6 @@ EOF
     fedora_run rm -f -- "$marker"
 }
 
-fedora_publish_rpm() {
-    local file=$1 destination="$ARTIFACTS_DIR/${1##*/}" architecture
-    architecture=$(rpm -qp --qf '%{ARCH}' "$file") || fedora_die 'RPM architecture'
-    [[ $architecture == aarch64 || $architecture == noarch ]] || fedora_die "wrong architecture: $file"
-    fedora_run rpm -K "$file"
-    fedora_run rpm -qpl "$file" >/dev/null
-    [[ ! -e $destination.sig && ! -L $destination.sig ]] || cmp -s "$file" "$destination" || fedora_die "existing signature preserved: $destination.sig"
-    fedora_run cp -p -- "$file" "$destination"
-    packages+=("$destination")
-}
-
 fedora_srpm_build() {
     local top=$FEDORA_SRPM_TOP spec=$FEDORA_SRPM_SPEC marker file found=0
     if [[ $ANLAND_WITH_DEPS == 1 ]]; then
@@ -131,12 +119,6 @@ fedora_srpm_build() {
     done < <(find "$top/RPMS" -type f -name '*.rpm' ! -name '*debug*' ! -name '*-tests-*' -newer "$marker")
     [[ $found -gt 0 ]] || fedora_die 'no current SRPM build output'
     fedora_run rm -f -- "$marker"
-}
-
-fedora_xwayland() {
-    # Every WM keeps its Xwayland inputs alongside its own distro recipe.
-    fedora_srpm_prepare xorg-x11-server-Xwayland "$SCRIPT_DIR/xwayland.patch"
-    [[ $ANLAND_STAGE != build ]] || fedora_srpm_build
 }
 
 fedora_finish() {
@@ -162,7 +144,7 @@ fedora_denial_preflight() {
     fedora_preflight
     # The shared engine entry already owns WORKDIR/ARTIFACTS locks.
     ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd -P) || die 'repository root'
-    source "$ROOT/producers/common/fedora-latest-srpm.sh"
+    source "$ROOT/producers/common/fedora-latest-srpm.sh" || fedora_die 'cannot load shared Fedora build functions'
     FEDORA_INPUT_ID=$(cat "$SCRIPT_DIR/sources.conf" "$SCRIPT_DIR/build.sh" \
         "$SCRIPT_DIR/xwayland.patch" "$ROOT/producers/common/fedora-latest-srpm.sh" \
         "$ROOT/producers/denial/Arch_v5/build.sh" | sha256sum) || die 'Fedora input identity'

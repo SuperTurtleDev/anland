@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
+# Recipes provide fedora_run, fedora_die, fedora_reuse, fedora_seal and
+# fedora_srpm_build.
+
 # Download the current SRPM visible to configured Fedora repositories and
 # prepare a private build tree keyed by the actual SRPM and patch bytes.
-# fedora_run, fedora_die, fedora_reuse and fedora_seal come from build.sh.
 fedora_srpm_prepare() {
     local name=$1 patch=$2 overlay=${3:-} destination=${4:-} options=${5:-}
     local record downloads temp srpm archive version release actual_name sourcepackage sha
@@ -111,4 +113,21 @@ PY
     fi
     fedora_run rpmbuild -bp --nodeps --define "_topdir $top" "$spec"
     fedora_seal "$top"
+}
+
+fedora_publish_rpm() {
+    local file=$1 destination="$ARTIFACTS_DIR/${1##*/}" architecture
+    architecture=$(rpm -qp --qf '%{ARCH}' "$file") || fedora_die 'RPM architecture'
+    [[ $architecture == aarch64 || $architecture == noarch ]] || fedora_die "wrong architecture: $file"
+    fedora_run rpm -K "$file"
+    fedora_run rpm -qpl "$file" >/dev/null
+    [[ ! -e $destination.sig && ! -L $destination.sig ]] || cmp -s "$file" "$destination" || fedora_die "existing signature preserved: $destination.sig"
+    fedora_run cp -p -- "$file" "$destination"
+    packages+=("$destination")
+}
+
+fedora_xwayland() {
+    # Every WM keeps its Xwayland inputs alongside its own distro recipe.
+    fedora_srpm_prepare xorg-x11-server-Xwayland "$SCRIPT_DIR/xwayland.patch"
+    [[ $ANLAND_STAGE != build ]] || fedora_srpm_build
 }

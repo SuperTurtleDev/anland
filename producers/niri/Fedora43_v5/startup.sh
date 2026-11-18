@@ -1,1 +1,1 @@
-../Ubuntu2604_v5/startup.sh
+../../common/startup/niri.sh

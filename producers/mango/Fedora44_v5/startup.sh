@@ -1,1 +1,1 @@
-../Arch_v5/startup.sh
+../../common/startup/mango-arch-fedora.sh

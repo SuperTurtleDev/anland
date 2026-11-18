@@ -4,7 +4,6 @@
 set -uo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
 source "$SCRIPT_DIR/../../common/latest-source.sh"
-# Fedora build/package functions are local to this WM recipe.
 fedora_die() { printf 'fedora-build: %s\n' "$*" >&2; exit 1; }
 
 fedora_run() { "$@" || fedora_die "failed: $*"; }
@@ -31,7 +30,7 @@ fedora_preflight() {
 fedora_initialize() {
     fedora_preflight
     ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd -P) || fedora_die 'repository root'
-    source "$ROOT/producers/common/fedora-latest-srpm.sh"
+    source "$ROOT/producers/common/fedora-latest-srpm.sh" || fedora_die 'cannot load shared Fedora build functions'
     WORKDIR=$(realpath -m -- "${WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-$1-fedora44}") || fedora_die 'cache path'
     ARTIFACTS_DIR=$(realpath -m -- "${ARTIFACTS_DIR:-${ARTIFACTS:-$SCRIPT_DIR/artifacts}}") || fedora_die 'artifact path'
     [[ $WORKDIR != / && $WORKDIR != "$HOME" && $WORKDIR != "$ROOT" && $WORKDIR != "$ROOT/"* ]] || fedora_die 'WORKDIR must be a separate cache'
@@ -50,7 +49,7 @@ fedora_initialize() {
 import hashlib, pathlib, sys
 root, recipe = map(pathlib.Path, sys.argv[1:])
 h = hashlib.sha256()
-paths = [recipe/'build.sh']
+paths = [recipe/'build.sh', root/'producers/common/fedora-latest-srpm.sh']
 for folder in (recipe, recipe.parent/'anland_backend', root/'libdisplay_producer', root/'common'):
     paths += [p for p in folder.rglob('*') if p.is_file() and 'artifacts' not in p.parts]
 for p in sorted(set(paths)):
@@ -176,17 +175,6 @@ EOF
     fedora_run rm -f -- "$marker"
 }
 
-fedora_publish_rpm() {
-    local file=$1 destination="$ARTIFACTS_DIR/${1##*/}" architecture
-    architecture=$(rpm -qp --qf '%{ARCH}' "$file") || fedora_die 'RPM architecture'
-    [[ $architecture == aarch64 || $architecture == noarch ]] || fedora_die "wrong architecture: $file"
-    fedora_run rpm -K "$file"
-    fedora_run rpm -qpl "$file" >/dev/null
-    [[ ! -e $destination.sig && ! -L $destination.sig ]] || cmp -s "$file" "$destination" || fedora_die "existing signature preserved: $destination.sig"
-    fedora_run cp -p -- "$file" "$destination"
-    packages+=("$destination")
-}
-
 fedora_srpm_build() {
     local top=$FEDORA_SRPM_TOP spec=$FEDORA_SRPM_SPEC marker file found=0
     if [[ $ANLAND_WITH_DEPS == 1 ]]; then
@@ -201,12 +189,6 @@ fedora_srpm_build() {
     done < <(find "$top/RPMS" -type f -name '*.rpm' ! -name '*debug*' ! -name '*-tests-*' -newer "$marker")
     [[ $found -gt 0 ]] || fedora_die 'no current SRPM build output'
     fedora_run rm -f -- "$marker"
-}
-
-fedora_xwayland() {
-    # Every WM keeps its Xwayland inputs alongside its own distro recipe.
-    fedora_srpm_prepare xorg-x11-server-Xwayland "$SCRIPT_DIR/xwayland.patch"
-    [[ $ANLAND_STAGE != build ]] || fedora_srpm_build
 }
 
 fedora_finish() {
