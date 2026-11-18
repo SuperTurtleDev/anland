@@ -34,6 +34,7 @@
     <string name="status_current">현재: %1$s</string>
     <string name="status_current_no_scancode">현재: %1$s — 이 키는 스캔 코드를 보고하지 않아 몰입 모드에서 사용할 수 없습니다. 볼륨 업과 같은 하드웨어 키를 바인딩하세요.</string>
     <string name="keycode_unknown">키코드 %1$d</string>
+    <string name="immersive_status_keycode">키코드 %1$d</string>
     <string name="scancode_unknown">스캔 코드 %1$d</string>
     <!-- Immersive mode -->
     <string name="section_immersive">몰입 모드</string>

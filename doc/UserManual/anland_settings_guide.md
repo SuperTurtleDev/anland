@@ -113,7 +113,7 @@ While active, the selected input source is sent to the Linux desktop, reducing A
 <a id="bind-immersive"></a>
 ### Bind Immersive Mode Key
 
-To enter and leave manually, bind a dedicated physical key: press it once in the desktop to enter, then press it again to exit.
+Bind one to three physical keys on the same keyboard. Hold all the desired keys, then release them to save. Examples include A+B, Ctrl+Alt, and Ctrl+Alt+Esc. Press order is flexible. The shortcut fires when all of its keys are down. Use it once to enter and again to exit. Individual keys reach the desktop normally until the shortcut is complete.
 
 Use a volume key or another hardware key that reports a scan code; avoid Android on-screen navigation gestures. Gold keyboard auto-entry does not need a bound key.
 

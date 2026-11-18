@@ -130,6 +130,11 @@ struct tablet_axis_range {
     int max;
 };
 
+struct toggle_state {
+    unsigned int held;
+    int dropped;
+};
+
 struct dev_entry {
     int  fd;
     int  cls;        /* IGRAB_CLASS_* */
@@ -157,6 +162,7 @@ struct dev_entry {
     int  tablet_range_count;
     struct tablet_axis_range tablet_ranges[IGRAB_MAX_TABLET_RANGES];
     int  toggle_capable; /* cached: the session toggle key exists on this node */
+    struct toggle_state toggle_state;
     char name[256]; /* full identity, not the shortened discovery/display label */
 };
 
@@ -166,6 +172,7 @@ static int g_gamepad_setup_failed = 0;
 /* Escape-only readers do not consume controlled-device slots or wire records. */
 struct toggle_watch {
     int fd;
+    struct toggle_state toggle_state;
     char name[80];
 };
 static struct toggle_watch g_toggle_watches[IGRAB_MAX_DEVICES];
@@ -175,12 +182,26 @@ static volatile sig_atomic_t g_quit = 0;
 static const char *g_apk;
 /* Set by main() before device inspection for the live session. */
 static int g_session_toggle = -1;
+#define MAX_TOGGLE_KEYS 3
+static unsigned int g_toggle_keys[MAX_TOGGLE_KEYS];
+static unsigned int g_toggle_key_count;
 static int start_gamepad_lease(struct dev_entry *entry, const char *path);
 static int stop_gamepad_lease(struct dev_entry *entry);
 static int update_gamepad_leases(void);
 static int apply_android_mask(struct dev_entry *entry, const char *path);
 static void stop_android_suppression(struct dev_entry *entry);
 static int revalidate_android_masks(void);
+static void read_toggle_keys(struct toggle_state *state, int fd);
+
+static int has_toggle_keys(const unsigned long *keys, int toggle)
+{
+    if (toggle <= 0 || toggle > KEY_MAX || !TEST_BIT(toggle, keys))
+        return 0;
+    for (unsigned int i = 0; i < g_toggle_key_count; i++)
+        if (!TEST_BIT(g_toggle_keys[i], keys))
+            return 0;
+    return 1;
+}
 
 static void on_signal(int sig)
 {
@@ -1019,6 +1040,7 @@ static int grab_idle_gold(struct dev_entry *entry)
         return -1;
     entry->grabbed = 1;
     entry->waiting_idle = 0;
+    entry->toggle_state = (struct toggle_state){0};
     return 1;
 }
 
@@ -1146,8 +1168,7 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
                  path, strerror(errno));
     }
     out->multitouch = mt;
-    out->toggle_capable = g_session_toggle > 0 && g_session_toggle <= KEY_MAX
-            && TEST_BIT(g_session_toggle, key);
+    out->toggle_capable = has_toggle_keys(key, g_session_toggle);
     /* A clickpad has one button under the whole surface, so every press comes in
      * as BTN_LEFT and the app has to work out left vs right from where the
      * finger is. INPUT_PROP_BUTTONPAD is the authoritative bit; a pad that
@@ -1505,6 +1526,8 @@ static int scan_devices(void)
             drop_inspected(&g_devs[g_ndevs]);
             continue;
         }
+        if (g_toggle_key_count && g_devs[g_ndevs].toggle_capable)
+            read_toggle_keys(&g_devs[g_ndevs].toggle_state, g_devs[g_ndevs].fd);
         LOGI("%s '%s' class=%d %s", path, g_devs[g_ndevs].name,
              g_devs[g_ndevs].cls, g_devs[g_ndevs].grabbed ? "GRABBED" :
              (g_devs[g_ndevs].lease_fd >= 0 ? "controller suppression pending" : "watch-only"));
@@ -1699,6 +1722,8 @@ static int scan_new_devices(void)
             drop_inspected(&de);
             continue;
         }
+        if (g_toggle_key_count && de.toggle_capable)
+            read_toggle_keys(&de.toggle_state, de.fd);
         g_devs[idx] = de;
         if (idx == g_ndevs)
             g_ndevs++;
@@ -1763,12 +1788,15 @@ static void scan_toggle_devices(int toggle)
             continue;
         unsigned long keys[NBITS(KEY_MAX + 1)] = {0};
         if (query_input(fd, EVIOCGBIT(EV_KEY, sizeof(keys)), keys) < 0 ||
-                !TEST_BIT(toggle, keys)) {
+                !has_toggle_keys(keys, toggle)) {
             close(fd);
             continue;
         }
         struct toggle_watch *watch = &g_toggle_watches[idx];
         watch->fd = fd;
+        watch->toggle_state = (struct toggle_state){0};
+        if (g_toggle_key_count)
+            read_toggle_keys(&watch->toggle_state, fd);
         if (query_input(fd, EVIOCGNAME(sizeof(watch->name)), watch->name) < 0)
             watch->name[0] = '\0';
         watch->name[sizeof(watch->name) - 1] = '\0';
@@ -1778,6 +1806,53 @@ static void scan_toggle_devices(int toggle)
     }
     closedir(dir);
 }
+static void read_toggle_keys(struct toggle_state *state, int fd)
+{
+    unsigned long keys[NBITS(KEY_MAX + 1)] = {0};
+    state->held = 0;
+    if (query_input(fd, EVIOCGKEY(sizeof(keys)), keys) < 0)
+        return;
+    for (unsigned int i = 0; i < g_toggle_key_count; i++)
+        if (TEST_BIT(g_toggle_keys[i], keys))
+            state->held |= 1U << i;
+}
+
+static int toggle_matches(struct toggle_state *state, int fd,
+                          const struct input_event *event, int toggle)
+{
+    if (g_toggle_key_count == 0)
+        return event->type == EV_KEY && event->code == toggle && event->value == 1;
+
+    if (event->type == EV_SYN && event->code == SYN_DROPPED) {
+        state->dropped = 1;
+        state->held = 0;
+        return 0;
+    }
+    if (state->dropped) {
+        if (event->type == EV_SYN && event->code == SYN_REPORT) {
+            read_toggle_keys(state, fd);
+            state->dropped = 0;
+        }
+        return 0;
+    }
+    if (event->type != EV_KEY || event->value == 2)
+        return 0;
+
+    for (unsigned int i = 0; i < g_toggle_key_count; i++) {
+        if (event->code != g_toggle_keys[i])
+            continue;
+        unsigned int bit = 1U << i;
+        unsigned int before = state->held;
+        if (event->value == 0) {
+            state->held &= ~bit;
+            return 0;
+        }
+        state->held |= bit;
+        return state->held != before && state->held == (1U << g_toggle_key_count) - 1;
+    }
+    return 0;
+}
+
 static int pump_toggle_watch(int idx, int toggle)
 {
     struct input_event evs[DEVICE_EVENT_BATCH_SIZE];
@@ -1788,7 +1863,8 @@ static int pump_toggle_watch(int idx, int toggle)
         return -2;
     int count = (int)(n / (ssize_t)sizeof(struct input_event));
     for (int i = 0; i < count; i++) {
-        if (evs[i].type == EV_KEY && evs[i].code == toggle && evs[i].value == 1) {
+        if (toggle_matches(&g_toggle_watches[idx].toggle_state, g_toggle_watches[idx].fd,
+                           &evs[i], toggle)) {
             LOGI("immersive exit key: read-only '%s' scancode=%d",
                  g_toggle_watches[idx].name, toggle);
             return 0;
@@ -1862,16 +1938,16 @@ static int pump_device(int sock, int idx, int toggle)
     for (int i = 0; i < count; i++) {
         struct input_event *e = &evs[i];
 
-        if (e->type == EV_KEY && e->code == toggle) {
+        if ((g_toggle_key_count == 0 || g_devs[idx].toggle_capable)
+                && toggle_matches(&g_devs[idx].toggle_state, g_devs[idx].fd, e, toggle)) {
             /* Check before forwarding or the grabbed test: watched controllers
              * must also exit without Android KeyEvents. Forwarded devices swallow
              * this key; a direct desktop evdev reader still sees its own copy. */
-            if (e->value == 1) {
-                LOGI("immersive exit key: device=%d scancode=%d", idx, toggle);
-                return 0;
-            }
-            continue;
+            LOGI("immersive exit key: device=%d scancode=%d", idx, toggle);
+            return 0;
         }
+        if (g_toggle_key_count == 0 && e->type == EV_KEY && e->code == toggle)
+            continue;
 
         if (!g_devs[idx].grabbed)
             continue;   /* Desktop reads controllers directly; watch-only stays on Android. */
@@ -1925,6 +2001,43 @@ static int should_poll_device_events(const struct dev_entry *entry)
     return entry->cls != IGRAB_CLASS_GAMEPAD || entry->toggle_capable;
 }
 
+static int parse_toggle_chord(const char *text, int toggle)
+{
+    unsigned int count = 0;
+    for (;;) {
+        char *end;
+        if (count == MAX_TOGGLE_KEYS || *text < '1' || *text > '9')
+            return 0;
+        unsigned long code = strtoul(text, &end, 10);
+        if (code > KEY_MAX || (*end != ',' && *end != '\0'))
+            return 0;
+        for (unsigned int i = 0; i < count; i++)
+            if (g_toggle_keys[i] == code)
+                return 0;
+        g_toggle_keys[count++] = (unsigned int)code;
+        if (*end == '\0')
+            break;
+        text = end + 1;
+    }
+    if (count < 2 || toggle <= 0 || g_toggle_keys[0] != (unsigned int)toggle)
+        return 0;
+    g_toggle_key_count = count;
+    return 1;
+}
+
+static int toggle_chord_available(void)
+{
+    if (!g_toggle_key_count)
+        return 1;
+    for (int i = 0; i < g_ntoggle_watches; i++)
+        if (g_toggle_watches[i].fd >= 0)
+            return 1;
+    for (int i = 0; i < g_ndevs; i++)
+        if (g_devs[i].fd >= 0 && g_devs[i].toggle_capable)
+            return 1;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--android-mask-lease") == 0) {
@@ -1945,7 +2058,7 @@ int main(int argc, char **argv)
         return list_devices();
 
     if (argc < 3) {
-        LOGE("usage: %s <bridge_socket> <toggle_scancode> [nodes=...] [exclude=...]",
+        LOGE("usage: %s <bridge_socket> <toggle_scancode> [chord=...] [nodes=...] [exclude=...]",
              argv[0]);
         return 1;
     }
@@ -1958,7 +2071,10 @@ int main(int argc, char **argv)
      * exclusion would hand a node to this session that the caller believes it
      * kept away. */
     for (int i = 3; i < argc; i++) {
-        if (strncmp(argv[i], "nodes=", 6) == 0) {
+        if (strncmp(argv[i], "chord=", 6) == 0) {
+            if (g_toggle_key_count || !parse_toggle_chord(argv[i] + 6, toggle))
+                return 2;
+        } else if (strncmp(argv[i], "nodes=", 6) == 0) {
             if (parse_node_argument(argv[i] + 6, &g_selected, 0) != 0) {
                 LOGE("refusing invalid nodes argument: %s", argv[i] + 6);
                 return 2;
@@ -2027,6 +2143,13 @@ int main(int argc, char **argv)
     }
 
     scan_toggle_devices(toggle);
+    if (!toggle_chord_available()) {
+        LOGE("no readable input node supports all toggle chord keys");
+        send_bye(sock, IGRAB_BYE_ERROR);
+        release_all();
+        close(sock);
+        return 4;
+    }
     if (send_device_list(sock, grabbed) < 0) {
         LOGE("handshake failed: %s", strerror(errno));
         release_all();
@@ -2228,6 +2351,11 @@ int main(int argc, char **argv)
                 break;
             }
             scan_toggle_devices(toggle);
+            if (!toggle_chord_available()) {
+                LOGI("toggle chord device disconnected; releasing immersive input");
+                reason = IGRAB_BYE_ERROR;
+                break;
+            }
             last_scan = now_ms();
         }
 

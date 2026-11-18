@@ -46,6 +46,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.List;
@@ -1008,6 +1009,8 @@ public class SettingsActivity extends Activity {
         private final Button button;
         private final TextView status;
         private CountDownTimer timer;
+        private final LinkedHashMap<Integer, KeyEvent> held = new LinkedHashMap<>();
+        private boolean invalidChord;
 
         KeyBinding(LinearLayout root, String keyPref, String scanPref,
                    int buttonLabelRes) {
@@ -1046,13 +1049,15 @@ public class SettingsActivity extends Activity {
                 public void onFinish() {
                     // Timed out with no key: clear the binding, matching the
                     // original behaviour of "listen, then store whatever came".
-                    bind(UNBOUND, UNBOUND);
+                    bind(UNBOUND, UNBOUND, "", "");
                 }
             }.start();
         }
 
         /** Stop listening without changing what is bound. */
         void cancel() {
+            held.clear();
+            invalidChord = false;
             if (timer != null) {
                 timer.cancel();
                 timer = null;
@@ -1060,14 +1065,18 @@ public class SettingsActivity extends Activity {
             button.setText(buttonLabelRes);
         }
 
-        void bind(int keycode, int scancode) {
+        void bind(int keycode, int scancode, String chord, String label) {
             cancel();
             listeningBinding = null;
             SharedPreferences.Editor edit =
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
             edit.putInt(keyPref, keycode);
-            if (scanPref != null)
+            if (scanPref != null) {
                 edit.putInt(scanPref, scancode);
+                edit.remove(ImmersiveMode.KEY_MODIFIERS);
+                edit.putString(ImmersiveMode.KEY_CHORD, chord);
+                edit.putString(ImmersiveMode.KEY_CHORD_LABEL, label);
+            }
             edit.apply();
             updateStatus();
         }
@@ -1076,12 +1085,29 @@ public class SettingsActivity extends Activity {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
             int bound = prefs.getInt(keyPref, UNBOUND);
             int scan = scanPref == null ? UNBOUND : prefs.getInt(scanPref, UNBOUND);
+            if (scanPref != null) {
+                ImmersiveShortcut chord = ImmersiveShortcut.parse(
+                        prefs.getString(ImmersiveMode.KEY_CHORD, ""));
+                if (chord.isBound()) {
+                    status.setText(getString(R.string.status_current,
+                            chord.statusLabel(SettingsActivity.this,
+                                    prefs.getString(ImmersiveMode.KEY_CHORD_LABEL, ""))));
+                    status.setTextColor(Color.GRAY);
+                    return;
+                }
+                if (prefs.getInt(ImmersiveMode.KEY_MODIFIERS, 0) != 0) {
+                    status.setText(R.string.status_current_none);
+                    status.setTextColor(Color.GRAY);
+                    return;
+                }
+            }
             if (bound == UNBOUND && scan <= 0) {
                 status.setText(R.string.status_current_none);
                 status.setTextColor(Color.GRAY);
                 return;
             }
-            String name = KeyCodeMapper.keyName(SettingsActivity.this, bound, scan);
+            String name = scanPref == null ? KeyCodeMapper.keyName(SettingsActivity.this, bound, scan)
+                    : ImmersiveShortcut.statusLabel(SettingsActivity.this, bound, scan);
             // A binding that resolves to no evdev code is useless to the root
             // helper, so say so here rather than let the key quietly do nothing.
             if (scanPref != null && resolveEvdev(bound, scan) <= 0) {
@@ -1096,6 +1122,52 @@ public class SettingsActivity extends Activity {
         private int resolveEvdev(int keycode, int scancode) {
             return scancode > 0 ? scancode
                     : (keycode == UNBOUND ? -1 : KeyCodeMapper.getScanCode(keycode));
+        }
+
+        void onKeyDown(KeyEvent event) {
+            int keycode = event.getKeyCode();
+            int scan = event.getScanCode();
+            if (event.getRepeatCount() != 0
+                    || (keycode == KeyEvent.KEYCODE_UNKNOWN && (scanPref == null || scan <= 0)))
+                return;
+            if (scanPref == null) {
+                bind(keycode, scan, "", "");
+                return;
+            }
+            if (held.isEmpty() || held.values().iterator().next().getDeviceId() == event.getDeviceId())
+                held.putIfAbsent(bindingKey(event), new KeyEvent(event));
+        }
+
+        void onKeyUp(KeyEvent event) {
+            KeyEvent released = held.get(bindingKey(event));
+            if (released == null || released.getDeviceId() != event.getDeviceId())
+                return;
+            if (invalidChord) {
+                held.remove(bindingKey(event));
+                invalidChord = !held.isEmpty();
+                return;
+            }
+            if (held.size() == 1) {
+                bind(released.getKeyCode(), released.getScanCode(), "", "");
+                return;
+            }
+            if (held.size() <= ImmersiveShortcut.MAX_KEYS) {
+                ArrayList<String> codes = new ArrayList<>(held.size());
+                for (KeyEvent key : held.values())
+                    codes.add(Integer.toString(key.getScanCode()));
+                String chord = String.join(",", codes);
+                if (ImmersiveShortcut.parse(chord).isBound()) {
+                    bind(UNBOUND, UNBOUND, chord, ImmersiveShortcut.label(held.values()));
+                    return;
+                }
+            }
+            // Discard this attempt. Wait for the held keys to be released before retrying.
+            held.remove(bindingKey(event));
+            invalidChord = true;
+        }
+
+        private int bindingKey(KeyEvent event) {
+            return event.getScanCode() > 0 ? event.getScanCode() : -1 - event.getKeyCode();
         }
     }
 
@@ -2026,14 +2098,15 @@ public class SettingsActivity extends Activity {
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (listeningBinding == null) return super.onKeyDown(keyCode, event);
 
-        // Ignore generic Virtual Keyboard keycode (it's a placeholder)
-        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) return true;
+        listeningBinding.onKeyDown(event);
+        return true;
+    }
 
-        // The scan code is recorded alongside the key code: it is what the
-        // immersive-mode root helper matches on, and it is the only identity a
-        // key like Volume Up has once Android is out of the picture.
-        listeningBinding.bind(keyCode, event.getScanCode());
-        Log.i(TAG, "Bound keycode: " + keyCode + " scancode: " + event.getScanCode());
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (listeningBinding == null || listeningBinding.scanPref == null)
+            return super.onKeyUp(keyCode, event);
+        listeningBinding.onKeyUp(event);
         return true;
     }
 

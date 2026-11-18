@@ -34,6 +34,7 @@
     <string name="status_current">Atual: %1$s</string>
     <string name="status_current_no_scancode">Atual: %1$s — essa tecla não reporta um scan code, então o modo imersivo não pode usá-la. Mapeie uma tecla física como Aumentar Volume.</string>
     <string name="keycode_unknown">Keycode %1$d</string>
+    <string name="immersive_status_keycode">Keycode %1$d</string>
     <string name="scancode_unknown">Scan code %1$d</string>
     <!-- Immersive mode -->
     <string name="section_immersive">Modo Imersivo</string>

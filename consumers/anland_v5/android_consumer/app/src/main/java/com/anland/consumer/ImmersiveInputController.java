@@ -36,6 +36,7 @@ final class ImmersiveInputController {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private ImmersiveInputSource runningSource = ImmersiveInputSource.DIRECT_EVENT_NODES;
+    private KeyEvent consumedTrigger;
 
     ImmersiveInputController(ImmersiveMode.Host host) {
         this.ctx = host.context();
@@ -108,6 +109,7 @@ final class ImmersiveInputController {
      * leaving it is what takes Gold off again.
      */
     void onSessionActiveChanged(boolean active) {
+        direct.clearToggleKeys();
         setAnlandProfileRequest(active);
     }
 
@@ -174,15 +176,27 @@ final class ImmersiveInputController {
 
         if (!direct.isBoundToggle(event))
             return false;
+        boolean matches = direct.updateToggleKeys(event);
+        boolean wasConsumed = consumedTrigger != null
+                && event.getDeviceId() == consumedTrigger.getDeviceId()
+                && event.getScanCode() == consumedTrigger.getScanCode()
+                && event.getKeyCode() == consumedTrigger.getKeyCode();
+        boolean freshDown = event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0;
+        if (wasConsumed && (freshDown || event.getAction() == KeyEvent.ACTION_UP))
+            consumedTrigger = null;
         if (direct.consumeSuppressedToggle(event))
             return true;
 
-        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-            if (isActive()) {
-                stopSession();
-            } else {
-                startSession(current, direct.toggleScanCodeFor(event));
-            }
+        if (!freshDown)
+            return wasConsumed;
+        if (!matches)
+            return false;
+
+        consumedTrigger = new KeyEvent(event);
+        if (isActive()) {
+            stopSession();
+        } else {
+            startSession(current, direct.toggleScanCodeFor(event));
         }
         return true;
     }
@@ -320,6 +334,8 @@ final class ImmersiveInputController {
      * switches alike: a session must never outlive the foreground.
      */
     void stop() {
+        direct.clearToggleKeys();
+        consumedTrigger = null;
         direct.stop();
         // Warm the occupancy answer for the next press. Left to the resume
         // refresh, a session started more than a few seconds later finds the

@@ -77,5 +77,11 @@ interface InputGrabTransport {
                 && start(toggleScanCode, selectedNodes, excludedNodes);
     }
 
+    default boolean start(int toggleScanCode, Collection<String> selectedNodes,
+                          Collection<String> excludedNodes, ImmersiveInputSource source,
+                          String chord) {
+        return chord.isEmpty() && start(toggleScanCode, selectedNodes, excludedNodes, source);
+    }
+
     void stop();
 }

@@ -34,6 +34,7 @@
     <string name="status_current">目前：%1$s</string>
     <string name="status_current_no_scancode">目前：%1$s —— 該按鍵不回報掃描碼，沉浸模式無法使用它。請改綁音量+等硬體按鍵。</string>
     <string name="keycode_unknown">鍵碼 %1$d</string>
+    <string name="immersive_status_keycode">鍵碼%1$d</string>
     <string name="scancode_unknown">掃描碼 %1$d</string>
     <!-- Immersive mode -->
     <string name="section_immersive">沉浸模式</string>
@@ -41,7 +42,7 @@
     <string name="immersive_hint">將觸控、鍵盤和滑鼠等輸入直接交給 Linux 桌面，避免 Android 系統手勢干擾。需要 root。在下方設定切換按鍵：按一次進入，再按一次離開；切換到其他應用程式時會自動離開。</string>
     <string name="immersive_hud_touch_switch">沉浸模式下可觸控 HUD 控制項</string>
     <string name="immersive_hud_touch_hint">開啟後，觸控螢幕被獨佔期間 HUD 按鍵、方向鍵、觸控板仍可使用；關閉則所有觸控直接交給桌面，HUD 只顯示不回應。</string>
-    <string name="bind_immersive_key_button">綁定沉浸模式按鍵</string>
+    <string name="bind_immersive_key_button">綁定沉浸模式按鍵或組合鍵</string>
     <string name="immersive_exited">已離開沉浸模式</string>
     <string name="immersive_no_scancode">請先為沉浸模式綁定按鍵</string>
     <string name="immersive_failed">無法進入沉浸模式：root 遭拒或無法使用</string>

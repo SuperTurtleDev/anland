@@ -391,9 +391,18 @@ final class InputGrab implements InputGrabTransport {
     @Override
     public boolean start(int toggleScanCode, Collection<String> selectedNodes,
                          Collection<String> excludedNodes, ImmersiveInputSource source) {
+        return start(toggleScanCode, selectedNodes, excludedNodes, source, "");
+    }
+
+    @Override
+    public boolean start(int toggleScanCode, Collection<String> selectedNodes,
+                         Collection<String> excludedNodes, ImmersiveInputSource source,
+                         String chord) {
         if (running)
             return true;
+        ImmersiveShortcut shortcut = ImmersiveShortcut.parse(chord);
         if (source == null || toggleScanCode < 0
+                || (!chord.isEmpty() && (!shortcut.isBound() || shortcut.firstKey() != toggleScanCode))
                 || (toggleScanCode == 0 && !source.allowsUnboundToggle()))
             return false;
 
@@ -436,7 +445,7 @@ final class InputGrab implements InputGrabTransport {
 
         final String helper = context.getApplicationInfo().nativeLibraryDir
                 + "/libinputgrab.so";
-        Thread worker = new Thread(() -> run(helper, socketName, toggleScanCode, token,
+        Thread worker = new Thread(() -> run(helper, socketName, toggleScanCode, chord, token,
                 nodesArgument, excludeArgument, source.helperArgument()), "anland-inputgrab");
         worker.setDaemon(true);
         worker.start();
@@ -473,7 +482,7 @@ final class InputGrab implements InputGrabTransport {
 
     // ---- worker ----------------------------------------------------------
 
-    private void run(String helperPath, String socketName, int toggleScanCode,
+    private void run(String helperPath, String socketName, int toggleScanCode, String chord,
                      String token, String nodesArgument, String excludeArgument,
                      String sourceArgument) {
         int reason = REASON_NO_ROOT;
@@ -487,6 +496,8 @@ final class InputGrab implements InputGrabTransport {
             command.append(helperPath).append(' ').append(socketName).append(' ')
                     .append(toggleScanCode).append(" igrabtoken=").append(token)
                     .append(' ').append(sourceArgument);
+            if (!chord.isEmpty())
+                command.append(" chord=").append(chord);
             if (!nodesArgument.isEmpty())
                 command.append(' ').append(nodesArgument);
             if (!excludeArgument.isEmpty())

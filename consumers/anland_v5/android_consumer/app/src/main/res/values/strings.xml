@@ -126,6 +126,7 @@
     <string name="status_current">Current: %1$s</string>
     <string name="status_current_no_scancode">Current: %1$s — this key reports no scan code, so immersive mode cannot use it. Bind a hardware key such as Volume Up.</string>
     <string name="keycode_unknown">Keycode %1$d</string>
+    <string name="immersive_status_keycode">Keycode %1$d</string>
     <string name="scancode_unknown">Scan code %1$d</string>
 
     <!-- Immersive mode -->
@@ -136,7 +137,7 @@
     <string name="immersive_hud_touch_hint">Keeps the on-screen HUD keys, d-pad and touchpad working while the panel is grabbed. Turn it off to send every touch straight to the desktop, leaving the HUD display-only.</string>
     <string name="immersive_oplus_refresh_rate_switch">Keep OnePlus refresh rate fixed</string>
     <string name="immersive_oplus_refresh_rate_hint">Prevents refresh-rate drops on some OnePlus devices when input events are not received.</string>
-    <string name="bind_immersive_key_button">Bind Immersive Mode Key</string>
+    <string name="bind_immersive_key_button">Bind Immersive Shortcut</string>
     <string name="immersive_exited">Immersive mode off</string>
     <string name="immersive_no_scancode">Bind a key for immersive mode first</string>
     <string name="immersive_failed">Could not start immersive mode: root was denied or is unavailable</string>
