@@ -56,3 +56,6 @@ else()
     target_link_libraries(display_consumer socket_utils pthread)
 
 endif()
+
+add_executable(anland_audio_headless consumers/headless_audio/anland_audio_headless.c)
+target_link_libraries(anland_audio_headless socket_utils pthread)
