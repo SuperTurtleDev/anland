@@ -19,6 +19,12 @@ meta_anland_keyboard_get_focus (MetaWaylandKeyboard *keyboard)
   return keyboard->focus_surface;
 }
 
+struct xkb_keymap *
+meta_anland_keyboard_get_keymap (MetaWaylandKeyboard *keyboard)
+{
+  return keyboard->xkb_info.keymap;
+}
+
 gboolean
 meta_anland_keyboard_send_text_keys (MetaWaylandKeyboard *keyboard,
                                     struct wl_client    *client,

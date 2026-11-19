@@ -1122,7 +1122,7 @@ deliver_text_batch (MetaAnlandInput      *input,
 {
   struct wl_client *client =
     wl_resource_get_client (meta_wayland_surface_get_resource (focus));
-  struct xkb_keymap *keymap = meta_backend_get_xkb_keymap (input->backend);
+  struct xkb_keymap *keymap = meta_anland_keyboard_get_keymap (keyboard);
   g_autofree char *serialized = NULL;
   g_autoptr (GString) overlay = NULL;
   const char *symbols, *start = cursor;
