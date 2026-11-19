@@ -1,0 +1,1 @@
+../../common/startup/niri.sh

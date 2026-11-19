@@ -1,0 +1,26 @@
+{
+  "suite": "Fedora 45",
+  "private_prefix": "/usr/lib64/hyprland-anland",
+  "public_linkage": "built-in-once-in-private-aquamarine",
+  "sources": {
+    "hyprwayland-scanner": { "url": "https://github.com/hyprwm/hyprwayland-scanner.git" },
+    "hyprland-protocols": { "url": "https://github.com/hyprwm/hyprland-protocols.git" },
+    "hyprutils": { "url": "https://github.com/hyprwm/hyprutils.git", "revision": "a2dbd8a4cc51f7cbe4224732668392bb1aa79df2" },
+    "hyprlang": { "url": "https://github.com/hyprwm/hyprlang.git" },
+    "hyprgraphics": { "url": "https://github.com/hyprwm/hyprgraphics.git" },
+    "aquamarine": { "url": "https://github.com/hyprwm/aquamarine.git", "revision": "f31c47a1b9d300847d8fc3108ad959448103dfc1" },
+    "hyprland": { "url": "https://github.com/hyprwm/Hyprland.git", "revision": "39d7e209c79d451efab1b21151d5938289da838d" },
+    "hyprwire": { "url": "https://github.com/hyprwm/hyprwire.git" },
+    "hyprcursor": { "url": "https://github.com/hyprwm/hyprcursor.git" },
+    "glaze": { "url": "https://github.com/stephenberry/glaze.git", "revision": "b518eec7a22e56ffa238b072c07f47efa7cea97f" }
+  },
+  "plugins": {
+    "hyprgrass": { "url": "https://github.com/horriblename/hyprgrass.git", "revision": "a8979156cd87e7c58d126ac0437cae498a5b2d18" },
+    "wf-touch": { "url": "https://github.com/WayfireWM/wf-touch.git", "revision": "8974eb0f6a65464b63dd03b842795cb441fb6403" }
+  },
+  "patches": {
+    "aquamarine.patch": "da8f1577eb2a8d3907119b61b1c45104a6fe04f0297a82f2dec120071207df01",
+    "hyprland.patch": "8d383e1106af18ae9bee0d83b457a778d0c869fe172a35f35207419ef6e689ec",
+    "hyprgrass.patch": "b9c076e74a158c8cd05f5636e428297556e5b8d4d64a2068479729c2b277c8d6"
+  }
+}

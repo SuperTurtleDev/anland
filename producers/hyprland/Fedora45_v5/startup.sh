@@ -1,0 +1,1 @@
+../../common/startup/hyprland-fedora.sh

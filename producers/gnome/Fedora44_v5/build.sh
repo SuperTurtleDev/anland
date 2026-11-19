@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Fedora 44 aarch64: rebuild the current Fedora Mutter SRPM.
+# Fedora aarch64: rebuild the current Fedora Mutter SRPM.
 # ANLAND_STAGE=check|prepare|build ANLAND_WITH_DEPS=1 JOBS=4 ANLAND_INSTALL=0
 set -uo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+FEDORA_RELEASE=${SCRIPT_DIR##*/Fedora}
+FEDORA_RELEASE=${FEDORA_RELEASE%_v5}
 fedora_die() { printf 'fedora-build: %s\n' "$*" >&2; exit 1; }
 
 fedora_run() { "$@" || fedora_die "failed: $*"; }
@@ -10,8 +12,8 @@ fedora_run() { "$@" || fedora_die "failed: $*"; }
 fedora_preflight() {
     local ID VERSION_ID
     source /etc/os-release || fedora_die 'cannot identify distribution'
-    [[ $ID == fedora && $VERSION_ID == 44 && $(uname -m) == aarch64 ]] ||
-        fedora_die 'requires native Fedora 44 aarch64'
+    [[ $ID == fedora && $VERSION_ID == "$FEDORA_RELEASE" && $VERSION_ID =~ ^4[45]$ && $(uname -m) == aarch64 ]] ||
+        fedora_die "requires native Fedora $FEDORA_RELEASE aarch64"
     [[ $(id -u) != 0 ]] || fedora_die 'compile as an ordinary user'
     JOBS=${JOBS:-4}
     [[ $JOBS =~ ^[1-9][0-9]*$ ]] || fedora_die 'JOBS must be a positive integer'
@@ -30,7 +32,7 @@ fedora_initialize() {
     fedora_preflight
     ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd -P) || fedora_die 'repository root'
     source "$ROOT/producers/common/fedora-latest-srpm.sh" || fedora_die 'cannot load shared Fedora build functions'
-    WORKDIR=$(realpath -m -- "${WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-$1-fedora44}") || fedora_die 'cache path'
+    WORKDIR=$(realpath -m -- "${WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-$1-fedora${FEDORA_RELEASE}}") || fedora_die 'cache path'
     ARTIFACTS_DIR=$(realpath -m -- "${ARTIFACTS_DIR:-${ARTIFACTS:-$SCRIPT_DIR/artifacts}}") || fedora_die 'artifact path'
     [[ $WORKDIR != / && $WORKDIR != "$HOME" && $WORKDIR != "$ROOT" && $WORKDIR != "$ROOT/"* ]] || fedora_die 'WORKDIR must be a separate cache'
     [[ $ARTIFACTS_DIR != / && $ARTIFACTS_DIR != "$HOME" && $ARTIFACTS_DIR != "$ROOT" && $ARTIFACTS_DIR != "$WORKDIR" ]] || fedora_die 'unsafe artifact directory'
@@ -109,10 +111,10 @@ fedora_finish() {
     [[ ${#packages[@]} -gt 0 ]] || fedora_die 'empty Fedora package set'
     printf '%s\n' "${packages[@]##*/}" > "$WORKDIR/packages.list" || fedora_die 'package list'
     (cd "$ARTIFACTS_DIR" && sha256sum -- "${packages[@]##*/}" > "$WORKDIR/SHA256SUMS" && sha256sum -c "$WORKDIR/SHA256SUMS") || fedora_die 'package checksums'
-    python3 - "$ROOT" "$FEDORA_INPUT_ID" "$WORKDIR/build-inputs.json" <<'PY' || fedora_die 'build record'
+    python3 - "$ROOT" "$FEDORA_INPUT_ID" "$WORKDIR/build-inputs.json" "fedora$FEDORA_RELEASE" <<'PY' || fedora_die 'build record'
 import json,subprocess,sys
-root,identity,out=sys.argv[1:]
-record={'distribution':'fedora44','architecture':'aarch64','input_sha256':identity,
+root,identity,out,distribution=sys.argv[1:]
+record={'distribution':distribution,'architecture':'aarch64','input_sha256':identity,
  'anland_revision':subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip(),
  'graphical_test':False}
 open(out,'w').write(json.dumps(record,indent=2)+'\n')
@@ -128,7 +130,7 @@ PY
 fedora_initialize gnome
 fedora_dependencies pipewire-devel
 if [[ $ANLAND_STAGE == check ]]; then
-    printf 'FEDORA44_RECIPE_OK gnome (current Mutter SRPM; no compilation or graphical test)\n'; exit 0
+    printf 'FEDORA%s_RECIPE_OK gnome (current Mutter SRPM; no compilation or graphical test)\n' "$FEDORA_RELEASE"; exit 0
 fi
 mutter_patch_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["patches"]["mutter.patch"])' \
     "$SCRIPT_DIR/sources.json") || fedora_die 'cannot read Mutter patch checksum'
@@ -138,22 +140,24 @@ fedora_srpm_prepare mutter "$SCRIPT_DIR/mutter.patch" \
     "$SCRIPT_DIR/mutter" . '-Danland=enabled'
 if [[ $ANLAND_STAGE == prepare ]]; then
     fedora_xwayland
-    printf 'FEDORA44_PREPARED gnome\n'; exit 0
+    printf 'FEDORA%s_PREPARED gnome\n' "$FEDORA_RELEASE"; exit 0
 fi
 # The upstream distro spec retains its introspection/data/runtime packages.
 # No GNOME Shell ABI spoofing, cross-major replacement or service manipulation.
-python3 - "$FEDORA_SRPM_SPEC" <<'PY' || fedora_die 'cannot add Fedora launcher'
+python3 - "$FEDORA_SRPM_SPEC" "$FEDORA_RELEASE" <<'PY' || fedora_die 'cannot add Fedora launcher'
 from pathlib import Path
 import re, sys
 p=Path(sys.argv[1]); s=p.read_text()
+gnome_major = {"44": 50, "45": 51}[sys.argv[2]]
 if 'Source99: anland-startup.sh' not in s:
     if 'Source99:' in s: raise SystemExit('Source99 collision')
     s=s.replace('%description\n','Source99: anland-startup.sh\n\n%description\n',1)
     s=s.replace('%meson_install\n','%meson_install\ninstall -Dm755 %{SOURCE99} %{buildroot}%{_bindir}/gnome-anland\n',1)
     s=s.replace('%files -f %{name}.lang\n','%files -f %{name}.lang\n%{_bindir}/gnome-anland\n',1)
-    # Complete session components come from Fedora's matching GNOME50 packages.
+    # Keep the desktop session on Fedora's matching GNOME Shell ABI.
     s, count = re.subn(r'^Requires:[ \t]+dbus[ \t]*$',
-                       'Requires: dbus\nRequires: gnome-shell >= 50, gnome-shell < 51, gnome-session, bash, procps-ng, util-linux',
+                       f'Requires: dbus\nRequires: gnome-shell >= {gnome_major}, gnome-shell < {gnome_major + 1}, '
+                       'gnome-session, bash, procps-ng, util-linux',
                        s, count=1, flags=re.M)
     if count != 1: raise SystemExit('expected one native dbus runtime requirement')
     p.write_text(s)
