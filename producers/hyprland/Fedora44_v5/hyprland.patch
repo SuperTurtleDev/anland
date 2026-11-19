@@ -7,7 +7,7 @@ Subject: Anland v5 hyprland native integration (Debian 13)
  )
  
 -pkg_search_module(LUA REQUIRED IMPORTED_TARGET GLOBAL lua55 lua5.5 lua-55 lua-5.5 lua>=5.5 lua<5.6)
-+pkg_search_module(LUA REQUIRED IMPORTED_TARGET GLOBAL lua54 lua5.4 lua-5.4 lua>=5.4)
++pkg_check_modules(LUA REQUIRED IMPORTED_TARGET GLOBAL lua>=5.4 lua<5.6)
  
  find_package(hyprwayland-scanner 0.3.10 REQUIRED)
  
