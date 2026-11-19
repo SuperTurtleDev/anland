@@ -15,7 +15,7 @@
   },
   "patches": {
     "niri.patch": "18b8a8deda908a227f11f7abcb82f48cea3de5195453fc7de071d0c8cbe4086f",
-    "smithay.patch": "d23e6ea89713aa98454fa8b63071b8abd2176bf7ede65c102c811590a33b6c63",
+    "smithay.patch": "6e6c22b4c327422e842ae21190d106a38a7aae1fb02d26c06f5272910c82b95e",
     "xwayland.patch": "897fae87e2f3e94d19cf36a41b07951666f3a7a9f0612d5b5a5e077d652bf28d"
   },
   "rust_toolchain": "1.98.0"

@@ -13,10 +13,10 @@
 #include "libdisplay_producer/anland_hdr.h"
 #include "anland_logging.h"
 #include "anland_output.h"
+#include "anland_text_input.h"
 
 #include "core/drmdevice.h"
 #include "core/renderloop.h"
-#include "inputmethod.h"
 #include "main.h"
 #include "opengl/egldisplay.h"
 #ifdef ANLAND_KWIN_67
@@ -130,6 +130,7 @@ AnlandBackend::~AnlandBackend()
         m_reconnectTimer->stop();
     }
     releaseTabletTools();
+    m_textInput.reset();
     m_inputDevice.reset();
     // m_outputs are QObject children of this backend; ~QObject deletes them.
     m_outputs.clear();
@@ -633,7 +634,11 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
         break;
     }
     case ANLAND_DEVICE_IN_KEY:
-        m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == ANLAND_DEVICE_ACTION_DOWN);
+        if (m_textInput) {
+            m_textInput->key(ev.key.keycode, ev.key.action == ANLAND_DEVICE_ACTION_DOWN);
+        } else {
+            m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == ANLAND_DEVICE_ACTION_DOWN);
+        }
         break;
     case ANLAND_DEVICE_IN_TOUCH: {
         const QPointF pos = mapInputToLogical(QPointF(ev.touch.x, ev.touch.y));
@@ -779,6 +784,9 @@ void AnlandBackend::enterFallback()
     }
     qCWarning(KWIN_ANLAND) << "consumer disconnected, entering fallback";
 
+    if (m_textInput) {
+        m_textInput->reset();
+    }
     if (m_inputDevice) {
         m_inputDevice->touchCancel();
     }
@@ -1278,26 +1286,13 @@ void AnlandBackend::sendClipboardToKWin(const QByteArray &text)
 
 void AnlandBackend::sendTextInputToKWin(const QByteArray &text)
 {
-    if (m_inFallback) {
+    if (m_inFallback || !waylandServer() || !waylandServer()->seat()) {
         return;
     }
-
-    const QString string = QString::fromUtf8(text);
-    if (string.isEmpty()) {
-        return;
+    if (!m_textInput) {
+        m_textInput = std::make_unique<AnlandTextInput>(m_inputDevice.get(), waylandServer()->seat());
     }
-
-    if (InputMethod *inputMethod = kwinApp()->inputMethod()) {
-        // Route Android's committed UTF-8 text through KWin's normal input-method
-        // path. It submits through text-input v1/v2/v3 when available, and falls
-        // back to keysym -> virtual keyboard events when the client has no
-        // text-input protocol enabled.
-#ifdef ANLAND_KWIN_68
-        inputMethod->sendText(string);
-#else
-        inputMethod->commitText(string);
-#endif
-    }
+    m_textInput->submit(QString::fromUtf8(text));
 }
 
 } // namespace KWin

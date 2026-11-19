@@ -5,6 +5,6 @@
     }
   },
   "patches": {
-    "mutter.patch": "5f9a30dcf97dac7bb5f6745dd16e19b040366eb2d57caf26b2ea600e013a4da2"
+    "mutter.patch": "acfbe8fdb0e2a05b934392edc62006874a6fbcfee50bf1e0ecaf119444215722"
   }
 }

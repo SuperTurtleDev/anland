@@ -805,7 +805,7 @@ struct PointerFocusWatch {
                                          std::memory_order_relaxed);
             backend->m_TextIdentity.fetch_add(1, std::memory_order_relaxed);
             if (backend->m_Ime)
-                cancel_local_text(backend->m_Ime);
+                cancel_local_text(backend->m_Ime, true);
         }
         static void PointerSeatDestroyed(wl_listener *listener, void *)
         {
@@ -823,6 +823,8 @@ struct PointerFocusWatch {
             wl_signal_add(&wlserver.wlr.seat->keyboard_state.events.focus_change,
                           &m_PointerFocus.keyboard_focus);
             wl_signal_add(&wlserver.wlr.seat->events.destroy, &m_PointerFocus.destroy);
+            m_TextFocused.store(wlserver.wlr.seat->keyboard_state.focused_surface != nullptr,
+                                std::memory_order_relaxed);
         }
         void DetachPointerFocus()
         {
@@ -832,6 +834,24 @@ struct PointerFocusWatch {
             wl_list_remove(&m_PointerFocus.keyboard_focus.link);
             wl_list_remove(&m_PointerFocus.destroy.link);
             m_PointerFocus.backend = nullptr;
+        }
+
+        static void DispatchKey(void *userdata, uint32_t code, bool pressed, uint32_t time)
+        {
+            auto *self = static_cast<CAnlandBackend *>(userdata);
+            if (pressed)
+                self->m_Keys.insert(code);
+            else if (!self->m_Keys.erase(code))
+                return;
+
+            // The device belongs to the keyboard group, which forwards the event
+            // and updates the physical key and modifier state.
+            wlr_keyboard_key_event key{};
+            key.time_msec = time;
+            key.keycode = code;
+            key.update_state = true;
+            key.state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED;
+            wlr_keyboard_notify_key(wlserver.wlr.virtual_keyboard_device, &key);
         }
 
         static void InputSink(void *userdata, const anland_gamescope_input_event *ev)
@@ -847,15 +867,8 @@ struct PointerFocusWatch {
             wlserver_lock();
             switch (ev->kind) {
             case AG_KEY:
-                if (ev->pressed) self->m_Keys.insert(ev->code); else self->m_Keys.erase(ev->code);
-                // virtual_keyboard_device is registered with keyboard_group:
-                // notify_key updates pressed keys/XKB and forwards exactly once.
-                {
-                    wlr_keyboard_key_event key{};
-                    key.time_msec = time; key.keycode = ev->code; key.update_state = true;
-                    key.state = ev->pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED;
-                    wlr_keyboard_notify_key(wlserver.wlr.virtual_keyboard_device, &key);
-                }
+                if (!queue_local_key(self->m_Ime, DispatchKey, self, ev->code, ev->pressed, time))
+                    DispatchKey(self, ev->code, ev->pressed, time);
                 break;
             case AG_MOTION: {
                 // DIAG: prove the motion path runs and what it forwards.
@@ -1028,6 +1041,8 @@ struct PointerFocusWatch {
             clock_gettime(CLOCK_MONOTONIC, &now);
             uint32_t time = uint32_t(uint64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000);
             wlserver_lock();
+            if (m_Ime)
+                cancel_local_text(m_Ime);
             for (auto code : m_Keys) {
                 wlr_keyboard_key_event key{};
                 key.time_msec = time; key.keycode = code; key.update_state = true;
@@ -1099,29 +1114,9 @@ struct PointerFocusWatch {
                 return;
             }
             if (type != ANLAND_DEVICE_IN_TEXT_INPUT || !size || !self->m_Ime) return;
-            // Validate before taking the Wayland lock; all failure paths remain unlocked.
-            for (size_t i = 0; i < size;) {
-                const unsigned char c = text[i];
-                const unsigned n = c == 0 ? 0 : c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 :
-                    c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
-                if (!n || i + n > size) return;
-                for (unsigned j = 1; j < n; ++j)
-                    if ((static_cast<unsigned char>(text[i+j]) & 0xC0) != 0x80) return;
-                if (n == 3 && ((c == 0xE0 && (unsigned char)text[i+1] < 0xA0) ||
-                               (c == 0xED && (unsigned char)text[i+1] >= 0xA0))) return;
-                if (n == 4 && ((c == 0xF0 && (unsigned char)text[i+1] < 0x90) ||
-                               (c == 0xF4 && (unsigned char)text[i+1] >= 0x90))) return;
-                i += n;
-            }
             wlserver_lock();
-            const uint64_t currentIdentity = TextIdentity(self);
-            if (!identity || identity != currentIdentity) {
-                cancel_local_text(self->m_Ime);
-                wlserver_unlock();
-                return;
-            }
-            if (!type_local_text(self->m_Ime, text, size))
-                fprintf(stderr, "Anland: text input rejected (local IME queue limit)\\n");
+            if (identity && identity == TextIdentity(self) && !type_local_text(self->m_Ime, text, size))
+                fprintf(stderr, "Anland: text input rejected (invalid UTF-8 or full local IME queue)\n");
             wlserver_unlock();
         }
         AnlandClipboard *m_Clipboard = nullptr;

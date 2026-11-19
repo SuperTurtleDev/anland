@@ -16,6 +16,7 @@
  * device: generated presses go only through the seat, not WM key bindings. */
 #define TEXT_QUEUE_MAX 65536
 #define TEXT_BATCH_MAX 32
+#define TEXT_KEYMAP_SETTLE_MS 75
 #define TEXT_KEYMAP_HOLD_MS 100
 /* NoSymbol denotes a normal key event; validated text never uses NoSymbol. */
 struct text_item {
@@ -38,6 +39,7 @@ struct mango_anland_text {
 	 * can reuse a matching prefix of a previous batch's slots. */
 	xkb_keysym_t mapped[TEXT_BATCH_MAX];
 	size_t mapped_count;
+	size_t settling_count;
 	bool batch_active; /* Unicode keyboard owns the seat, including idle time. */
 	bool holding; /* last presses need time to be consumed before v3 takes over */
 };
@@ -82,6 +84,7 @@ static void restore_keyboard(struct mango_anland_text *text) {
 	text->keyboard.keymap_client = NULL;
 	text->keyboard.keymap_fallback = NULL;
 	text->mapped_count = 0; /* Never reuse another focus/client's mapped suffix. */
+	text->settling_count = 0;
 	text->batch_active = false;
 	text->holding = false;
 }
@@ -128,13 +131,17 @@ bool mango_anland_text_handle_key(struct mango_anland_text *text,
 	if (!keyboard || !event) return false;
 	/* A normal-map hold blocks only the next Unicode map, not normal keys.
 	 * Pending items still enforce FIFO, including reset-preserved releases. */
-	if (!text || (!text->count && (!text->holding || !text->batch_active))) {
+	if (!text || (!text->count && !text->batch_active)) {
 		if (text) restore_keyboard(text);
 		uint64_t serial = text ? text->reset_serial : 0;
 		struct wlr_keyboard_key_event copy = *event;
 		wlr_keyboard_notify_key(keyboard, &copy);
-		if (text && serial == text->reset_serial && text->holding && !text->batch_active)
+		/* A later IME commit must not remap a real key still being decoded
+		 * by Xwayland, including Backspace when replacing composed text. */
+		if (text && serial == text->reset_serial) {
+			text->holding = true;
 			wl_event_source_timer_update(text->timer, TEXT_KEYMAP_HOLD_MS);
+		}
 		return true;
 	}
 	if (text->count == TEXT_QUEUE_MAX) return false;
@@ -145,7 +152,9 @@ bool mango_anland_text_handle_key(struct mango_anland_text *text,
 		text->key_keyboard = keyboard;
 		wl_signal_add(&keyboard->base.events.destroy, &text->key_keyboard_destroy);
 	}
+	bool idle = !text->count && !text->holding;
 	text->queue[text->count++] = (struct text_item){.key = *event};
+	if (idle) wl_event_source_timer_update(text->timer, 1);
 	return true;
 }
 static void handle_keyboard_destroy(struct wl_listener *listener, void *data) {
@@ -194,8 +203,14 @@ static int text_tick(void *data) {
 	 * their delivery hold finish first. Dequeue before notify: WM bindings
 	 * can change focus and synchronously reset this queue. */
 	if (text->queue[0].symbol == XKB_KEY_NoSymbol) {
+		if (text->batch_active) {
+			restore_keyboard(text);
+			/* Xwayland needs a dispatch turn for the restored map too. */
+			text->holding = true;
+			wl_event_source_timer_update(text->timer, TEXT_KEYMAP_SETTLE_MS);
+			return 0;
+		}
 		text->holding = false;
-		restore_keyboard(text);
 		while (text->count && text->queue[0].symbol == XKB_KEY_NoSymbol) {
 			struct wlr_keyboard_key_event event = text->queue[0].key;
 			--text->count;
@@ -219,14 +234,19 @@ static int text_tick(void *data) {
 	if (text->batch_active && wlr_seat_get_keyboard(text->seat) != &text->keyboard) {
 		restore_keyboard(text);
 	}
-	size_t n = 0;
+	size_t n = text->settling_count;
+	text->settling_count = 0;
+	bool map_changed = false;
 	xkb_keysym_t symbols[TEXT_BATCH_MAX];
-	while (n < text->count && n < TEXT_BATCH_MAX && text->queue[n].symbol) {
-		symbols[n] = text->queue[n].symbol;
-		++n;
+	if (!n) {
+		while (n < text->count && n < TEXT_BATCH_MAX && text->queue[n].symbol) {
+			symbols[n] = text->queue[n].symbol;
+			++n;
+		}
+		map_changed = !text->batch_active || n > text->mapped_count ||
+			memcmp(text->mapped, symbols, n * sizeof(*symbols)) != 0;
 	}
-	if (n > text->mapped_count ||
-			memcmp(text->mapped, symbols, n * sizeof(*symbols)) != 0) {
+	if (map_changed) {
 		char *map = NULL;
 		size_t map_size = 0;
 		FILE *f = open_memstream(&map, &map_size);
@@ -235,7 +255,10 @@ static int text_tick(void *data) {
 		 * held Shift/Ctrl must not transform committed text. */
 		fprintf(f, "xkb_keymap { xkb_keycodes { minimum=8; maximum=255; ");
 		for (size_t i = 0; i < n; i++) fprintf(f, "<T%zu>=%zu; ", i, 200 + i);
-		fprintf(f, "}; xkb_types { include \"complete\" }; xkb_compatibility { include \"complete\" }; xkb_symbols { ");
+		fprintf(f, "}; xkb_types { include \"complete\" }; "
+			"xkb_compatibility { include \"complete\" "
+			"interpret Any+AnyOfOrNone(all) { action= NoAction(); }; }; "
+			"xkb_symbols { ");
 		for (size_t i = 0; i < n; i++) fprintf(f, "key <T%zu> { [ 0x%x ] }; ", i, symbols[i]);
 		fprintf(f, "}; };");
 		if (fclose(f) != 0) { free(map); mango_anland_text_reset(text); return 0; }
@@ -261,6 +284,14 @@ static int text_tick(void *data) {
 		text->keyboard.keymap_fallback = text->restore_keyboard;
 		text->batch_active = true;
 		wlr_seat_set_keyboard(text->seat, &text->keyboard);
+	}
+	if (map_changed) {
+		/* Let Xwayland publish the updated XKB mapping before its clients
+		 * receive the keycodes. Preserve this batch if more text arrives. */
+		text->settling_count = n;
+		text->holding = true;
+		wl_event_source_timer_update(text->timer, TEXT_KEYMAP_SETTLE_MS);
+		return 0;
 	}
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -313,11 +344,12 @@ bool mango_anland_text_submit(struct mango_anland_text *text,
 	if (!decode_utf8(utf8, length, symbols, &count)) { free(symbols); return false; }
 	/* If v3 is available, its failure (e.g. oversized text) is NOT a reason
 	 * to inject keys into the same editor. Only missing/disabled v3 falls back. */
-	/* v3 may take over after the delivery hold, even if the idle Unicode
-	 * keyboard still owns the seat. Never overtake pending fallback text. */
+	/* Native delivery can follow real keys on the normal map immediately,
+	 * but must wait for preceding Unicode presses to use their map. */
 	/* Do not bypass v3's wire-size policy just because fallback is draining. */
 	if (relay && relay->active_text_input && length > 4000) { free(symbols); return false; }
-	if (relay && relay->active_text_input && !text->count && !text->holding) {
+	if (relay && relay->active_text_input && !text->count &&
+			(!text->holding || !text->batch_active)) {
 		restore_keyboard(text);
 		free(symbols);
 		return mango_text_input_commit_utf8(relay, utf8, length);

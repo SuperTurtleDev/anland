@@ -3650,7 +3650,7 @@ index 0577048..44d5757 100644
  #[path = "wayland_frontend/text_input.rs"]
  mod text_input;
 +#[cfg(feature = "external-output")]
-+pub(crate) use text_input::ConsumerTextDelivery;
++pub(crate) use text_input::{ConsumerTextDelivery, ConsumerTextTarget};
  #[path = "wayland_frontend/topology.rs"]
  mod topology;
  #[cfg(feature = "flutter")]
@@ -3701,8 +3701,8 @@ index 0577048..44d5757 100644
      Arc::new(data)
  }
 +
-+#[cfg(feature = "external-output")]
-+pub(crate) use input::dispatch_consumer_keyboard_text;
++#[cfg(feature = "anland")]
++pub(crate) use input::prepare_consumer_keyboard_text;
 diff --git a/compositor/src/bin/deniald/wayland_frontend/capture_policy.rs b/compositor/src/bin/deniald/wayland_frontend/capture_policy.rs
 new file mode 100644
 index 0000000..2fbc673
@@ -3926,42 +3926,11 @@ new file mode 100644
 index 0000000..2a9b5dc
 --- /dev/null
 +++ b/compositor/src/bin/deniald/wayland_frontend/injected_text.rs
-@@ -0,0 +1,36 @@
-+//! Bounds and client-only keymap policy for externally injected native text.
+@@ -0,0 +1,5 @@
++//! Bounds for externally injected text.
 +pub const MAX_COMMIT_BYTES: usize = 4000;
 +pub fn valid_commit(text: &str) -> bool {
 +    !text.is_empty() && text.len() <= MAX_COMMIT_BYTES && !text.contains('\0')
-+}
-+
-+/// A bounded client-only map transaction, never a physical-seat keymap.
-+pub const LEGACY_KEYMAP_CHARS: usize = 247;
-+pub fn valid_legacy_commit(text: &str) -> bool {
-+    valid_commit(text)
-+        && text
-+            .chars()
-+            .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t' | '\u{8}'))
-+}
-+pub fn legacy_keymap(chars: &[char]) -> String {
-+    assert!(!chars.is_empty() && chars.len() <= LEGACY_KEYMAP_CHARS);
-+    let mut map = String::from("xkb_keymap { xkb_keycodes { minimum = 9; maximum = 255; ");
-+    for index in 0..chars.len() {
-+        map.push_str(&format!("<K{index:03}> = {}; ", index + 9));
-+    }
-+    map.push_str("}; xkb_types { type \"ONE_LEVEL\" { modifiers = None; map[None] = Level1; }; }; xkb_compatibility {}; xkb_symbols { ");
-+    for (index, character) in chars.iter().enumerate() {
-+        let symbol = match character {
-+            '\n' | '\r' => 0xff0d,
-+            '\t' => 0xff09,
-+            '\u{8}' => 0xff08,
-+            c if u32::from(*c) <= 0xff => u32::from(*c),
-+            c => 0x01000000 | u32::from(*c),
-+        };
-+        map.push_str(&format!(
-+            "key <K{index:03}> {{ type=\"ONE_LEVEL\", [ 0x{symbol:x} ] }}; "
-+        ));
-+    }
-+    map.push_str("}; };");
-+    map
 +}
 diff --git a/compositor/src/bin/deniald/wayland_frontend/input.rs b/compositor/src/bin/deniald/wayland_frontend/input.rs
 index 6f64af7..0cc79e2 100644
@@ -4037,130 +4006,53 @@ index 6f64af7..0cc79e2 100644
  {
      project_touch_position(
          bounds,
-@@ -554,6 +574,122 @@ pub(crate) fn dispatch_shell_keyboard(
+@@ -554,6 +574,45 @@ pub(crate) fn dispatch_shell_keyboard(
      }
  }
  
-+#[cfg(feature = "external-output")]
-+pub(crate) fn dispatch_consumer_keyboard_text(
++#[cfg(feature = "anland")]
++pub(crate) fn prepare_consumer_keyboard_text(
 +    state: &mut RuntimeState,
 +    target: &super::text_input::ConsumerTextTarget,
 +    text: &str,
-+) -> bool {
-+    use smithay::input::keyboard::KeymapFile;
-+    use smithay::reexports::wayland_server::protocol::{wl_keyboard, wl_keyboard::KeymapFormat};
++) -> Option<crate::anland_backend::text_keyboard::TextKeyboard> {
++    use crate::anland_backend::text_keyboard::TextKeyboard;
 +    use smithay::wayland::seat::WaylandFocus;
-+    use std::os::fd::AsFd;
-+    let Some(frontend) = state.wayland.as_ref() else {
-+        return false;
-+    };
-+    if state.secure_session_locked()
-+        || !super::injected_text::valid_legacy_commit(text)
-+        || frontend.consumer_text_target().as_ref() != Some(target)
-+    {
-+        return false;
++
++    let frontend = state.wayland.as_ref()?;
++    if state.secure_session_locked() || frontend.consumer_text_target().as_ref() != Some(target) {
++        return None;
 +    }
-+    let Some(keyboard) = frontend.seat.get_keyboard() else {
-+        return false;
-+    };
-+    let Some(surface) = keyboard
-+        .current_focus()
-+        .and_then(|focus| focus.wl_surface().map(|s| s.into_owned()))
-+    else {
-+        return false;
-+    };
-+    let Ok(client) = frontend.display_handle.get_client(surface.id()) else {
-+        return false;
-+    };
-+    let keyboards: Vec<_> = keyboard.client_keyboards(&client).collect();
-+    if keyboards.is_empty() {
-+        return false;
-+    }
-+    let time = frontend.start_time.elapsed().as_millis() as u32;
++    let keyboard = frontend.seat.get_keyboard()?;
++    let focus = keyboard.current_focus()?;
++    let surface = focus.wl_surface()?;
++    let client = frontend.display_handle.get_client(surface.id()).ok()?;
 +    let mods = keyboard.modifier_state().serialized;
-+    let original = keyboard.with_xkb_state(state, |context| {
++    let time_ms = frontend.start_time.elapsed().as_millis() as u32;
++    let result = keyboard.with_xkb_state(state, |context| {
 +        let xkb = context.xkb().lock().unwrap();
-+        // SAFETY: borrowed keymap only used under the XKB mutex, no reference escapes.
-+        KeymapFile::new(unsafe { xkb.keymap() })
++        // All keymap access stays within the XKB mutex lifetime.
++        TextKeyboard::start(
++            keyboard.client_keyboards(&client).collect(),
++            unsafe { xkb.keymap() },
++            mods,
++            text,
++            time_ms,
++        )
 +    });
-+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-+    let chars: Vec<_> = text.chars().collect();
-+    // Compile and prepare ALL files before sending anything: bad input/keymap
-+    // cannot leave a partial prefix or the client's keymap replaced.
-+    let mut chunks = Vec::new();
-+    for chunk in chars.chunks(super::injected_text::LEGACY_KEYMAP_CHARS) {
-+        let source = super::injected_text::legacy_keymap(chunk);
-+        let Some(map) = xkb::Keymap::new_from_string(
-+            &context,
-+            source,
-+            xkb::KEYMAP_FORMAT_TEXT_V1,
-+            xkb::KEYMAP_COMPILE_NO_FLAGS,
-+        ) else {
-+            warn!("consumer Unicode keymap compilation failed");
-+            return false;
-+        };
-+        chunks.push((KeymapFile::new(&map), chunk.len()));
-+    }
-+    // with_fd(false) creates a fresh writable tempfile for old protocol clients.
-+    // Retain duplicated prepared fds before ANY events, including restoration;
-+    // a second with_fd() is not guaranteed to succeed under fd/disk pressure.
-+    let prepare = |file: &KeymapFile| -> std::io::Result<_> {
-+        let mut prepared = None;
-+        file.with_fd(false, |fd, size| {
-+            prepared = Some(fd.try_clone_to_owned().map(|owned| (owned, size)));
-+        })?;
-+        prepared.expect("with_fd did not invoke its callback")
-+    };
-+    let Ok((original_fd, original_size)) = prepare(&original) else {
-+        warn!("consumer original keymap file preparation failed");
-+        return false;
-+    };
-+    let mut prepared = Vec::new();
-+    for (file, count) in &chunks {
-+        let Ok((fd, size)) = prepare(file) else {
-+            warn!("consumer Unicode keymap file preparation failed");
-+            return false;
-+        };
-+        prepared.push((fd, size, *count));
-+    }
-+    // No fallible preparation, event-loop dispatch or physical XKB mutation
-+    // occurs after this point. Ordered events restore the same client's map
-+    // and its exact modifiers, without touching clipboard or other clients.
-+    for (fd, size, count) in &prepared {
-+        for resource in &keyboards {
-+            resource.keymap(KeymapFormat::XkbV1, fd.as_fd(), *size as u32);
-+            resource.modifiers(SERIAL_COUNTER.next_serial().into(), 0, 0, 0, 0);
-+        }
-+        for index in 0..*count {
-+            let raw = index as u32 + 1; // XKB 9..255, evdev 1..247.
-+            let serial = SERIAL_COUNTER.next_serial();
-+            for resource in &keyboards {
-+                resource.key(serial.into(), time, raw, wl_keyboard::KeyState::Pressed);
-+                resource.key(serial.into(), time, raw, wl_keyboard::KeyState::Released);
-+            }
++    match result {
++        Ok(injection) => injection,
++        Err(error) => {
++            warn!(%error, "cannot deliver consumer Unicode text");
++            None
 +        }
 +    }
-+    for resource in &keyboards {
-+        resource.keymap(
-+            KeymapFormat::XkbV1,
-+            original_fd.as_fd(),
-+            original_size as u32,
-+        );
-+        resource.modifiers(
-+            SERIAL_COUNTER.next_serial().into(),
-+            mods.depressed,
-+            mods.latched,
-+            mods.locked,
-+            mods.layout_effective,
-+        );
-+    }
-+    true
 +}
 +
  #[cfg(feature = "flutter")]
  fn type_shell_text(
      state: &mut RuntimeState,
-@@ -1248,15 +1384,22 @@ pub(in super::super) fn init_libinput(
+@@ -1248,15 +1307,22 @@ pub(in super::super) fn init_libinput(
  
  impl WaylandFrontend {
      pub(in super::super) fn suspend_input_session(&mut self) {
@@ -4188,7 +4080,7 @@ index 6f64af7..0cc79e2 100644
      }
  }
  
-@@ -1271,6 +1414,9 @@ fn process_keyboard_transition(
+@@ -1271,6 +1337,9 @@ fn process_keyboard_transition(
      if intercept_native_escape(state, keycode.raw(), key_state) {
          return true;
      }
@@ -4198,7 +4090,7 @@ index 6f64af7..0cc79e2 100644
      if !state.secure_session_locked() {
          focus_exclusive_layer_for_keyboard_event(state);
      }
-@@ -1765,6 +1911,48 @@ fn process_input_event(
+@@ -1765,6 +1834,48 @@ fn process_input_event(
          return reset.any() || tablet_clients_changed;
      }
  
@@ -4247,7 +4139,7 @@ index 6f64af7..0cc79e2 100644
      #[cfg(feature = "flutter")]
      if let InputEvent::Keyboard {
          event: key_event, ..
-@@ -1785,7 +1973,7 @@ fn process_input_event(
+@@ -1785,7 +1896,7 @@ fn process_input_event(
          }
          if key_event.key_code().raw() == 116 + 8 {
              state.power_button.note_key(
@@ -4256,7 +4148,7 @@ index 6f64af7..0cc79e2 100644
                  key_event.state() == KeyState::Pressed,
                  chords,
              );
-@@ -1858,10 +2046,10 @@ fn process_input_event(
+@@ -1858,10 +1969,10 @@ fn process_input_event(
              // The root fingerprint listener has its own read-only evdev stream.
              // Only its bounded presentation or an explicit wake gesture/button
              // may wake this panel; raw DOWN/MOTION must not expose the lock UI.
@@ -4271,7 +4163,7 @@ index 6f64af7..0cc79e2 100644
                  return false;
              }
          }
-@@ -1924,19 +2112,6 @@ fn process_input_event(
+@@ -1924,19 +2035,6 @@ fn process_input_event(
          }
      }
  
@@ -4291,7 +4183,7 @@ index 6f64af7..0cc79e2 100644
      #[cfg(not(feature = "flutter"))]
      match &event {
          InputEvent::Keyboard {
-@@ -1965,6 +2140,61 @@ fn process_input_event(
+@@ -1965,6 +2063,61 @@ fn process_input_event(
      true
  }
  
@@ -4353,7 +4245,7 @@ index 6f64af7..0cc79e2 100644
  pub(in super::super) fn reset_all_input_devices(state: &mut RuntimeState) {
      #[cfg(feature = "flutter")]
      {
-@@ -2567,8 +2797,9 @@ fn execute_shortcut_disposition_at(
+@@ -2567,8 +2720,9 @@ fn execute_shortcut_disposition_at(
              let result = if let Some(frontend) = state.wayland.as_mut() {
                  frontend
                      .session

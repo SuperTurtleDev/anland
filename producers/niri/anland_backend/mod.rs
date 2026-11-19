@@ -11,15 +11,17 @@ pub use client::ffi;
 pub mod frame_state;
 pub mod input;
 mod clipboard;
+mod text_keyboard;
+use text_keyboard::TextKeyboard;
 use smithay::wayland::text_input::TextInputSeat;
-use smithay::input::keyboard::xkb;
+use smithay::wayland::input_method::InputMethodSeat;
 
 use std::mem;
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use niri_config::OutputName;
@@ -40,9 +42,11 @@ use smithay::wayland::presentation::Refresh;
 use smithay::wayland::pointer_constraints::with_pointer_constraint;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::Serial;
 
 use super::{IpcOutputMap, OutputId, RenderResult};
-use crate::niri::{Niri, RedrawState};
+use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
@@ -50,6 +54,30 @@ use crate::utils::{get_monotonic_time, logical_output};
 /// Kept at 1 ms so buffer-ready (our "vblank") is picked up with minimal
 /// latency; the anland lockstep throughput is bound by this plus the render.
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+#[derive(PartialEq, Eq)]
+struct TextFocus {
+    surface: WlSurface,
+    entered: Serial,
+}
+
+impl TextFocus {
+    fn current(niri: &Niri) -> Option<Self> {
+        let keyboard = niri.seat.get_keyboard()?;
+        if niri.is_locked()
+            || keyboard.is_grabbed()
+            || niri.seat.input_method().keyboard_grabbed()
+            || !keyboard.pressed_keys().is_empty()
+        {
+            return None;
+        }
+        let surface = keyboard.current_focus()?;
+        surface.is_alive().then_some(Self {
+            surface,
+            entered: keyboard.last_enter()?,
+        })
+    }
+}
 
 /// How long a new consumer buffer size must remain unchanged before it becomes
 /// the output mode. Android can briefly alternate portrait and landscape
@@ -179,7 +207,8 @@ pub struct Anland {
     session_generation: Option<u64>,
     sent_scheduling_pid: Option<i32>,
     sent_capture_mouse: Option<bool>,
-    pending_text_keysyms: VecDeque<Vec<xkb::Keysym>>,
+    pending_text: Option<(TextFocus, String)>,
+    text_keyboard: Option<(TextFocus, TextKeyboard)>,
     screen_w: u32,
     screen_h: u32,
     screen_refresh: u32,
@@ -266,7 +295,8 @@ impl Anland {
             session_generation: None,
             sent_scheduling_pid: None,
             sent_capture_mouse: None,
-            pending_text_keysyms: VecDeque::new(),
+            pending_text: None,
+            text_keyboard: None,
             screen_w: width,
             screen_h: height,
             screen_refresh: refresh,
@@ -333,27 +363,72 @@ impl Anland {
                 // Reconnect and buffer-ready handling.
                 state.backend.anland().poll(&mut state.niri);
 
-                // Drain pending input events from the consumer.
-                while let Some(event) = state.backend.anland().poll_input(&mut state.niri) {
-                    state.process_input_event(event);
-                }
-
-                // Deliver fallback text from the complete State, bypassing niri's
-                // shortcut dispatcher while addressing only keyboard focus.
-                while let Some(symbols) = state.backend.anland().pending_text_keysyms.pop_front() {
-                    if let Some(keyboard) = state.niri.seat.get_keyboard() {
-                        // Smithay assigns at most 247 temporary keycodes (9..=255)
-                        // per keymap. Send every chunk rather than silently
-                        // truncating long Android commitText() batches.
-                        for chunk in symbols.chunks(247) {
-                            keyboard.inject_text_keysyms(state, chunk);
-                        }
+                // Keep Backspace, Enter and following text in wire order while
+                // the temporary map is published and held for the X11 client.
+                if !Self::advance_text_keyboard(state) {
+                    while let Some(event) = state.backend.anland().poll_input(&mut state.niri) {
+                        state.process_input_event(event);
                     }
+                    Self::start_text_keyboard(state);
                 }
                 state.refresh_and_flush_clients();
                 TimeoutAction::ToDuration(POLL_INTERVAL)
             })
             .expect("failed to insert anland poll timer");
+    }
+
+    fn start_text_keyboard(state: &mut State) {
+        let Some((focus, text)) = state.backend.anland().pending_text.take() else {
+            return;
+        };
+        let Some(keyboard) = state.niri.seat.get_keyboard() else {
+            return;
+        };
+        let Some(client) = focus.surface.client() else {
+            return;
+        };
+        let mods = keyboard.modifier_state().serialized;
+        let time_ms = get_monotonic_time().as_millis() as u32;
+        let result = keyboard.with_xkb_state(state, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            // All keymap access stays within the XKB mutex lifetime.
+            TextKeyboard::start(
+                keyboard.client_keyboards(&client).collect(),
+                unsafe { xkb.keymap() },
+                mods,
+                &text,
+                time_ms,
+            )
+        });
+        match result {
+            Ok(Some(injection)) => state.backend.anland().text_keyboard = Some((focus, injection)),
+            Ok(None) => (),
+            Err(error) => warn!(%error, "anland: cannot deliver committed text"),
+        }
+    }
+
+    fn advance_text_keyboard(state: &mut State) -> bool {
+        let Some((focus, mut injection)) = state.backend.anland().text_keyboard.take() else {
+            return false;
+        };
+        let mut editor_activated = false;
+        state.niri.seat.text_input().with_active_text_input(|_, _| {
+            editor_activated = true;
+        });
+        let now = Instant::now();
+        let valid = !editor_activated && TextFocus::current(&state.niri).as_ref() == Some(&focus);
+        let busy = if !valid {
+            injection.cancel(now)
+        } else if now >= injection.deadline() {
+            let time_ms = get_monotonic_time().as_millis() as u32;
+            injection.advance(now, time_ms)
+        } else {
+            true
+        };
+        if busy {
+            state.backend.anland().text_keyboard = Some((focus, injection));
+        }
+        busy
     }
 
     /// Advertises the DRM render node to wayland clients via the dmabuf
@@ -639,7 +714,8 @@ impl Anland {
             ffi::anland_camera_clear();
         }
         self.frame_state.reset(0);
-        self.pending_text_keysyms.clear();
+        self.pending_text = None;
+        self.text_keyboard = None;
         self.pending_size = None;
         self.size_adapt_cooldown_until = 0;
         self.pending_feedback = None; // discarded: no false presentation
@@ -746,7 +822,8 @@ impl Anland {
         info!("anland: consumer session generation {generation}");
         self.session_generation = Some(generation);
         self.frame_state.reset(generation);
-        self.pending_text_keysyms.clear();
+        self.pending_text = None;
+        self.text_keyboard = None;
         self.buffer_last_rendered_frame = [u64::MAX; ffi::MAX_BUFS];
         self.consumer_dmabufs = [const { None }; ffi::MAX_BUFS];
         self.pending_size = None;
@@ -866,9 +943,13 @@ impl Anland {
         None
     }
 
-    /// Commit Android UTF-8 only to an active focused text-input-v3 client.
+    /// Prefer the editor protocol, then use the focused client's keyboard.
     fn commit_android_text(&mut self, niri: &mut Niri, text: &str) {
-        if text.is_empty() || self.session_generation.is_none() {
+        if text.is_empty()
+            || text.len() > 4000
+            || text.contains('\0')
+            || self.session_generation.is_none()
+        {
             return;
         }
         let handle = niri.seat.text_input();
@@ -879,20 +960,8 @@ impl Anland {
         });
         if delivered {
             handle.done(false);
-        } else if niri.seat.get_keyboard().is_some() {
-            // Only address the focused Wayland client, never niri's shortcut
-            // dispatcher or the seat's real XKB modifier state.
-            let symbols: Vec<_> = text.chars().map(|ch| match ch {
-                '\n' | '\r' => xkb::keysyms::KEY_Return.into(),
-                '\t' => xkb::keysyms::KEY_Tab.into(),
-                '\u{8}' => xkb::keysyms::KEY_BackSpace.into(),
-                _ => xkb::utf32_to_keysym(ch as u32),
-            }).collect();
-            if self.pending_text_keysyms.len() < 128 {
-                self.pending_text_keysyms.push_back(symbols);
-            } else {
-                warn!("anland: text input queue full");
-            }
+        } else if let Some(focus) = TextFocus::current(niri) {
+            self.pending_text = Some((focus, text.into()));
         }
     }
 

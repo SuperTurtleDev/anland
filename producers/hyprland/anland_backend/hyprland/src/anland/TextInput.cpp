@@ -27,11 +27,15 @@ class CUnicodeKeyboard : public IKeyboard {
     bool isVirtual() override { return true; }
 #endif
     SP<Aquamarine::IKeyboard> aq() override { return nullptr; }
+    bool matches(const std::vector<xkb_keysym_t>& symbols) const {
+        return symbols.size() <= mapped.size() && std::equal(symbols.begin(), symbols.end(), mapped.begin());
+    }
     bool install(const std::vector<xkb_keysym_t>& symbols) {
-        if (symbols.size() <= mapped.size() && std::equal(symbols.begin(), symbols.end(), mapped.begin())) return true;
+        if (matches(symbols)) return true;
         std::string map = "xkb_keymap { xkb_keycodes { minimum=8; maximum=255; ";
         for (size_t i = 0; i < symbols.size(); ++i) map += "<T" + std::to_string(i) + ">=" + std::to_string(200 + i) + "; ";
-        map += "}; xkb_types { include \"complete\" }; xkb_compatibility { include \"complete\" }; xkb_symbols { ";
+        map += "}; xkb_types { include \"complete\" }; xkb_compatibility { include \"complete\" "
+               "interpret Any+AnyOfOrNone(all) { action = NoAction(); }; }; xkb_symbols { ";
         for (size_t i = 0; i < symbols.size(); ++i) {
             char hex[16]; std::snprintf(hex, sizeof(hex), "0x%x", symbols[i]);
             map += "key <T" + std::to_string(i) + "> { [ " + hex + " ] }; ";
@@ -58,18 +62,31 @@ struct STextState {
     CHyprSignalListener focusListener;
     std::deque<SItem> queue;
     size_t nativeBytes = 0;
+    size_t settlingKeys = 0;
     bool lease = false, holding = false, replaying = false;
 };
 STextState state;
+constexpr int KeymapSettleMs = 75;
 
 bool usableFocus() {
     if (!g_pInputManager || !g_pSeatManager) return false;
     auto focus = g_pSeatManager->m_state.keyboardFocus.lock();
-    return focus && focus == Desktop::focusState()->surface() && focus->m_mapped &&
-        !g_pSeatManager->m_seatGrab && g_pInputManager->m_relay.m_inputMethod.expired();
+    if (!focus || focus != Desktop::focusState()->surface() || !focus->m_mapped || g_pSeatManager->m_seatGrab)
+        return false;
+
+    auto& relay = g_pInputManager->m_relay;
+    auto ime = relay.m_inputMethod.lock();
+    if (!ime) return true;
+
+    // A registered Linux IME need not own this editor. Xwayland has no enabled
+    // Wayland text input, so let Android use the keyboard fallback when there
+    // is no IME keyboard grab.
+    auto input = relay.getFocusedTextInput();
+    return !ime->hasGrab() && (!input || !input->isEnabled());
 }
 void restoreMap() {
     state.lease = false; // Disable sendKeymap substitution before restoring.
+    state.settlingKeys = 0;
     auto seat = state.mappedSeat.lock();
     auto keyboard = g_pSeatManager ? g_pSeatManager->m_keyboard.lock() : nullptr;
     if (seat && keyboard) for (auto& weak : seat->m_keyboards) if (auto resource = weak.lock()) {
@@ -89,7 +106,13 @@ void tick() {
     }
     // Real releases retained by resetTextInput still pass after focus loss.
     if (!state.queue.front().symbol && state.queue.front().nativeText.empty()) {
-        restoreMap(); state.holding = false;
+        if (state.lease) {
+            restoreMap();
+            state.holding = true;
+            arm(KeymapSettleMs); // Wait for Xwayland to apply the restored map.
+            return;
+        }
+        state.holding = false;
         unsigned budget = 64;
         while (budget-- && !state.queue.empty() && !state.queue.front().symbol && state.queue.front().nativeText.empty()) {
             const auto item = state.queue.front(); state.queue.pop_front();
@@ -108,19 +131,32 @@ void tick() {
         // Disabled/destroyed native editor is NOT permission to inject its old text.
         state.holding = false; if (!state.queue.empty()) arm(1); return;
     }
-    std::vector<xkb_keysym_t> symbols;
-    for (auto& item : state.queue) { if (!item.symbol || symbols.size() == Anland::TEXT_BATCH_MAX) break; symbols.push_back(item.symbol); }
-    if (!state.keyboard) state.keyboard = makeShared<CUnicodeKeyboard>();
-    if (!state.keyboard->install(symbols)) { Anland::resetTextInput(); return; }
-    auto seat = g_pSeatManager->m_state.keyboardFocusResource.lock();
-    if (!seat) { Anland::resetTextInput(); return; }
-    state.mappedSeat = seat; state.lease = true;
-    // Only this client's resources receive the Unicode map. Never switch global seat.
-    for (auto& weak : seat->m_keyboards) if (auto resource = weak.lock()) {
-        resource->sendKeymap(state.keyboard); resource->repeatInfo(0, 0); resource->sendMods(0, 0, 0, 0);
+    size_t count = state.settlingKeys;
+    state.settlingKeys = 0;
+    if (!count) {
+        std::vector<xkb_keysym_t> symbols;
+        for (const auto& item : state.queue) {
+            if (!item.symbol || symbols.size() == Anland::TEXT_BATCH_MAX) break;
+            symbols.push_back(item.symbol);
+        }
+        count = symbols.size();
+        if (!state.keyboard) state.keyboard = makeShared<CUnicodeKeyboard>();
+        if (!state.lease || !state.keyboard->matches(symbols)) {
+            auto seat = g_pSeatManager->m_state.keyboardFocusResource.lock();
+            if (!seat || !state.keyboard->install(symbols)) { Anland::resetTextInput(); return; }
+            state.mappedSeat = seat; state.lease = true;
+            // Only this client's resources receive the Unicode map.
+            for (auto& weak : seat->m_keyboards) if (auto resource = weak.lock()) {
+                resource->sendKeymap(state.keyboard); resource->repeatInfo(0, 0); resource->sendMods(0, 0, 0, 0);
+            }
+            state.settlingKeys = count;
+            state.holding = true;
+            arm(KeymapSettleMs);
+            return;
+        }
     }
     const auto ms = uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-    for (size_t i = 0; i < symbols.size(); ++i) {
+    for (size_t i = 0; i < count; ++i) {
         g_pSeatManager->sendKeyboardKey(ms, 192 + i, WL_KEYBOARD_KEY_STATE_PRESSED);
         g_pSeatManager->sendKeyboardKey(ms, 192 + i, WL_KEYBOARD_KEY_STATE_RELEASED);
         state.queue.pop_front();
@@ -157,7 +193,7 @@ void Anland::beforeKeyboardEvent() {
 bool Anland::queueKeyFromConsumer(uint32_t key, bool pressed, uint32_t time) {
     ensureTimer();
     if (!state.timer) return false;
-    if (state.queue.empty() && (!state.holding || !state.lease)) {
+    if (state.queue.empty() && !state.lease) {
         restoreMap(); state.holding = true; arm(100); return false;
     }
     if (state.queue.size() == TEXT_QUEUE_MAX) {
@@ -166,7 +202,10 @@ bool Anland::queueKeyFromConsumer(uint32_t key, bool pressed, uint32_t time) {
         else cancelTextInput();
         return false;
     }
-    state.queue.push_back({.key = key, .time = time, .pressed = pressed}); return true;
+    const bool idle = state.queue.empty() && !state.holding;
+    state.queue.push_back({.key = key, .time = time, .pressed = pressed});
+    if (idle) arm(1);
+    return true;
 }
 SP<IKeyboard> Anland::keyboardForClient(SP<IKeyboard> keyboard, wl_client* client) {
     auto seat = state.mappedSeat.lock();

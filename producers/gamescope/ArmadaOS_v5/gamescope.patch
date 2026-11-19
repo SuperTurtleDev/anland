@@ -8,8 +8,8 @@ Subject: [PATCH] anland changes
  src/Script/Script.cpp                |   3 +-
  src/backend.h                        |   2 +
  src/backends.h                       |   2 +
- src/ime.cpp                          | 100 +++++++++++++++++++++++++++
- src/ime.hpp                          |   9 +++
+ src/ime.cpp                          | 188 +++++++++++++++++++++++++++
+ src/ime.hpp                          |  13 +++
  src/main.cpp                         |   8 ++-
  src/meson.build                      |   4 +-
  src/rendervulkan.cpp                 |  19 ++++-
@@ -17,7 +17,7 @@ Subject: [PATCH] anland changes
  src/steamcompmgr_shared.hpp          |   2 +
  src/wlserver.cpp                     |  28 ++++++++
  src/xwayland_ctx.hpp                 |   1 +
- 13 files changed, 249 insertions(+), 9 deletions(-)
+ 13 files changed, 341 insertions(+), 9 deletions(-)
 
 diff --git a/layer/VkLayer_FROG_gamescope_wsi.cpp b/layer/VkLayer_FROG_gamescope_wsi.cpp
 index 5a226fb..37936ca 100644
@@ -124,10 +124,10 @@ index 4e017bf..e64f845 100644
      class CWaylandBackend;
  }
 diff --git a/src/ime.cpp b/src/ime.cpp
-index 518ac02..31fe880 100644
+index 518ac02..756d846 100644
 --- a/src/ime.cpp
 +++ b/src/ime.cpp
-@@ -1,12 +1,15 @@
+@@ -1,13 +1,17 @@
  #include "ime.hpp"
 +#ifndef ANLAND_IME_SEAT_TEST
  #include "wlserver.hpp"
@@ -141,46 +141,100 @@ index 518ac02..31fe880 100644
  #include <deque>
 +#include <string>
  #include <unordered_map>
++#include <variant>
  #include <vector>
  
-@@ -112,6 +115,8 @@ struct wlserver_input_method {
+ #include <linux/input-event-codes.h>
+@@ -112,6 +116,19 @@ struct wlserver_input_method {
  	struct wl_event_source *ime_reset_ime_keyboard_event_source;
  	struct wl_event_source *ime_release_ime_keypress_event_source;
  
-+    std::string local_text;
++    struct LocalKeyboardKey {
++        LocalKeyboardDispatch dispatch;
++        void *userdata;
++        uint32_t keycode;
++        bool pressed;
++        uint32_t time;
++    };
++
++    using LocalInput = std::variant<std::string, LocalKeyboardKey>;
++    std::deque<LocalInput> local_input;
++    size_t local_text_bytes = 0;
++    bool local_keymap_active = false;
 +    struct wl_event_source *local_text_timer = nullptr;
  	uint32_t uFakeTimestamp = 0;
  };
  
-@@ -592,8 +597,69 @@ static void manager_handle_create_input_method(struct wl_client *client, struct
+@@ -592,8 +609,145 @@ static void manager_handle_create_input_method(struct wl_client *client, struct
  	ime->ime_release_ime_keypress_event_source = wl_event_loop_add_timer(manager->server->event_loop, release_key_if_needed, ime);
  }
  
++using LocalKeyboardKey = wlserver_input_method::LocalKeyboardKey;
++using LocalInput = wlserver_input_method::LocalInput;
++
++static constexpr size_t local_text_limit = 65536;
++static constexpr size_t local_input_limit = 256;
++static constexpr int local_keymap_hold_ms = 100;
++
++static void restore_local_keyboard(wlserver_input_method *ime)
++{
++    if (!ime->local_keymap_active)
++        return;
++    ime->local_keymap_active = false;
++    reset_ime_keyboard(ime);
++    auto *server = ime->manager->server;
++    if (server->wlr.seat->keyboard_state.keyboard == &ime->keyboard)
++        wlr_seat_set_keyboard(server->wlr.seat, server->wlr.virtual_keyboard_device);
++}
++
 +static int local_text_tick(void *data)
 +{
 +    auto *ime = static_cast<wlserver_input_method *>(data);
-+    if (ime->local_text.empty()) return 0;
++    restore_local_keyboard(ime);
 +
-+    // Send one complete UTF-8 code point per timer tick.
-+    reset_ime_keyboard(ime);
-+    const size_t end = utf8_size(ime->local_text.c_str());
-+    if (!end || end > ime->local_text.size()) {
-+        ime->local_text.clear();
-+        return 0;
++    while (!ime->local_input.empty()) {
++        auto &input = ime->local_input.front();
++        if (const auto *pending = std::get_if<LocalKeyboardKey>(&input)) {
++            // A dispatched key can change focus and cancel the remaining input.
++            const LocalKeyboardKey key = *pending;
++            ime->local_input.pop_front();
++            key.dispatch(key.userdata, key.keycode, key.pressed, key.time);
++            continue;
++        }
++
++        auto &text = std::get<std::string>(input);
++        size_t end = 0;
++        for (size_t count = 0; count < allow_keycodes_len && end < text.size(); ++count)
++            end += utf8_size(text.c_str() + end);
++        const std::string batch = text.substr(0, end);
++        ime->local_text_bytes -= end;
++        if (end == text.size())
++            ime->local_input.pop_front();
++        else
++            text.erase(0, end);
++
++        type_text(ime, batch.c_str());
++        // Release the synthetic key before any real input can switch the seat's
++        // keyboard. Keep the keymap long enough for X11 clients to read the keys.
++        release_key_if_needed(ime);
++        wl_event_source_timer_update(ime->ime_release_ime_keypress_event_source, 0);
++        wl_event_source_timer_update(ime->ime_reset_ime_keyboard_event_source, 0);
++        if (ime->manager->server->wlr.seat->keyboard_state.keyboard == &ime->keyboard) {
++            ime->local_keymap_active = true;
++            wl_event_source_timer_update(ime->local_text_timer, local_keymap_hold_ms);
++            return 0;
++        }
++        reset_ime_keyboard(ime);
 +    }
-+    std::string batch = ime->local_text.substr(0, end);
-+    ime->local_text.erase(0, end);
-+    type_text(ime, batch.c_str());
-+    wl_event_source_timer_update(ime->manager->ime_reset_keyboard_event_source, 100);
-+    if (!ime->local_text.empty())
-+        wl_event_source_timer_update(ime->local_text_timer, 150);
 +    return 0;
 +}
 +
-+bool type_local_text(struct wlserver_input_method *ime, const char *text, size_t size)
++bool type_local_text(wlserver_input_method *ime, const char *text, size_t size)
 +{
-+    if (!ime || !ime->local_text_timer || !text) return false;
-+    if (size > 65536 || ime->local_text.size() + size > 65536) return false;
++    if (!ime || !ime->local_text_timer || !text || size > local_text_limit - ime->local_text_bytes)
++        return false;
++    if (!size)
++        return true;
 +
 +    for (size_t i = 0; i < size;) {
 +        const unsigned char c = static_cast<unsigned char>(text[i]);
@@ -198,21 +252,56 @@ index 518ac02..31fe880 100644
 +        i += n;
 +    }
 +
-+    const bool idle = ime->local_text.empty();
-+    ime->local_text.append(text, size);
-+    // Do not restart an armed timer: bursts must not shorten keymap lifetime.
-+    if (idle && size)
-+        wl_event_source_timer_update(ime->local_text_timer, 150);
++    const bool idle = ime->local_input.empty() && !ime->local_keymap_active;
++    auto *tail = ime->local_input.empty() ? nullptr : std::get_if<std::string>(&ime->local_input.back());
++    if (tail) {
++        tail->append(text, size);
++    } else {
++        if (ime->local_input.size() >= local_input_limit)
++            return false;
++        ime->local_input.emplace_back(std::string(text, size));
++    }
++    ime->local_text_bytes += size;
++    if (idle)
++        wl_event_source_timer_update(ime->local_text_timer, 1);
 +    return true;
 +}
 +
-+void cancel_local_text(struct wlserver_input_method *ime)
++bool queue_local_key(wlserver_input_method *ime, LocalKeyboardDispatch dispatch, void *userdata,
++                     uint32_t keycode, bool pressed, uint32_t time)
 +{
-+    if (!ime) return;
-+    ime->local_text.clear();
-+    if (ime->local_text_timer)
++    if (!ime || (ime->local_input.empty() && !ime->local_keymap_active))
++        return false;
++    if (ime->local_input.size() >= local_input_limit) {
++        // Keep ordinary key presses and releases ordered even under sustained input.
++        std::erase_if(ime->local_input, [](const LocalInput &input) {
++            return std::holds_alternative<std::string>(input);
++        });
++        ime->local_text_bytes = 0;
 +        wl_event_source_timer_update(ime->local_text_timer, 0);
-+    reset_ime_keyboard(ime);
++        local_text_tick(ime);
++        return false;
++    }
++    ime->local_input.emplace_back(LocalKeyboardKey{dispatch, userdata, keycode, pressed, time});
++    return true;
++}
++
++void cancel_local_text(wlserver_input_method *ime, bool keep_key_releases)
++{
++    if (!ime)
++        return;
++    restore_local_keyboard(ime);
++    if (keep_key_releases) {
++        std::erase_if(ime->local_input, [](const LocalInput &input) {
++            const auto *key = std::get_if<LocalKeyboardKey>(&input);
++            return !key || key->pressed;
++        });
++    } else {
++        ime->local_input.clear();
++    }
++    ime->local_text_bytes = 0;
++    if (ime->local_text_timer)
++        wl_event_source_timer_update(ime->local_text_timer, ime->local_input.empty() ? 0 : 1);
 +}
 +
  struct wlserver_input_method *create_local_ime()
@@ -222,7 +311,7 @@ index 518ac02..31fe880 100644
  	struct wlserver_input_method *ime = new wlserver_input_method();
  	ime->resource = nullptr;
  	ime->manager = global_manager;
-@@ -607,9 +673,30 @@ struct wlserver_input_method *create_local_ime()
+@@ -607,9 +761,30 @@ struct wlserver_input_method *create_local_ime()
  
  	wlr_keyboard_set_repeat_info(&ime->keyboard, 0, 0);
  
@@ -253,7 +342,7 @@ index 518ac02..31fe880 100644
  	return ime;
  }
  
-@@ -653,3 +740,16 @@ void create_ime_manager(struct wlserver_t *wlserver)
+@@ -653,3 +828,16 @@ void create_ime_manager(struct wlserver_t *wlserver)
  
  	global_manager = manager;
  }
@@ -272,21 +361,22 @@ index 518ac02..31fe880 100644
 +}
 \ No newline at end of file
 diff --git a/src/ime.hpp b/src/ime.hpp
-index 0887083..66e0e1c 100644
+index 0887083..f1b8b63 100644
 --- a/src/ime.hpp
 +++ b/src/ime.hpp
-@@ -2,7 +2,10 @@
+@@ -2,7 +2,11 @@
  
  #pragma once
  
 +#include <stddef.h>
++#include <stdint.h>
 +#ifndef ANLAND_IME_SEAT_TEST
  #include "wlserver.hpp"
 +#endif
  #include "gamescope-input-method-protocol.h"
  
  void create_ime_manager(struct wlserver_t *wlserver);
-@@ -11,3 +14,9 @@ struct wlserver_input_method *create_local_ime();
+@@ -11,3 +15,12 @@ struct wlserver_input_method *create_local_ime();
  void destroy_ime(struct wlserver_input_method * ime);
  void type_text(struct wlserver_input_method *ime, const char *text);
  void perform_action(struct wlserver_input_method *ime, enum gamescope_input_method_action action);
@@ -295,7 +385,10 @@ index 0887083..66e0e1c 100644
 +
 +// Bounded asynchronous input for backend-owned local IMEs. Returns false on invalid UTF-8 or overflow.
 +bool type_local_text(struct wlserver_input_method *ime, const char *text, size_t size);
-+void cancel_local_text(struct wlserver_input_method *ime);
++using LocalKeyboardDispatch = void (*)(void *userdata, uint32_t keycode, bool pressed, uint32_t time);
++bool queue_local_key(struct wlserver_input_method *ime, LocalKeyboardDispatch dispatch, void *userdata,
++                     uint32_t keycode, bool pressed, uint32_t time);
++void cancel_local_text(struct wlserver_input_method *ime, bool keep_key_releases = false);
 \ No newline at end of file
 diff --git a/src/main.cpp b/src/main.cpp
 index eee5a02..2179868 100644

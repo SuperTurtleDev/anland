@@ -13,10 +13,11 @@ use super::scale_control::ScaleControl;
 use super::scheduling::SchedulingSync;
 use super::seat_input::AnlandInputBackend;
 use super::services::ClipboardSync;
+use super::text_keyboard::TextKeyboard;
 use super::topology::{OUTPUT_NAME, OutputPlan};
 #[cfg(feature = "anland-runtime-v2")]
 use crate::flutter_launcher::{FlutterLaunchConfiguration, FlutterLauncher};
-use crate::wayland_frontend::WaylandFrontend;
+use crate::wayland_frontend::{ConsumerTextTarget, WaylandFrontend};
 use crate::*;
 use smithay::reexports::calloop::channel::Event as ChannelEvent;
 use std::ffi::CString;
@@ -664,6 +665,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let mut scheduling = SchedulingSync::default();
     let mut camera_requested = false;
     let mut pending_service_context = None;
+    let mut keyboard_text: Option<(ConsumerTextTarget, TextKeyboard)> = None;
     let mut waiting_initial_refresh = false;
     let mut launcher: Option<FlutterLauncher> = None;
     let mut active: Option<Active> = None;
@@ -740,6 +742,13 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                         (*since + Duration::from_secs(5)).saturating_duration_since(Instant::now()),
                     )
                 });
+            let timeout = keyboard_text.as_ref().map_or(timeout, |(_, injection)| {
+                timeout.min(
+                    injection
+                        .deadline()
+                        .saturating_duration_since(Instant::now()),
+                )
+            });
             // Asynchronous buffer retirement can queue wl_buffer.release even
             // without frame callbacks or presentation feedback. Flush every
             // iteration before waiting, so mailbox clients can reuse buffers.
@@ -791,6 +800,7 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     || events.flutter_reload_requested
                     || !client.as_ref().unwrap().connected()
                 {
+                    keyboard_text = None;
                     stop(
                         a,
                         &mut events,
@@ -815,7 +825,28 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     if locked {
                         pending_service_context = None;
                     }
+                    if let Some((target, injection)) = keyboard_text.as_mut() {
+                        let current = events
+                            .wayland
+                            .as_ref()
+                            .and_then(WaylandFrontend::consumer_text_target);
+                        let time_ms = now.duration_since(started).as_millis() as u32;
+                        let busy = if locked || current.as_ref() != Some(target) {
+                            injection.cancel(now)
+                        } else {
+                            injection.advance(now, time_ms)
+                        };
+                        if !busy {
+                            keyboard_text = None;
+                            flush_clients = true;
+                        }
+                    }
                     for index in 0..64 {
+                        // Preserve wire order: editing keys and focus changes
+                        // must not overtake the pending Unicode commit.
+                        if keyboard_text.is_some() {
+                            break;
+                        }
                         // Capture BEFORE the first header byte. Both public
                         // partial headers and local payloads retain this context;
                         // a genuinely idle poll allows a fresh target next time.
@@ -910,12 +941,11 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     match delivery {
                                         ConsumerTextDelivery::Wayland => flush_clients = true,
                                         ConsumerTextDelivery::Keyboard => {
-                                            flush_clients |=
-                                                wayland_frontend::dispatch_consumer_keyboard_text(
-                                                    &mut events,
-                                                    target,
-                                                    &text,
-                                                );
+                                            keyboard_text =
+                                                wayland_frontend::prepare_consumer_keyboard_text(
+                                                    &mut events, target, &text,
+                                                )
+                                                .map(|injection| (target.clone(), injection));
                                         }
                                         ConsumerTextDelivery::Flutter {
                                             generation,
@@ -1814,6 +1844,9 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            if active.as_ref().is_none_or(|a| a.driver.stopped()) {
+                keyboard_text = None;
+            }
             let bootstrap_input = active.is_none()
                 && client.as_ref().is_some_and(|c| {
                     c.connected()
@@ -1821,7 +1854,8 @@ pub(crate) fn run(options: Options) -> Result<(), Box<dyn Error>> {
                             || c.output().is_ok_and(|output| output.refresh_mhz == 0))
                 });
             sources.watch_input(
-                active.as_ref().is_some_and(|a| !a.driver.stopped()) || bootstrap_input,
+                (keyboard_text.is_none() && active.as_ref().is_some_and(|a| !a.driver.stopped()))
+                    || bootstrap_input,
             );
             if let Some(c) = client.as_ref() {
                 sources.refresh(c)?;
