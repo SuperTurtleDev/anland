@@ -1,0 +1,1 @@
+../../common/startup/mango-arch-fedora.sh

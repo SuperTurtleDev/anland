@@ -168,7 +168,7 @@ for number in JOBS ANLAND_PKGREL ANLAND_DE_PKGREL; do
 done
 [[ $(id -u) != 0 && $(uname -m) == aarch64 ]] || die 'run as a normal aarch64 user'
 ANLAND_DENIAL_DISTRO=${ANLAND_DENIAL_DISTRO:-arch}
-case $ANLAND_DENIAL_DISTRO in arch|debian13|ubuntu2604|fedora43|fedora44) ;; *) die 'unsupported Denial distribution' ;; esac
+case $ANLAND_DENIAL_DISTRO in arch|debian13|ubuntu2604|fedora43|fedora44|fedora45) ;; *) die 'unsupported Denial distribution' ;; esac
 WORKDIR=$(realpath -m -- "${WORKDIR:-${DENIAL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/denial-anland}}") || die 'invalid WORKDIR'
 ARTIFACTS_DIR=$(realpath -m -- "${ARTIFACTS_DIR:-$WORKDIR/packages}") || die 'invalid ARTIFACTS_DIR'
 [[ $WORKDIR != / && $WORKDIR != "$HOME" && $WORKDIR != "$ROOT" && $WORKDIR != "$ROOT/"* ]] || die 'WORKDIR must be a separate cache directory'
@@ -1246,7 +1246,7 @@ elif [[ $ANLAND_DENIAL_DISTRO == debian13 ]]; then
         printf 'DEBIAN13_RECIPE_OK denial (no compilation or graphical test)\n'
         exit 0
     fi
-elif [[ $ANLAND_DENIAL_DISTRO == fedora4[34] ]]; then
+elif [[ $ANLAND_DENIAL_DISTRO == fedora4[345] ]]; then
     source "$SCRIPT_DIR/build.sh" || die 'cannot load Fedora package functions'
     fedora_denial_preflight
     fedora_denial_dependencies
@@ -1268,7 +1268,7 @@ if [[ $ANLAND_DENIAL_DISTRO == debian13 && $ANLAND_STAGE == prepare ]]; then
     printf 'DEBIAN13_PREPARED denial (no engine/AOT compilation or graphical test)\n'
     exit 0
 fi
-if [[ $ANLAND_DENIAL_DISTRO == fedora4[34] && $ANLAND_STAGE == prepare ]]; then
+if [[ $ANLAND_DENIAL_DISTRO == fedora4[345] && $ANLAND_STAGE == prepare ]]; then
     fedora_xwayland
     printf 'FEDORA%s_PREPARED denial\n' "${ANLAND_DENIAL_DISTRO#fedora}"
     exit 0
@@ -1276,7 +1276,7 @@ fi
 case $ANLAND_DENIAL_DISTRO in
     debian13) prepare_debian_rust ;;
     ubuntu2604) prepare_ubuntu_rust ;;
-    fedora43|fedora44) prepare_fedora_rust ;;
+    fedora43|fedora44|fedora45) prepare_fedora_rust ;;
 esac
 prepare_engine
 prepare_flutter

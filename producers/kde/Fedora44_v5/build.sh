@@ -6,10 +6,10 @@
 # Default: JOBS=4, no package installation or compositor/session edits.
 # Build tooling and builddep may still change installed build dependencies.
 #
-# Fedora 44 counterpart of the Debian/Ubuntu build.sh. Uses dnf download --source
+# Fedora counterpart of the Debian/Ubuntu build.sh. Uses dnf download --source
 # + rpmbuild instead of apt-get source + dpkg-buildpackage.
 #
-# Run this INSIDE a Fedora 44 container. It uses sudo for privileged steps.
+# Run this INSIDE the matching Fedora container. It uses sudo for privileged steps.
 #
 # The two patches fix hardware acceleration / input on the kgsl(turnip) stack:
 #   kwin.patch      -> src 'kwin'      (anland backend + --anland CLI option)
@@ -19,9 +19,13 @@
 # via a dynamically numbered Source tarball declared in the spec.
 #
 set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || exit 1
+FEDORA_RELEASE=${SCRIPT_DIR##*/Fedora}
+FEDORA_RELEASE=${FEDORA_RELEASE%_v5}
 source /etc/os-release || { printf 'Cannot identify distribution\n' >&2; exit 1; }
-[[ $ID == fedora && $VERSION_ID == 44 && $(uname -m) == aarch64 && $(id -u) != 0 ]] || {
-    printf 'Requires native Fedora 44 aarch64, ordinary user\n' >&2; exit 1;
+[[ $ID == fedora && $VERSION_ID == "$FEDORA_RELEASE" && $VERSION_ID =~ ^4[45]$ && $(uname -m) == aarch64 && $(id -u) != 0 ]] || {
+    printf 'Requires native Fedora %s aarch64, ordinary user\n' "$FEDORA_RELEASE" >&2
+    exit 1
 }
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -30,8 +34,7 @@ else
     SUDO="sudo"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKDIR="${WORKDIR:-$HOME/.cache/anland-fedora44-rpmbuild}"
+WORKDIR="${WORKDIR:-$HOME/.cache/anland-fedora${FEDORA_RELEASE}-rpmbuild}"
 JOBS="${JOBS:-4}"
 # Build only by default; installation and Xwayland rebuilding are explicit.
 ANLAND_INSTALL="${ANLAND_INSTALL:-0}"
@@ -184,7 +187,8 @@ build_pkg_rpm() {
     local artifact_dir="$WORKDIR/$src"
     mkdir -p "$artifact_dir" || die "cannot create artifact directory"
     for rpm_file in "${rpms[@]}"; do
-        rpm -K "$rpm_file" || die "RPM validation failed"
+        # rpmbuild emits unsigned local artifacts. Verify their embedded digests.
+        rpm -K --nosignature "$rpm_file" || die "RPM validation failed"
         cp "$rpm_file" "$topdir/" || die "RPM collection failed"
         cp "$rpm_file" "$artifact_dir/" || die "RPM artifact collection failed"
     done

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Fedora 44 aarch64: current upstream Hyprland stack and Hyprgrass, private RPM.
+# Fedora aarch64: current upstream Hyprland stack and Hyprgrass, private RPM.
 # ANLAND_STAGE=check|prepare|build ANLAND_WITH_DEPS=1 JOBS=4 ANLAND_INSTALL=0
 set -uo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+FEDORA_RELEASE=${SCRIPT_DIR##*/Fedora}
+FEDORA_RELEASE=${FEDORA_RELEASE%_v5}
 fedora_die() { printf 'fedora-build: %s\n' "$*" >&2; exit 1; }
 
 fedora_run() { "$@" || fedora_die "failed: $*"; }
@@ -10,8 +12,8 @@ fedora_run() { "$@" || fedora_die "failed: $*"; }
 fedora_preflight() {
     local ID VERSION_ID
     source /etc/os-release || fedora_die 'cannot identify distribution'
-    [[ $ID == fedora && $VERSION_ID == 44 && $(uname -m) == aarch64 ]] ||
-        fedora_die 'requires native Fedora 44 aarch64'
+    [[ $ID == fedora && $VERSION_ID == "$FEDORA_RELEASE" && $VERSION_ID =~ ^4[45]$ && $(uname -m) == aarch64 ]] ||
+        fedora_die "requires native Fedora $FEDORA_RELEASE aarch64"
     [[ $(id -u) != 0 ]] || fedora_die 'compile as an ordinary user'
     JOBS=${JOBS:-4}
     [[ $JOBS =~ ^[1-9][0-9]*$ ]] || fedora_die 'JOBS must be a positive integer'
@@ -31,7 +33,7 @@ fedora_initialize() {
     ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd -P) || fedora_die 'repository root'
     source "$ROOT/producers/common/fedora-latest-srpm.sh" || fedora_die 'cannot load shared Fedora build functions'
     source "$ROOT/producers/common/latest-source.sh"
-    WORKDIR=$(realpath -m -- "${WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-$1-fedora44}") || fedora_die 'cache path'
+    WORKDIR=$(realpath -m -- "${WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-$1-fedora${FEDORA_RELEASE}}") || fedora_die 'cache path'
     ARTIFACTS_DIR=$(realpath -m -- "${ARTIFACTS_DIR:-${ARTIFACTS:-$SCRIPT_DIR/artifacts}}") || fedora_die 'artifact path'
     [[ $WORKDIR != / && $WORKDIR != "$HOME" && $WORKDIR != "$ROOT" && $WORKDIR != "$ROOT/"* ]] || fedora_die 'WORKDIR must be a separate cache'
     [[ $ARTIFACTS_DIR != / && $ARTIFACTS_DIR != "$HOME" && $ARTIFACTS_DIR != "$ROOT" && $ARTIFACTS_DIR != "$WORKDIR" ]] || fedora_die 'unsafe artifact directory'
@@ -134,9 +136,9 @@ EOF
     local sonames
     sonames=$(find "$stage" -type f -name '*.so*' -exec readelf -d {} \; 2>/dev/null | sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p' | sort -u | sed 's/[.]/\\./g' | paste -sd '|') || fedora_die 'private SONAME list'
     [[ -z $sonames ]] || printf '%%global __requires_exclude ^(%s)(\\(.*\\))?$\n' "$sonames" >> "$spec" || fedora_die 'private RPM dependencies'
-    cat >> "$spec" <<'EOF'
+    cat >> "$spec" <<EOF
 %description
-Native Fedora 44 runtime built from current upstream sources. Installing this package
+Native Fedora $FEDORA_RELEASE runtime built from current upstream sources. Installing this package
 does not enable, stop or restart graphical sessions or desktop services.
 %prep
 %build
@@ -177,10 +179,10 @@ fedora_finish() {
     [[ ${#packages[@]} -gt 0 ]] || fedora_die 'empty Fedora package set'
     printf '%s\n' "${packages[@]##*/}" > "$WORKDIR/packages.list" || fedora_die 'package list'
     (cd "$ARTIFACTS_DIR" && sha256sum -- "${packages[@]##*/}" > "$WORKDIR/SHA256SUMS" && sha256sum -c "$WORKDIR/SHA256SUMS") || fedora_die 'package checksums'
-    python3 - "$ROOT" "$FEDORA_INPUT_ID" "$WORKDIR/build-inputs.json" <<'PY' || fedora_die 'build record'
+    python3 - "$ROOT" "$FEDORA_INPUT_ID" "$WORKDIR/build-inputs.json" "fedora$FEDORA_RELEASE" <<'PY' || fedora_die 'build record'
 import json,subprocess,sys
-root,identity,out=sys.argv[1:]
-record={'distribution':'fedora44','architecture':'aarch64','input_sha256':identity,
+root,identity,out,distribution=sys.argv[1:]
+record={'distribution':distribution,'architecture':'aarch64','input_sha256':identity,
  'anland_revision':subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip(),
  'graphical_test':False}
 open(out,'w').write(json.dumps(record,indent=2)+'\n')
@@ -203,7 +205,7 @@ fedora_dependencies pipewire-devel cairo-devel pango-devel libdrm-devel libxkbco
     glslang-devel glm-devel libjpeg-turbo-devel libwebp-devel file-devel libspng-devel \
     librsvg2-devel libjxl-devel libheif-devel libzip-devel patchelf pugixml-devel xxd
 if [[ $ANLAND_STAGE == check ]]; then
-    printf 'FEDORA44_RECIPE_OK hyprland (private current-source stack; no compilation)\n'; exit 0
+    printf 'FEDORA%s_RECIPE_OK hyprland (private current-source stack; no compilation)\n' "$FEDORA_RELEASE"; exit 0
 fi
 fedora_run mkdir -p "$WORKDIR/src" "$WORKDIR/downloads" "$WORKDIR/latest-sources"
 python3 - "$SCRIPT_DIR/sources.json" > "$WORKDIR/sources.tsv" <<'PY'
@@ -256,7 +258,7 @@ if ! fedora_reuse "$SOURCE_ROOT"; then
     fedora_seal "$SOURCE_ROOT"
 fi
 fedora_run mkdir -p "$BUILD_ROOT"
-if [[ $ANLAND_STAGE == prepare ]]; then fedora_xwayland; printf 'FEDORA44_PREPARED hyprland\n'; exit 0; fi
+if [[ $ANLAND_STAGE == prepare ]]; then fedora_xwayland; printf 'FEDORA%s_PREPARED hyprland\n' "$FEDORA_RELEASE"; exit 0; fi
 PREFIX=/usr/lib64/hyprland-anland
 STAGE="$BUILD_ROOT/stage"
 TOOLS="$BUILD_ROOT/tools"
@@ -274,7 +276,7 @@ fedora_run cmake --install "$BUILD_ROOT/hyprwayland-scanner"
 [[ $(command -v hyprwayland-scanner) == "$TOOLS/bin/hyprwayland-scanner" ]] || fedora_die 'current scanner is not first in PATH'
 scanner_version=$(hyprwayland-scanner --version) || fedora_die 'current scanner version query failed'
 [[ -n $scanner_version ]] || fedora_die 'current scanner did not report its version'
-printf 'FEDORA44_BUILD_TOOL hyprwayland-scanner %s (%s)\n' "$scanner_version" "$TOOLS/bin/hyprwayland-scanner"
+printf 'FEDORA%s_BUILD_TOOL hyprwayland-scanner %s (%s)\n' "$FEDORA_RELEASE" "$scanner_version" "$TOOLS/bin/hyprwayland-scanner"
 # Keep protocol XML from the current upstream repository private, not in the runtime RPM.
 fedora_run cmake -S "$SOURCE_ROOT/hyprland-protocols" -B "$BUILD_ROOT/hyprland-protocols" -G Ninja \
     -DCMAKE_INSTALL_PREFIX="$TOOLS" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_DATADIR=share
@@ -282,7 +284,7 @@ fedora_run cmake --build "$BUILD_ROOT/hyprland-protocols" --parallel "$JOBS"
 fedora_run cmake --install "$BUILD_ROOT/hyprland-protocols"
 fedora_run pkg-config --atleast-version=0.6.4 hyprland-protocols
 [[ $(pkg-config --variable=pkgdatadir hyprland-protocols) -ef "$TOOLS/share/hyprland-protocols" ]] || fedora_die 'current protocol data is not first in pkg-config'
-printf 'FEDORA44_BUILD_DATA hyprland-protocols %s (%s)\n' "$(pkg-config --modversion hyprland-protocols)" "$TOOLS/share/hyprland-protocols"
+printf 'FEDORA%s_BUILD_DATA hyprland-protocols %s (%s)\n' "$FEDORA_RELEASE" "$(pkg-config --modversion hyprland-protocols)" "$TOOLS/share/hyprland-protocols"
 stage_pc() {
     local file
     while IFS= read -r -d '' file; do fedora_run sed -i "s|=$PREFIX|=$STAGE$PREFIX|g" "$file";
