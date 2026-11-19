@@ -20,4 +20,5 @@ pub(crate) mod scheduling;
 pub(crate) mod seat_input;
 pub(crate) mod services;
 pub(crate) mod submission;
+pub(crate) mod text_keyboard;
 pub(crate) mod topology;

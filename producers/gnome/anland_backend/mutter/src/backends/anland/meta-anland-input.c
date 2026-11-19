@@ -3,6 +3,7 @@
 #include "config.h"
 
 #include "backends/anland/meta-anland-input.h"
+#include "backends/anland/meta-anland-keyboard.h"
 #include "backends/anland/libdisplay_producer/anland_tablet.h"
 
 #include "backends/meta-backend-private.h"
@@ -16,6 +17,10 @@
 #include "backends/native/meta-virtual-input-device-native.h"
 #include "backends/native/meta-seat-native.h"
 #include "clutter/clutter-event-private.h"
+#include "meta/meta-context.h"
+#include "wayland/meta-wayland-private.h"
+
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 #include <linux/input.h>
 #include <math.h>
@@ -26,6 +31,16 @@
 #define ANLAND_MAX_TOUCH_BATCH_EVENTS 128
 #define ANLAND_TOUCH_BATCH_TIMEOUT_MS 100
 #define ANLAND_MAX_PENDING_TABLET_FRAMES 256
+#define ANLAND_TEXT_BATCH_SIZE 32
+#define ANLAND_TEXT_KEYMAP_HOLD_MS 100
+#define ANLAND_TEXT_MAX_PENDING_EVENTS 4096
+
+typedef struct
+{
+  char *text;
+  size_t offset;
+  anland_device_input_t key;
+} MetaAnlandTextEvent;
 
 struct _MetaAnlandInput
 {
@@ -47,6 +62,14 @@ struct _MetaAnlandInput
   gboolean active_touch_slots[CLUTTER_VIRTUAL_INPUT_DEVICE_MAX_TOUCH_SLOTS];
   GArray *touch_batch;
   guint touch_batch_timeout_id;
+
+  GQueue text_events;
+  size_t text_pending_bytes;
+  guint text_source_id;
+  GCancellable *text_barrier;
+  GWeakRef text_focus;
+  struct wl_client *text_keymap_client;
+  struct wl_listener text_client_destroy;
 
   MetaAnlandInputRefreshFunc refresh_func;
   gpointer refresh_user_data;
@@ -174,6 +197,9 @@ typedef struct
 } MetaAnlandTabletEmitFrame;
 
 static void flush_tablet_frames (MetaAnlandInput *input);
+static void reset_text (MetaAnlandInput *input);
+static void forward_or_queue_key (MetaAnlandInput             *input,
+                                  const anland_device_input_t *event);
 
 static ClutterInputDeviceTool *
 get_tablet_tool (MetaAnlandInput          *input,
@@ -845,6 +871,8 @@ meta_anland_input_new (MetaBackend               *backend,
   input->touch_batch = g_array_new (FALSE, FALSE, sizeof (MetaVirtualTouchEvent));
   input->tablet_tools = g_hash_table_new (g_direct_hash, g_direct_equal);
   g_queue_init (&input->pending_tablet_frames);
+  g_queue_init (&input->text_events);
+  g_weak_ref_init (&input->text_focus, NULL);
   {
     GQuark tool_instances_quark =
       g_quark_from_static_string ("anland-tablet-tool-instances");
@@ -910,6 +938,7 @@ meta_anland_input_free (MetaAnlandInput *input)
   g_clear_pointer (&input->touch_batch, g_array_unref);
   g_clear_pointer (&input->tablet_tools, g_hash_table_unref);
   g_queue_clear_full (&input->pending_tablet_frames, g_free);
+  g_weak_ref_clear (&input->text_focus);
   g_free (input);
 }
 
@@ -949,7 +978,7 @@ meta_anland_input_handle_event (MetaAnlandInput             *input,
       handle_pointer_axis (input, event);
       break;
     case ANLAND_DEVICE_IN_KEY:
-      handle_key (input, event);
+      forward_or_queue_key (input, event);
       break;
     case ANLAND_DEVICE_IN_TOUCH:
       handle_touch (input, event, input_width, input_height);
@@ -978,51 +1007,342 @@ meta_anland_input_handle_event (MetaAnlandInput             *input,
   return META_ANLAND_INPUT_EVENT_HANDLED;
 }
 
+static void
+free_text_event (MetaAnlandTextEvent *event)
+{
+  g_free (event->text);
+  g_free (event);
+}
+
+static MetaWaylandKeyboard *
+get_text_keyboard (MetaAnlandInput *input)
+{
+  MetaContext *context = meta_backend_get_context (input->backend);
+  MetaWaylandCompositor *compositor = meta_context_get_wayland_compositor (context);
+
+  return compositor && compositor->seat ? compositor->seat->keyboard : NULL;
+}
+
+static void
+discard_text_events (MetaAnlandInput *input)
+{
+  MetaAnlandTextEvent *event;
+
+  while ((event = g_queue_pop_head (&input->text_events)))
+    {
+      /* Keys already delivered before a focus change still need their release. */
+      if (!event->text && event->key.key.action == ANLAND_DEVICE_ACTION_UP)
+        handle_key (input, &event->key);
+      free_text_event (event);
+    }
+
+  g_weak_ref_set (&input->text_focus, NULL);
+  input->text_pending_bytes = 0;
+}
+
+static void
+forward_or_queue_key (MetaAnlandInput             *input,
+                      const anland_device_input_t *event)
+{
+  if (!g_queue_is_empty (&input->text_events))
+    {
+      if (input->text_events.length < ANLAND_TEXT_MAX_PENDING_EVENTS)
+        {
+          MetaAnlandTextEvent *queued = g_new0 (MetaAnlandTextEvent, 1);
+          queued->key = *event;
+          g_queue_push_tail (&input->text_events, queued);
+          return;
+        }
+
+      discard_text_events (input);
+    }
+
+  handle_key (input, event);
+}
+
+static void
+restore_text_keymap (MetaAnlandInput *input)
+{
+  struct wl_client *client = input->text_keymap_client;
+  MetaWaylandKeyboard *keyboard;
+
+  if (!client)
+    return;
+
+  input->text_keymap_client = NULL;
+  wl_list_remove (&input->text_client_destroy.link);
+  keyboard = get_text_keyboard (input);
+  if (keyboard)
+    meta_anland_keyboard_restore_keymap (keyboard, client);
+}
+
+static void
+on_text_client_destroy (struct wl_listener *listener,
+                        void               *data)
+{
+  MetaAnlandInput *input = wl_container_of (listener, input, text_client_destroy);
+
+  (void) data;
+  wl_list_remove (&listener->link);
+  input->text_keymap_client = NULL;
+}
+
+static void
+reset_text (MetaAnlandInput *input)
+{
+  g_clear_handle_id (&input->text_source_id, g_source_remove);
+  g_cancellable_cancel (input->text_barrier);
+  g_clear_object (&input->text_barrier);
+  discard_text_events (input);
+  restore_text_keymap (input);
+}
+
+static xkb_keysym_t
+text_keysym (gunichar scalar)
+{
+  switch (scalar)
+    {
+    case '\n':
+    case '\r':
+      return XKB_KEY_Return;
+    case '\b':
+      return XKB_KEY_BackSpace;
+    case '\t':
+      return XKB_KEY_Tab;
+    default:
+      return xkb_utf32_to_keysym (scalar);
+    }
+}
+
+static size_t
+deliver_text_batch (MetaAnlandInput      *input,
+                    MetaWaylandKeyboard *keyboard,
+                    MetaWaylandSurface  *focus,
+                    const char          *cursor)
+{
+  struct wl_client *client =
+    wl_resource_get_client (meta_wayland_surface_get_resource (focus));
+  struct xkb_keymap *keymap = meta_backend_get_xkb_keymap (input->backend);
+  g_autofree char *serialized = NULL;
+  g_autoptr (GString) overlay = NULL;
+  const char *symbols, *start = cursor;
+  uint32_t codes[ANLAND_TEXT_BATCH_SIZE];
+  size_t n_codes = 0;
+  xkb_keycode_t code;
+
+  if (!keymap)
+    return 0;
+
+  serialized = xkb_keymap_get_as_string (keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+  if (!serialized)
+    return 0;
+
+  symbols = strstr (serialized, "\nxkb_symbols");
+  symbols = symbols ? strchr (symbols, '{') : NULL;
+  if (!symbols)
+    return 0;
+
+  /* Leave every real key in the current layout available during the handoff.
+   * X11 uses 8-bit XKB keycodes, even when the Wayland keymap has higher ones. */
+  overlay = g_string_new_len (serialized, symbols - serialized + 1);
+  for (code = 9; code <= 255 && *cursor && n_codes < G_N_ELEMENTS (codes); code++)
+    {
+      const char *name = xkb_keymap_key_get_name (keymap, code);
+      xkb_keysym_t keysym;
+      char symbol[64];
+
+      if (!name || xkb_keymap_num_layouts_for_key (keymap, code))
+        continue;
+
+      keysym = text_keysym (g_utf8_get_char (cursor));
+      cursor = g_utf8_next_char (cursor);
+      if (keysym == XKB_KEY_NoSymbol ||
+          xkb_keysym_get_name (keysym, symbol, sizeof (symbol)) < 0)
+        continue;
+
+      g_string_append_printf (overlay,
+                              "\n  key <%s> { type=\"ONE_LEVEL\", [ %s ] };",
+                              name, symbol);
+      codes[n_codes++] = code - 8;
+    }
+
+  if (cursor == start)
+    return 0;
+
+  if (n_codes > 0)
+    {
+      g_string_append (overlay, symbols + 1);
+      if (input->text_keymap_client != client)
+        restore_text_keymap (input);
+      if (!meta_anland_keyboard_send_text_keys (keyboard, client, overlay->str,
+                                                codes, n_codes))
+        return 0;
+
+      if (!input->text_keymap_client)
+        {
+          input->text_keymap_client = client;
+          input->text_client_destroy.notify = on_text_client_destroy;
+          wl_client_add_destroy_listener (client, &input->text_client_destroy);
+        }
+    }
+
+  return cursor - start;
+}
+
+static void dispatch_text (MetaAnlandInput *input);
+
+static gboolean
+sync_text_input_thread (GTask *task)
+{
+  g_task_return_boolean (task, TRUE);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_text_input_synced (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  MetaAnlandInput *input = user_data;
+
+  if (!g_task_propagate_boolean (G_TASK (result), NULL))
+    return;
+
+  g_clear_object (&input->text_barrier);
+  dispatch_text (input);
+}
+
+static void
+schedule_text_after_virtual_keys (MetaAnlandInput *input)
+{
+  g_autoptr (GTask) task = NULL;
+
+  if (input->text_barrier || g_queue_is_empty (&input->text_events))
+    return;
+
+  /* Editing keys are delivered by the native input thread. Let their
+   * resulting Clutter events run before the next direct text batch. */
+  input->text_barrier = g_cancellable_new ();
+  task = g_task_new (input->seat, input->text_barrier, on_text_input_synced, input);
+  g_task_set_priority (task, G_PRIORITY_DEFAULT_IDLE);
+  meta_seat_impl_run_input_task (META_SEAT_NATIVE (input->seat)->impl,
+                                 task, (GSourceFunc) sync_text_input_thread);
+}
+
+static gboolean
+finish_text_keymap_hold (gpointer data)
+{
+  MetaAnlandInput *input = data;
+
+  input->text_source_id = 0;
+  if (g_queue_is_empty (&input->text_events))
+    {
+      restore_text_keymap (input);
+      g_weak_ref_set (&input->text_focus, NULL);
+    }
+  else
+    schedule_text_after_virtual_keys (input);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+dispatch_text (MetaAnlandInput *input)
+{
+  MetaWaylandKeyboard *keyboard = get_text_keyboard (input);
+  g_autoptr (MetaWaylandSurface) expected = g_weak_ref_get (&input->text_focus);
+  MetaWaylandSurface *focus =
+    keyboard ? meta_anland_keyboard_get_focus (keyboard) : NULL;
+  MetaAnlandTextEvent *event = g_queue_peek_head (&input->text_events);
+  size_t delivered;
+
+  if (!focus || focus != expected)
+    {
+      discard_text_events (input);
+      restore_text_keymap (input);
+      return;
+    }
+
+  if (!event)
+    {
+      restore_text_keymap (input);
+      return;
+    }
+
+  if (!event->text)
+    {
+      do
+        {
+          handle_key (input, &event->key);
+          free_text_event (g_queue_pop_head (&input->text_events));
+          event = g_queue_peek_head (&input->text_events);
+        }
+      while (event && !event->text);
+
+      if (event)
+        schedule_text_after_virtual_keys (input);
+      else
+        restore_text_keymap (input);
+      return;
+    }
+
+  delivered = deliver_text_batch (input, keyboard, focus,
+                                  event->text + event->offset);
+  if (!delivered)
+    {
+      g_debug ("Unable to map Anland text on the focused Wayland keyboard");
+      discard_text_events (input);
+      restore_text_keymap (input);
+      return;
+    }
+
+  event->offset += delivered;
+  if (!event->text[event->offset])
+    {
+      input->text_pending_bytes -= event->offset;
+      free_text_event (g_queue_pop_head (&input->text_events));
+    }
+
+  /* X11 toolkits can look up the key mapping after reading the key event.
+   * Preserve the same map until they have consumed this batch. */
+  input->text_source_id = g_timeout_add (ANLAND_TEXT_KEYMAP_HOLD_MS,
+                                        finish_text_keymap_hold, input);
+}
+
 gboolean
 meta_anland_input_inject_text (MetaAnlandInput *input,
                                const char      *text)
 {
-  const char *cursor = text;
-  gboolean injected = FALSE;
+  MetaWaylandKeyboard *keyboard = input ? get_text_keyboard (input) : NULL;
+  MetaWaylandSurface *focus =
+    keyboard ? meta_anland_keyboard_get_focus (keyboard) : NULL;
+  g_autoptr (MetaWaylandSurface) previous = NULL;
+  MetaAnlandTextEvent *event;
+  size_t length;
 
-  if (!input || !input->keyboard || !text)
+  if (!focus || !text || !*text || !g_utf8_validate (text, -1, NULL))
     return FALSE;
 
-  while (*cursor)
+  previous = g_weak_ref_get (&input->text_focus);
+  if (previous != focus)
+    discard_text_events (input);
+
+  length = strlen (text);
+  if (length > ANLAND_DEVICE_MAX_PAYLOAD_SIZE - input->text_pending_bytes ||
+      input->text_events.length >= ANLAND_TEXT_MAX_PENDING_EVENTS)
     {
-      gunichar keyval;
-
-      keyval = g_utf8_get_char_validated (cursor, -1);
-      if (keyval == (gunichar) -1 || keyval == (gunichar) -2)
-        return FALSE;
-
-      switch (keyval)
-        {
-        case '\n':
-        case '\r':
-          keyval = CLUTTER_KEY_Return;
-          break;
-        case '\t':
-          keyval = CLUTTER_KEY_Tab;
-          break;
-        case '\b':
-          keyval = CLUTTER_KEY_BackSpace;
-          break;
-        default:
-          break;
-        }
-
-      clutter_virtual_input_device_notify_keyval (
-        input->keyboard, g_get_monotonic_time (), keyval,
-        CLUTTER_KEY_STATE_PRESSED);
-      clutter_virtual_input_device_notify_keyval (
-        input->keyboard, g_get_monotonic_time (), keyval,
-        CLUTTER_KEY_STATE_RELEASED);
-      cursor = g_utf8_next_char (cursor);
-      injected = TRUE;
+      g_warning ("Anland text input queue is full");
+      return TRUE;
     }
 
-  return injected;
+  event = g_new0 (MetaAnlandTextEvent, 1);
+  event->text = g_strdup (text);
+  g_queue_push_tail (&input->text_events, event);
+  input->text_pending_bytes += length;
+  g_weak_ref_set (&input->text_focus, focus);
+  if (!input->text_source_id)
+    schedule_text_after_virtual_keys (input);
+
+  return TRUE;
 }
 
 void
@@ -1035,6 +1355,8 @@ meta_anland_input_reset (MetaAnlandInput *input)
 
   if (!input)
     return;
+
+  reset_text (input);
 
   if (input->touch_batch_timeout_id)
     {

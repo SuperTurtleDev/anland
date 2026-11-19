@@ -1279,3 +1279,17 @@ diff --git a/src/compositor/meta-shaped-texture.c b/src/compositor/meta-shaped-t
 
    if (stex->texture == tex)
      {
+diff --git a/src/wayland/meta-wayland-keyboard.c b/src/wayland/meta-wayland-keyboard.c
+--- a/src/wayland/meta-wayland-keyboard.c
++++ b/src/wayland/meta-wayland-keyboard.c
+@@ -853,6 +853,10 @@ meta_wayland_keyboard_finalize (GObject *object)
+   G_OBJECT_CLASS (meta_wayland_keyboard_parent_class)->finalize (object);
+ }
+
++#ifdef HAVE_ANLAND
++#include "backends/anland/meta-anland-keyboard.inc"
++#endif
++
+ static void
+ meta_wayland_keyboard_class_init (MetaWaylandKeyboardClass *klass)
+ {

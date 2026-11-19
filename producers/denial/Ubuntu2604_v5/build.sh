@@ -255,7 +255,7 @@ apply_denial_patch() {
 overlay_backend() {
     local destination="$SRC/compositor/src/bin/deniald/anland_backend"
     mkdir -p "$destination"
-    rsync -a --delete "$BACKEND/" "$destination/"
+    rsync -aL --delete "$BACKEND/" "$destination/"
     [[ -f "$destination/mod.rs" ]] || die 'backend overlay copy failed'
     log 'overlaid the shared anland_backend sources'
 }

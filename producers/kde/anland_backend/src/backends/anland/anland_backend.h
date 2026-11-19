@@ -43,6 +43,7 @@ namespace KWin
 
 class AnlandOutput;
 class AnlandInputDevice;
+class AnlandTextInput;
 class AbstractDataSource;
 class DrmDevice;
 class EglDisplay;
@@ -200,6 +201,7 @@ private:
     static void fallbackTrampoline(void *data);
 
     QString m_socketPath;
+    std::unique_ptr<AnlandTextInput> m_textInput;
     /**
      * The shared commit contract, over the legacy fullscreen transport. Owns the
      * device (m_device is borrowed from it). Frame presentation goes through this

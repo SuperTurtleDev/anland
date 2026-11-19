@@ -20,6 +20,7 @@ target_sources(kwin PRIVATE
     anland_input.cpp
     anland_logging.cpp
     anland_output.cpp
+    anland_text_input.cpp
     # KWin-independent PipeWire engines, shared via the top-level
     # libdisplay_producer/ (reusable by other producers; no KWin API deps)
     libdisplay_producer/anland_audio.c
