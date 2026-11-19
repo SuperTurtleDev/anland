@@ -187,7 +187,8 @@ build_pkg_rpm() {
     local artifact_dir="$WORKDIR/$src"
     mkdir -p "$artifact_dir" || die "cannot create artifact directory"
     for rpm_file in "${rpms[@]}"; do
-        rpm -K "$rpm_file" || die "RPM validation failed"
+        # rpmbuild emits unsigned local artifacts. Verify their embedded digests.
+        rpm -K --nosignature "$rpm_file" || die "RPM validation failed"
         cp "$rpm_file" "$topdir/" || die "RPM collection failed"
         cp "$rpm_file" "$artifact_dir/" || die "RPM artifact collection failed"
     done

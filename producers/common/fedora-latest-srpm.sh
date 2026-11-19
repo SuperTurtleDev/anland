@@ -119,7 +119,8 @@ fedora_publish_rpm() {
     local file=$1 destination="$ARTIFACTS_DIR/${1##*/}" architecture
     architecture=$(rpm -qp --qf '%{ARCH}' "$file") || fedora_die 'RPM architecture'
     [[ $architecture == aarch64 || $architecture == noarch ]] || fedora_die "wrong architecture: $file"
-    fedora_run rpm -K "$file"
+    # rpmbuild emits unsigned local artifacts. Verify their embedded digests.
+    fedora_run rpm -K --nosignature "$file"
     fedora_run rpm -qpl "$file" >/dev/null
     [[ ! -e $destination.sig && ! -L $destination.sig ]] || cmp -s "$file" "$destination" || fedora_die "existing signature preserved: $destination.sig"
     fedora_run cp -p -- "$file" "$destination"
