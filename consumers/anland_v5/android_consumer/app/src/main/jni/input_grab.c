@@ -1149,8 +1149,12 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
     /* Contacts, not axes: a gamepad also reports ABS_X/ABS_Y, and its sticks
      * must not be mistaken for a finger. */
     int contacts = mt || (abs_xy && (direct || pointer || touch || finger));
-
-    if (gamepad) {
+    /* Some keyboards also advertise controller buttons. Keep key-only full
+     * keyboards on the grab/forward path; direct controllers never forward
+     * keyboard events. Composite touch/pointer controllers retain passthrough. */
+    if (alpha && !contacts && !rel_xy) {
+        out->cls = IGRAB_CLASS_KEYBOARD;
+    } else if (gamepad) {
         out->cls = IGRAB_CLASS_GAMEPAD;
     } else if (contacts) {
         /* The property bits say it outright when they are set. Panels that set
