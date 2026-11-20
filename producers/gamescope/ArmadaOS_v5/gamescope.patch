@@ -1,29 +1,8 @@
-From 43ba51d012de28759932fca92abc6a118c4c9c5f Mon Sep 17 00:00:00 2001
-From: anland <anland@local>
-Date: Wed, 4 Nov 2026 21:01:15 +0800
-Subject: [PATCH] anland changes
-
----
- layer/VkLayer_FROG_gamescope_wsi.cpp |  33 ++++++++-
- src/Script/Script.cpp                |   3 +-
- src/backend.h                        |   2 +
- src/backends.h                       |   2 +
- src/ime.cpp                          | 188 +++++++++++++++++++++++++++
- src/ime.hpp                          |  13 +++
- src/main.cpp                         |   8 ++-
- src/meson.build                      |   4 +-
- src/rendervulkan.cpp                 |  19 ++++-
- src/steamcompmgr.cpp                 |  47 +++++++++++--
- src/steamcompmgr_shared.hpp          |   2 +
- src/wlserver.cpp                     |  28 ++++++++
- src/xwayland_ctx.hpp                 |   1 +
- 13 files changed, 341 insertions(+), 9 deletions(-)
-
 diff --git a/layer/VkLayer_FROG_gamescope_wsi.cpp b/layer/VkLayer_FROG_gamescope_wsi.cpp
-index 5a226fb..37936ca 100644
+index 367782a..a200619 100644
 --- a/layer/VkLayer_FROG_gamescope_wsi.cpp
 +++ b/layer/VkLayer_FROG_gamescope_wsi.cpp
-@@ -29,6 +29,8 @@
+@@ -26,6 +26,8 @@
  #include <optional>
  
  #include <poll.h>
@@ -32,7 +11,7 @@ index 5a226fb..37936ca 100644
  #include <sys/stat.h>
  // For limiter file.
  #include <time.h>
-@@ -585,6 +587,35 @@ namespace GamescopeWSILayer {
+@@ -479,6 +481,35 @@ namespace GamescopeWSILayer {
      // Cached for comparison.
      std::optional<VkRect2D> cachedWindowRect;
  
@@ -68,7 +47,7 @@ index 5a226fb..37936ca 100644
      bool isWayland() const {
        // Is native Wayland?
        return connection == nullptr;
-@@ -2197,7 +2228,7 @@ namespace GamescopeWSILayer {
+@@ -1719,7 +1750,7 @@ namespace GamescopeWSILayer {
              continue;
            }
  
@@ -123,6 +102,75 @@ index 4e017bf..e64f845 100644
 +    class CAnlandBackend;
      class CWaylandBackend;
  }
+diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
+index f4dcd98..4614bf0 100644
+--- a/src/color_helpers.cpp
++++ b/src/color_helpers.cpp
+@@ -680,6 +680,8 @@ inline T applyShaper( const T & input, EOTF source, EOTF dest, const tonemapping
+ 
+     T flLinear = flGain * calcEOTFToLinear( input, source, tonemapping );
+     flLinear = tonemapping.apply( flLinear );
++    if ( tonemapping.contentGainPeakNits > 0.f )
++        flLinear = glm::clamp( flLinear, T( 0.f ), T( tonemapping.contentGainPeakNits ) );
+ 
+     return calcLinearToEOTF( flLinear, g_bUseSourceEOTFForShaper ? source : dest, tonemapping );
+ }
+@@ -716,6 +718,21 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
+             pShaper->dataB[nVal] = shapedSourceColor.b;
+         }
+ 
++        // A PQ SDR white may stop between two 3D-LUT nodes. Expanding the
++        // shaper to its full domain avoids clamping the inverse at that white
++        // and interpolating it with a lower node. Generate the matched 3D LUT
++        // only after this normalization. Other backends retain their LUTs.
++        if ( tonemapping.bNormalizeShaper )
++        {
++            for ( auto *channel : { &pShaper->dataR, &pShaper->dataG, &pShaper->dataB } )
++            {
++                const float peak = channel->back();
++                if ( peak > 0.f && peak < 1.f )
++                    for ( float &value : *channel )
++                        value /= peak;
++            }
++        }
++
+         pShaper->finalize();
+     }
+ 
+@@ -725,7 +742,10 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
+         glm::mat3 dest_from_xyz = glm::inverse( xyz_from_dest );
+ 
+         glm::mat3 xyz_from_source = normalised_primary_matrix( source.primaries, source.white, 1.f );
+-        glm::mat3 dest_from_source = dest_from_xyz * xyz_from_source; // XYZ scaling for white point adjustment
++        // Fixed PQ passthrough must not add near-black cross-talk from
++        // inverting and multiplying identical primary matrices.
++        glm::mat3 dest_from_source = tonemapping.bNormalizeShaper && source == dest
++            ? glm::mat3( 1.f ) : dest_from_xyz * xyz_from_source;
+ 
+         // Precalc night mode scalars & digital gain
+         // amount and saturation are overdetermined but we separate the two as they conceptually represent
+@@ -804,6 +824,8 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
+ 
+                     // Apply tonemapping
+                     destColorLinear = tonemapping.apply( destColorLinear );
++                    if ( tonemapping.contentGainPeakNits > 0.f )
++                        destColorLinear = glm::clamp( destColorLinear, glm::vec3( 0.f ), glm::vec3( tonemapping.contentGainPeakNits ) );
+ 
+                     // Hue preservation
+                     if ( g_bHuePreservationWhenClipping )
+diff --git a/src/color_helpers.h b/src/color_helpers.h
+index cefa74e..08ab337 100644
+--- a/src/color_helpers.h
++++ b/src/color_helpers.h
+@@ -283,6 +283,8 @@ enum ETonemapOperator
+ struct tonemapping_t
+ {
+ 	bool bUseShaper = true;
++	bool bNormalizeShaper = false; // matched full-range shaper for fixed consumer output
++	float contentGainPeakNits = 0.f; // optional linear-nit ceiling for non-unity HDR gain
+ 	float g22_luminance = 1.f; // what luminance should be applied for g22 EOTF conversions?
+ 	ETonemapOperator eOperator = ETonemapOperator_None;
+ 	eetf_2390_t eetf2390;
 diff --git a/src/ime.cpp b/src/ime.cpp
 index 518ac02..756d846 100644
 --- a/src/ime.cpp
@@ -431,10 +479,10 @@ index eee5a02..2179868 100644
  			gamescope::IBackend::Set<gamescope::CHeadlessBackend>();
  			break;
 diff --git a/src/meson.build b/src/meson.build
-index 498bca6..0ee1052 100644
+index ae3ac16..c291991 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -128,6 +128,8 @@ src = [
+@@ -126,6 +126,8 @@ src = [
    'LibInputHandler.cpp',
  ]
  
@@ -443,7 +491,7 @@ index 498bca6..0ee1052 100644
  luajit_dep = dependency( 'luajit' )
  libinput_dep = dependency('libinput', required: true)
  
-@@ -197,7 +199,7 @@ gamescope_version = configure_file(
+@@ -195,7 +197,7 @@ gamescope_version = configure_file(
      src, reshade_src, gamescope_version,
      include_directories : [reshade_include, sol2_include],
      dependencies: [
@@ -453,10 +501,10 @@ index 498bca6..0ee1052 100644
        xkbcommon, thread_dep, sdl2_dep, wlroots_dep,
        vulkan_dep, liftoff_dep, dep_xtst, dep_xmu, cap_dep, epoll_dep, pipewire_dep, librt_dep,
 diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
-index 8d577e1..082497d 100644
+index 042b79f..daad4c1 100644
 --- a/src/rendervulkan.cpp
 +++ b/src/rendervulkan.cpp
-@@ -483,7 +483,7 @@ bool CVulkanDevice::createDevice()
+@@ -481,7 +481,7 @@ bool CVulkanDevice::createDevice()
  		};
  		vk.GetPhysicalDeviceProperties2( physDev(), &props2 );
  
@@ -465,7 +513,7 @@ index 8d577e1..082497d 100644
  			vk_log.errorf( "physical device has no primary node" );
  			return false;
  		}
-@@ -517,6 +517,23 @@ bool CVulkanDevice::createDevice()
+@@ -515,6 +515,23 @@ bool CVulkanDevice::createDevice()
  #endif
  	}
  
@@ -490,10 +538,52 @@ index 8d577e1..082497d 100644
  		vk_log.infof( "The vulkan driver does not support foreign queues,"
  		              " disabling modifier support.");
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index 409dd6e..3df836b 100644
+index 4a152a0..ff2aff9 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
-@@ -4825,6 +4825,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "backend.h"
++#include "Backends/anland/hdr.hpp"
+ #include "HDRGamma22.h"
+ #include "HDRTonemap.h"
+ #include "gamescope_shared.h"
+@@ -361,6 +362,7 @@ create_color_mgmt_luts(
+ 
+ 			tonemapping_t tonemapping{};
+ 			tonemapping.bUseShaper = true;
++			tonemapping.bNormalizeShaper = gamescope::AnlandOutputHDRMode().value_or( false );
+ 
+ 			EOTF inputEOTF = static_cast<EOTF>( nInputEOTF );
+ 			float flGain = 1.f;
+@@ -456,6 +458,12 @@ create_color_mgmt_luts(
+ 				buildPQColorimetry( &inputColorimetry, &colorMapping, displayColorimetry );
+ 			}
+ 
++			// SDR retains its own LUT and reference white. Do not raise the
++			// fixed consumer peak when boosting PQ/scRGB source content.
++			if ( inputEOTF == EOTF_PQ && newColorMgmt.flHDRInputGain != 1.f &&
++			     gamescope::AnlandOutputHDRMode().value_or( false ) )
++				tonemapping.contentGainPeakNits = ANLAND_HDR_PEAK_NITS;
++
+ 			// Software backlight dim, only ever != 1 on PQ outputs.
+ 			flGain *= newColorMgmt.flBacklightLutGain;
+ 
+@@ -631,6 +639,12 @@ update_color_mgmt()
+ 	if ( !GetBackend()->GetCurrentConnector() )
+ 		return;
+ 
++	// Anland HAL43 is a PQ consumer, even when every client currently uses SDR.
++	if ( gamescope::AnlandOutputHDRMode().value_or( false ) )
++	{
++		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending, gamescope::AnlandOutputSDRWhiteNits(), gamescope::AnlandOutputHDRContentGain() );
++	}
++
+ 	const bool bScaleSDRWhite = gamescope::ShouldScaleGamma22SDRWhite(
+ 		g_bOutputHDREnabled,
+ 		g_bAppWantsHDRCached,
+@@ -4892,6 +4906,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
  			/* Some games (e.g. DOOM Eternal) don't react well to being put back as
  			* iconic, so never do that. Only take them out of iconic. */
  			set_wm_state( ctx, id, ICCCM_NORMAL_STATE );
@@ -501,7 +591,7 @@ index 409dd6e..3df836b 100644
  
  			gpuvis_trace_printf( "determine_and_apply_focus focus %lu", id );
  
-@@ -4912,6 +4913,19 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
+@@ -4979,6 +4994,19 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
  	if ( keyboardFocusWindow && ctx->currentKeyboardFocusWindow && find_win( ctx, ctx->currentKeyboardFocusWindow ) == keyboardFocusWin )
  		keyboardFocusWindow = ctx->currentKeyboardFocusWindow;
  
@@ -521,7 +611,7 @@ index 409dd6e..3df836b 100644
  	if ( ctx->focus.inputFocusWindow != inputFocus ||
  		ctx->focus.inputFocusMode != inputFocus->inputFocusMode ||
  		ctx->currentKeyboardFocusWindow != keyboardFocusWindow )
-@@ -6682,6 +6696,8 @@ handle_wm_change_state(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, XClientMessag
+@@ -6754,6 +6782,8 @@ handle_wm_change_state(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, XClientMessag
  	if (state == ICCCM_ICONIC_STATE) {
  		xwm_log.debugf("Faking WM_CHANGE_STATE to ICONIC for window 0x%lx", w->xwayland().id);
  		set_wm_state( ctx, w->xwayland().id, ICCCM_ICONIC_STATE );
@@ -530,7 +620,7 @@ index 409dd6e..3df836b 100644
  	} else {
  		xwm_log.debugf("Unhandled WM_CHANGE_STATE to %ld for window 0x%lx", state, w->xwayland().id);
  	}
-@@ -7676,6 +7692,19 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+@@ -7790,6 +7820,19 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
  		if ( set_sdr_input_gain( bit_cast<float>(val) ) )
  			hasRepaint = true;
  	}
@@ -550,7 +640,7 @@ index 409dd6e..3df836b 100644
  	if ( ev->atom == ctx->atoms.gamescopeForceWindowsFullscreen )
  	{
  		ctx->force_windows_fullscreen = !!get_prop( ctx, ctx->root, ctx->atoms.gamescopeForceWindowsFullscreen, 0 );
-@@ -7713,9 +7742,17 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+@@ -7827,9 +7870,17 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
  		}
  
  		nightmode_t nightmode;
@@ -568,7 +658,7 @@ index 409dd6e..3df836b 100644
  
  		if ( set_color_nightmode( nightmode ) )
  			hasRepaint = true;
-@@ -9362,6 +9399,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
+@@ -9363,6 +9414,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
  	ctx->atoms.gamescopeHDRTonemapOperator = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_TONEMAP_OPERATOR", false );
  
  	ctx->atoms.gamescopeForceWindowsFullscreen = XInternAtom( ctx->dpy, "GAMESCOPE_FORCE_WINDOWS_FULLSCREEN", false );
@@ -576,7 +666,24 @@ index 409dd6e..3df836b 100644
  
  	ctx->atoms.gamescopeColorLut3DOverride = XInternAtom( ctx->dpy, "GAMESCOPE_COLOR_3DLUT_OVERRIDE", false );
  	ctx->atoms.gamescopeColorShaperLutOverride = XInternAtom( ctx->dpy, "GAMESCOPE_COLOR_SHAPERLUT_OVERRIDE", false );
-@@ -10944,9 +10982,9 @@ steamcompmgr_main(int argc, char **argv)
+@@ -10585,11 +10637,14 @@ steamcompmgr_main(int argc, char **argv)
+ 
+ 		// Capability is advertised to clients regardless of the live "active"
+ 		// state below, so games can request HDR while the panel is idling in SDR.
+-		const bool bOutputHDRCapable = (g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled;
++		// Consumer buffers have a fixed encoding; compositor toggles cannot change it.
++		const auto anlandHDRMode = gamescope::AnlandOutputHDRMode();
++		const bool bOutputHDRCapable = anlandHDRMode.value_or(
++			(g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled );
+ 
+ 		{
+ 			gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
+-			const bool bContentDriven = bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
++			const bool bContentDriven = !anlandHDRMode.has_value() && bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
+ 				( cv_hdr_content_driven ||
+ 				  ( pConn && pConn->GetHDRInfo().bContentDrivenHDR ) );
+ 
+@@ -10929,9 +10984,9 @@ steamcompmgr_main(int argc, char **argv)
  
  			// If we are running behind, allow tearing.
  
@@ -589,7 +696,7 @@ index 409dd6e..3df836b 100644
  			const bool bForceSyncFlip = bForceRepaint || is_fading_out( pPaintFocus );
  
  			// If we are compositing, always force sync flips because we currently wait
-@@ -11063,7 +11101,8 @@ steamcompmgr_main(int argc, char **argv)
+@@ -11034,7 +11089,8 @@ steamcompmgr_main(int argc, char **argv)
  				bShouldPaint = false;
  			}
  
@@ -597,13 +704,13 @@ index 409dd6e..3df836b 100644
 +			// Keep pending damage while the backend is waiting for a writable target.
 +			if ( bShouldPaint && !bBackendPaused )
  			{
- 				paint_all( pPaintFocus, eFlipType == FlipType::Async, bRepeatFrame );
+ 				paint_all( pPaintFocus, eFlipType == FlipType::Async );
  
 diff --git a/src/steamcompmgr_shared.hpp b/src/steamcompmgr_shared.hpp
-index 9951393..3a7529a 100644
+index 3ce6041..c6d7481 100644
 --- a/src/steamcompmgr_shared.hpp
 +++ b/src/steamcompmgr_shared.hpp
-@@ -146,6 +146,8 @@ struct steamcompmgr_win_t {
+@@ -137,6 +137,8 @@ struct steamcompmgr_win_t {
  
  	bool isFullscreen = false;
  	bool isSysTrayIcon = false;
@@ -613,10 +720,10 @@ index 9951393..3a7529a 100644
  	bool skipTaskbar = false; 
  	bool skipPager = false;
 diff --git a/src/wlserver.cpp b/src/wlserver.cpp
-index 731b17e..f40d156 100644
+index 55d5594..5e098c8 100644
 --- a/src/wlserver.cpp
 +++ b/src/wlserver.cpp
-@@ -110,6 +110,8 @@ struct wlserver_content_override {
+@@ -118,6 +118,8 @@ struct wlserver_content_override {
  	uint32_t x11_window;
  	struct wl_listener surface_destroy_listener;
  	struct wl_resource *gamescope_swapchain;
@@ -625,7 +732,7 @@ index 731b17e..f40d156 100644
  };
  
  std::mutex g_wlserver_xdg_shell_windows_lock;
-@@ -233,6 +235,12 @@ void wlserver_xdg_commit( ResListEntry_t entry )
+@@ -223,6 +225,12 @@ void wlserver_xdg_commit( ResListEntry_t entry )
  }
  
  void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
@@ -638,7 +745,7 @@ index 731b17e..f40d156 100644
  	wlr_surface->current.committed = 0;
  
  	wlserver_x11_surface_info *wlserver_x11_surface_info = get_wl_surface_info(wlr_surface)->x11_surface;
-@@ -909,6 +917,20 @@ static void gamescope_swapchain_destroy_co( struct wl_resource *resource );
+@@ -936,6 +944,20 @@ static void gamescope_swapchain_destroy_co( struct wl_resource *resource );
  
  void gamescope_xwayland_server_t::handle_override_window_content( struct wl_client *client, struct wl_resource *gamescope_swapchain_resource, struct wlr_surface *surface, uint32_t x11_window )
  {
@@ -659,7 +766,7 @@ index 731b17e..f40d156 100644
  	x11_window = x11_find_toplevel_for_xid( this->ctx->dpy, x11_window );
  
  	wlserver_x11_surface_info *x11_surface = lookup_x11_surface_info_from_xid( this, x11_window );
-@@ -922,7 +944,11 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
+@@ -949,7 +971,11 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
  
  	if ( content_overrides.count( x11_window ) ) {
  		if ( content_overrides[x11_window]->gamescope_swapchain == gamescope_swapchain_resource )
@@ -671,7 +778,7 @@ index 731b17e..f40d156 100644
  #ifdef GAMESCOPE_SWAPCHAIN_DEBUG
  		wl_log.infof( "handle_override_window_content: (2) DESTROYING x11_window: 0x%x old_swapchain: %p new_swapchain: %p", x11_window, content_overrides[x11_window]->gamescope_swapchain, gamescope_swapchain_resource );
  #endif
-@@ -939,6 +965,8 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
+@@ -966,6 +992,8 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
  	co->surface = surface;
  	co->x11_window = x11_window;
  	co->gamescope_swapchain = gamescope_swapchain_resource;
@@ -681,10 +788,10 @@ index 731b17e..f40d156 100644
  	wl_signal_add( &surface->events.destroy, &co->surface_destroy_listener );
  	content_overrides[ x11_window ] = co;
 diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
-index 4dd8198..2c87887 100644
+index 4ae3d3c..078ab31 100644
 --- a/src/xwayland_ctx.hpp
 +++ b/src/xwayland_ctx.hpp
-@@ -234,6 +234,7 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
+@@ -230,6 +230,7 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
  		Atom gamescopeHDRTonemapOperator;
  
  		Atom gamescopeForceWindowsFullscreen;
@@ -692,143 +799,3 @@ index 4dd8198..2c87887 100644
  
  		Atom gamescopeColorLut3DOverride;
  		Atom gamescopeColorShaperLutOverride;
-
-diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
---- a/src/steamcompmgr.cpp
-+++ b/src/steamcompmgr.cpp
-@@ -30,6 +30,7 @@
-  */
- 
- #include "backend.h"
-+#include "anland_backend/hdr.hpp"
- #include "gamescope_shared.h"
- #include "xwayland_ctx.hpp"
- #include <X11/X.h>
-@@ -358,6 +359,7 @@
- 
- 			tonemapping_t tonemapping{};
- 			tonemapping.bUseShaper = true;
-+			tonemapping.bNormalizeShaper = gamescope::AnlandOutputHDRMode().value_or( false );
- 
- 			EOTF inputEOTF = static_cast<EOTF>( nInputEOTF );
- 			float flGain = 1.f;
-@@ -599,6 +601,12 @@
- {
- 	if ( !GetBackend()->GetCurrentConnector() )
- 		return;
-+
-+	// Anland HAL43 is a PQ consumer, even when every client currently uses SDR.
-+	if ( gamescope::AnlandOutputHDRMode().value_or( false ) )
-+	{
-+		gamescope::AnlandConfigureHDRColorMgmt( g_ColorMgmt.pending, gamescope::AnlandOutputSDRWhiteNits(), gamescope::AnlandOutputHDRContentGain() );
-+	}
- 
- 	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(
- 		g_bOutputHDREnabled,
-@@ -10432,11 +10440,14 @@
- 
- 		// Capability is advertised to clients regardless of the live "active"
- 		// state below, so games can request HDR while the panel is idling in SDR.
--		const bool bOutputHDRCapable = (g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled;
-+		// Consumer buffers have a fixed encoding; compositor toggles cannot change it.
-+		const auto anlandHDRMode = gamescope::AnlandOutputHDRMode();
-+		const bool bOutputHDRCapable = anlandHDRMode.value_or(
-+			(g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled );
- 
- 		{
- 			gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
--			const bool bContentDriven = bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
-+			const bool bContentDriven = !anlandHDRMode.has_value() && bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
- 				( cv_hdr_content_driven ||
- 				  ( pConn && pConn->GetHDRInfo().bContentDrivenHDR ) );
- 
-
-diff --git a/src/color_helpers.h b/src/color_helpers.h
---- a/src/color_helpers.h
-+++ b/src/color_helpers.h
-@@ -283,6 +283,8 @@
- struct tonemapping_t
- {
- 	bool bUseShaper = true;
-+	bool bNormalizeShaper = false; // matched full-range shaper for fixed consumer output
-+	float contentGainPeakNits = 0.f; // optional linear-nit ceiling for non-unity HDR gain
- 	float g22_luminance = 1.f; // what luminance should be applied for g22 EOTF conversions?
- 	ETonemapOperator eOperator = ETonemapOperator_None;
- 	eetf_2390_t eetf2390;
-
-diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
---- a/src/color_helpers.cpp
-+++ b/src/color_helpers.cpp
-@@ -717,6 +717,21 @@
-             pShaper->dataB[nVal] = shapedSourceColor.b;
-         }
- 
-+        // A PQ SDR white may stop between two 3D-LUT nodes. Expanding the
-+        // shaper to its full domain avoids clamping the inverse at that white
-+        // and interpolating it with a lower node. Generate the matched 3D LUT
-+        // only after this normalization. Other backends retain their LUTs.
-+        if ( tonemapping.bNormalizeShaper )
-+        {
-+            for ( auto *channel : { &pShaper->dataR, &pShaper->dataG, &pShaper->dataB } )
-+            {
-+                const float peak = channel->back();
-+                if ( peak > 0.f && peak < 1.f )
-+                    for ( float &value : *channel )
-+                        value /= peak;
-+            }
-+        }
-+
-         pShaper->finalize();
-     }
- 
-@@ -726,7 +741,10 @@
-         glm::mat3 dest_from_xyz = glm::inverse( xyz_from_dest );
- 
-         glm::mat3 xyz_from_source = normalised_primary_matrix( source.primaries, source.white, 1.f );
--        glm::mat3 dest_from_source = dest_from_xyz * xyz_from_source; // XYZ scaling for white point adjustment
-+        // Fixed PQ passthrough must not add near-black cross-talk from
-+        // inverting and multiplying identical primary matrices.
-+        glm::mat3 dest_from_source = tonemapping.bNormalizeShaper && source == dest
-+            ? glm::mat3( 1.f ) : dest_from_xyz * xyz_from_source;
- 
-         // Avoid roundoff when the output encoding is already native.
-         glm::mat3 dest_from_native( 1.f );
-
-diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
---- a/src/steamcompmgr.cpp
-+++ b/src/steamcompmgr.cpp
-@@ -431,6 +431,12 @@
- 				buildPQColorimetry( &inputColorimetry, &colorMapping, displayColorimetry );
- 			}
- 
-+			// SDR retains its own LUT and reference white. Do not raise the
-+			// fixed consumer peak when boosting PQ/scRGB source content.
-+			if ( inputEOTF == EOTF_PQ && newColorMgmt.flHDRInputGain != 1.f &&
-+			     gamescope::AnlandOutputHDRMode().value_or( false ) )
-+				tonemapping.contentGainPeakNits = ANLAND_HDR_PEAK_NITS;
-+
- 			// Software backlight dim, only ever != 1 on PQ outputs.
- 			flGain *= newColorMgmt.flBacklightLutGain;
- 
-
-diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
---- a/src/color_helpers.cpp
-+++ b/src/color_helpers.cpp
-@@ -680,6 +680,8 @@
- 
-     T flLinear = flGain * calcEOTFToLinear( input, source, tonemapping );
-     flLinear = tonemapping.apply( flLinear );
-+    if ( tonemapping.contentGainPeakNits > 0.f )
-+        flLinear = glm::clamp( flLinear, T( 0.f ), T( tonemapping.contentGainPeakNits ) );
- 
-     return calcLinearToEOTF( flLinear, g_bUseSourceEOTFForShaper ? source : dest, tonemapping );
- }
-@@ -813,6 +815,8 @@
- 
-                     // Apply tonemapping
-                     destColorLinear = tonemapping.apply( destColorLinear );
-+                    if ( tonemapping.contentGainPeakNits > 0.f )
-+                        destColorLinear = glm::clamp( destColorLinear, glm::vec3( 0.f ), glm::vec3( tonemapping.contentGainPeakNits ) );
- 
-                     // Hue preservation
-                     if ( g_bHuePreservationWhenClipping )

@@ -8,7 +8,9 @@
 set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 CACHE=${CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-gamescope-armada}
-ARMADA_ROOT=${ARMADA_ROOT:-$HOME/armada}
+# The Armada upstream is ArmadaOS-Freedom/armadaos-freedom since the rename; ~/armada
+# is kept only as a historical clone.
+ARMADA_ROOT=${ARMADA_ROOT:-$HOME/armadaos-freedom}
 JOBS=${JOBS:-4}
 [[ $JOBS =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid JOBS' >&2; exit 1; }
 [[ $(id -u) != 0 && $(uname -m) == aarch64 ]] || { echo 'Requires ordinary aarch64 user' >&2; exit 1; }
@@ -23,7 +25,11 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 export PKG_CONFIG_PATH="$CACHE/sdk/usr/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 pkg-config --exists xwayland libpipewire-0.3 gbm
 SOURCE="$CACHE/source"
-[[ $(git -C "$SOURCE" rev-parse HEAD) == 4246b87f49d6116d5f863131dcc401fc52840644 ]] || { echo 'Unexpected Gamescope revision' >&2; exit 1; }
+# The Gamescope revision follows the Armada upstream base: armadaos-freedom builds
+# its gamescope from terra-gamescope at 3.16.31-ogc1, and its 40-patch series is
+# written against that tag (39/40 apply there, 1/40 on 3.17.0-ogc1). Keep this in
+# step with ARMADA_ROOT: a mismatch means the recipe below needs a real port again.
+[[ $(git -C "$SOURCE" rev-parse HEAD) == afd6eac6e1b5045119831b63854bad68ec4fd92c ]] || { echo 'Unexpected Gamescope revision' >&2; exit 1; }
 assert_clean_tree() {
     local tree=$1
     if ! git -C "$tree" diff --quiet --exit-code ||
@@ -184,9 +190,10 @@ s=(cache/'recipe/terra-gamescope.spec').read_text()
 # for the native rpmbuild used by this offline Armada build.
 s=s.replace('= %{evr}', '= %{?epoch:%{epoch}:}%{version}-%{release}')
 patches=sorted((armada/'packages/gamescope/patches').glob('[0-9][0-9][0-9][0-9]-*.patch'))
-assert len(patches)==31, f'Unexpected Armada patch count: {len(patches)}'
+assert len(patches)==40, f'Unexpected Armada patch count: {len(patches)}'
 # Armada's set is pinned by count on purpose: a different number means the
-# submodule/recipe assumptions in this script changed. Anland's own changes are
+# submodule/recipe assumptions in this script changed. 40 at armadaos-freedom
+# be6fc783, whose series is written against gamescope 3.16.31-ogc1. Anland's own changes are
 # not declared as Patch entries at all; they live inside %{SOURCE1000} and are
 # applied by %prep after %autopatch, so this file needs no edit to carry them.
 pos=s.index('BuildRequires:')
