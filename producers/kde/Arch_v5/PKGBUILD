@@ -32,7 +32,7 @@ source=('kwin::git+https://invent.kde.org/plasma/kwin.git#branch=Plasma/6.8'
 noextract=('anland-overlay.tar')
 # build.sh replaces the generated overlay checksum in its staged recipe.
 sha256sums=('SKIP'
-            '2e654793357d00c5ec154de97b1b74584b5951742c5fe44a9a77ae4d38ab8f59'
+            '7790e678fdeed1eee8ef45f1f5c985ceb3495ea82854ad09273f189decbfc541'
             'SKIP')
 
 pkgver() {

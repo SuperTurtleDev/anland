@@ -45,7 +45,6 @@ public:
     bool isLidSwitch() const override;
 
     // Event injection helpers (called by AnlandBackend from the data-fd reader).
-    void pointerMotionAbsolute(const QPointF &position);
     void pointerMotion(const QPointF &position, const QPointF &delta, const QPointF &deltaNonAccelerated);
     void pointerButton(quint32 button, bool pressed);
     void pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120);

@@ -40,6 +40,7 @@
 
 #include <xf86drm.h>
 
+#include <cmath>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -618,6 +619,13 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
 
     switch (ev.type) {
     case ANLAND_DEVICE_IN_PTR_MOTION: {
+        if (m_outputs.isEmpty()) {
+            break;
+        }
+        if (!std::isfinite(ev.pointer_motion.x) || !std::isfinite(ev.pointer_motion.y)
+            || !std::isfinite(ev.pointer_motion.dx) || !std::isfinite(ev.pointer_motion.dy)) {
+            break;
+        }
         const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
         const QPointF delta = mapInputDeltaToLogical(QPointF(ev.pointer_motion.dx, ev.pointer_motion.dy));
         m_inputDevice->pointerMotion(pos, delta, delta);

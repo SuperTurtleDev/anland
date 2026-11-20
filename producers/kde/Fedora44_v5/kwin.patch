@@ -144,3 +144,23 @@ diff --git a/src/scene/itemrenderer_opengl.cpp b/src/scene/itemrenderer_opengl.c
              shader->setColorspaceUniforms(renderNode.colorDescription, renderTarget.colorDescription(), renderNode.renderingIntent);
 +            anlandApplyHdrContentGain(shader, renderNode.colorDescription, renderTarget.colorDescription(), renderNode.renderingIntent);
          }
+diff --git a/src/pointer_input.h b/src/pointer_input.h
+--- a/src/pointer_input.h
++++ b/src/pointer_input.h
+@@ -86,4 +86,16 @@
+     void processMotionAbsolute(const QPointF &pos, std::chrono::microseconds time, InputDevice *device = nullptr);
++    /**
++     * @internal
++     * Dispatch one motion with an absolute position and a client-visible delta.
++     */
++    void processMotionAbsoluteWithDelta(const QPointF &pos,
++                                        const QPointF &delta,
++                                        const QPointF &deltaNonAccelerated,
++                                        std::chrono::microseconds time,
++                                        InputDevice *device)
++    {
++        processMotionInternal(pos, delta, deltaNonAccelerated, time, device, MotionType::Motion);
++    }
+     /**
+      * @internal
+      */

@@ -6,6 +6,8 @@
 */
 #include "anland_input.h"
 #include "anland_backend.h"
+#include "input.h"
+#include "pointer_input.h"
 
 #include <chrono>
 #include <linux/input.h>
@@ -133,17 +135,18 @@ bool AnlandInputDevice::isLidSwitch() const
 // backend does). Without it scroll is dropped entirely; cursor motion and focus
 // still appear to work only because PointerInputRedirection handles those
 // compositor-side, independent of client delivery.
-void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
-{
-    Q_EMIT InputDevice::pointerMotionAbsolute(position, now(), this);
-    Q_EMIT InputDevice::pointerFrame(this);
-}
-
 void AnlandInputDevice::pointerMotion(const QPointF &position, const QPointF &delta, const QPointF &deltaNonAccelerated)
 {
-    Q_EMIT InputDevice::pointerMotionAbsolute(position, now(), this);
-    Q_EMIT InputDevice::pointerMotion(delta, deltaNonAccelerated, now(), this);
-    Q_EMIT InputDevice::pointerFrame(this);
+    if (auto *redirection = input()) {
+        if (auto *pointer = redirection->pointer()) {
+            pointer->processMotionAbsoluteWithDelta(position,
+                                                    delta,
+                                                    deltaNonAccelerated,
+                                                    now(),
+                                                    this);
+            Q_EMIT InputDevice::pointerFrame(this);
+        }
+    }
 }
 
 void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
