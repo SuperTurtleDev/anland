@@ -175,9 +175,14 @@ public final class SystemIME {
         return -1;
     }
 
-    // Map the few Android key codes a soft keyboard delivers as key events to the
-    // evdev keycodes KWin expects. Returns 0 for keys we don't forward.
+    // Map the Android key codes we forward directly to evdev. Returns 0 for
+    // keys left to Android's normal dispatch.
     private static int toEvdevKey(int keyCode) {
+        // InputMethodService.sendKeyChar sends digits as key events. Forward
+        // them here before the focused hidden EditText can consume them.
+        if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9) {
+            return KeyCodeMapper.getScanCode(keyCode);
+        }
         switch (keyCode) {
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER: return EVDEV_ENTER;
