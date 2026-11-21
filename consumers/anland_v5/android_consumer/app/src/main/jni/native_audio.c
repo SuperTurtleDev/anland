@@ -68,6 +68,7 @@ struct audio_bridge {
 
     /* Actual device-chosen formats, read back after the streams open. */
     int play_rate, play_channels;
+    int cap_rate, cap_channels;
 
     /* Latency presets in ms (0 = engine default), set from the settings UI. */
     volatile int play_latency_ms;
@@ -754,6 +755,8 @@ static void *cap_thread_func(void *arg)
                 retry_at = now_ms() + MIC_RETRY_MS;
                 continue;
             }
+            b->cap_rate = rate;
+            b->cap_channels = channels;
             format_sent = false;
         }
 
@@ -817,6 +820,11 @@ audio_bridge *audio_create(void)
     atomic_init(&b->running, false);
     atomic_init(&b->mic_enabled, false);
     atomic_init(&b->cap_latency_ms, 0);
+    b->shm_fd = -1;
+    b->play_rate = 48000;
+    b->play_channels = WANT_PLAY_CHANNELS;
+    b->cap_rate = 48000;
+    b->cap_channels = WANT_CAP_CHANNELS;
     pthread_mutex_init(&b->play_lock, NULL);
     return b;
 }
@@ -840,6 +848,8 @@ void audio_start(audio_bridge *b)
      * arrive into a hot Android mixer instead of waking a cold one-shot stream. */
     b->play_rate = 48000;
     b->play_channels = WANT_PLAY_CHANNELS;
+    b->cap_rate = 48000;
+    b->cap_channels = WANT_CAP_CHANNELS;
     b->resend_formats = true;
     b->play_error = false;
     open_play_stream(b, true);
