@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "anland_audio.h"
 #include "protocol.h"
+#include "socket_utils.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -9,9 +10,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+static inline int anland_audio_memfd_create(const char *name, unsigned int flags)
+{
+#if defined(__NR_memfd_create)
+    return (int)syscall(__NR_memfd_create, name, flags);
+#else
+    return -1;
+#endif
+}
 
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -53,6 +69,12 @@ struct anland_audio {
 
     int                    audio_fd;  /* owned duplicate; -1 when detached */
     struct spa_source     *io;        /* loop io source watching audio_fd for reads */
+
+    /* Shared memory zero-copy audio playback transport */
+    int                    shm_fd;
+    struct anland_shm_audio_header *shm_ring;
+    size_t                 shm_total_size;
+    bool                   shm_enabled;
 
     /* Mic ring buffer. Only ever touched from the loop thread (the io read callback
      * fills it, the source process callback drains it), so it needs no lock. */
@@ -110,6 +132,72 @@ static size_t ring_read(struct anland_audio *a, uint8_t *p, size_t n)
     return got;
 }
 
+/* Tear down shared memory playback transport if active. */
+static void teardown_shm_audio_locked(struct anland_audio *a)
+{
+    if (a->shm_ring) {
+        munmap(a->shm_ring, a->shm_total_size);
+        a->shm_ring = NULL;
+    }
+    if (a->shm_fd >= 0) {
+        close(a->shm_fd);
+        a->shm_fd = -1;
+    }
+    a->shm_total_size = 0;
+    a->shm_enabled = false;
+}
+
+/* Allocate and negotiate zero-copy shared memory playback ring buffer. */
+static int setup_shm_audio_locked(struct anland_audio *a)
+{
+    if (a->shm_enabled || a->audio_fd < 0)
+        return 0;
+
+    int fd = anland_audio_memfd_create("anland_audio_shm", MFD_CLOEXEC);
+    if (fd < 0)
+        return -1;
+
+    size_t ring_size = ANLAND_SHM_AUDIO_DEFAULT_SIZE;
+    size_t total_size = sizeof(struct anland_shm_audio_header) + ring_size;
+    if (ftruncate(fd, (off_t)total_size) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    struct anland_shm_audio_header *ring = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (ring == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+
+    memset(ring, 0, total_size);
+    ring->magic = ANLAND_SHM_AUDIO_MAGIC;
+    ring->version = ANLAND_SHM_AUDIO_VERSION;
+    ring->buffer_size = (uint32_t)ring_size;
+    ring->rate = a->play_rate;
+    ring->channels = a->play_channels;
+    ring->format = AUDIO_FORMAT_S16LE;
+    __atomic_store_n(&ring->write_head, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ring->read_tail, 0, __ATOMIC_RELEASE);
+
+    struct audio_msg msg = {
+        .type = AUDIO_MSG_SHM_FD,
+        .size = sizeof(struct anland_shm_audio_header),
+    };
+
+    if (send_fds(a->audio_fd, &msg, sizeof(msg), &fd, 1) < 0) {
+        munmap(ring, total_size);
+        close(fd);
+        return -1;
+    }
+
+    a->shm_fd = fd;
+    a->shm_ring = ring;
+    a->shm_total_size = total_size;
+    a->shm_enabled = true;
+    return 0;
+}
+
 /* The caller holds the thread-loop lock, or is executing on that loop. The io
  * source owns audio_fd, so destroying it also closes the duplicated descriptor. */
 static void detach_audio_fd_locked(struct anland_audio *a)
@@ -118,6 +206,7 @@ static void detach_audio_fd_locked(struct anland_audio *a)
     a->io = NULL;
     a->audio_fd = -1;
     ring_reset(a);
+    teardown_shm_audio_locked(a);
     if (io)
         pw_loop_destroy_source(pw_thread_loop_get_loop(a->loop), io);
 }
@@ -135,15 +224,38 @@ static void on_capture_process(void *data)
 
     struct spa_data *d = &b->buffer->datas[0];
     if (d->data && d->chunk->size > 0 && a->audio_fd >= 0) {
-        struct audio_msg h = { .type = AUDIO_MSG_PCM, .size = d->chunk->size };
-        struct iovec iov[2] = {
-            { .iov_base = &h, .iov_len = sizeof(h) },
-            { .iov_base = (uint8_t *)d->data + d->chunk->offset, .iov_len = d->chunk->size },
-        };
-        struct msghdr m = { .msg_iov = iov, .msg_iovlen = 2 };
-        /* Non-blocking: the loop thread must never stall on a slow/dead consumer.
-         * One SEQPACKET datagram per period; drop on EAGAIN. */
-        sendmsg(a->audio_fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL);
+        uint8_t *pcm_data = (uint8_t *)d->data + d->chunk->offset;
+        uint32_t pcm_size = (uint32_t)d->chunk->size;
+
+        if (a->shm_enabled && a->shm_ring) {
+            /* Zero-copy SPSC shared-memory fast path */
+            struct anland_shm_audio_header *ring = a->shm_ring;
+            uint32_t cap = ring->buffer_size;
+            uint32_t head = __atomic_load_n(&ring->write_head, __ATOMIC_RELAXED);
+            uint32_t tail = __atomic_load_n(&ring->read_tail, __ATOMIC_ACQUIRE);
+            uint32_t used = (head >= tail) ? (head - tail) : (cap - (tail - head));
+            uint32_t space = cap - 1 - used;
+
+            if (space >= pcm_size) {
+                uint32_t first = cap - head;
+                if (first > pcm_size) first = pcm_size;
+                memcpy(ring->data + head, pcm_data, first);
+                memcpy(ring->data, pcm_data + first, pcm_size - first);
+                uint32_t new_head = (head + pcm_size) % cap;
+                __atomic_store_n(&ring->write_head, new_head, __ATOMIC_RELEASE);
+            }
+        } else {
+            /* Fallback socket datagram path */
+            struct audio_msg h = { .type = AUDIO_MSG_PCM, .size = pcm_size };
+            struct iovec iov[2] = {
+                { .iov_base = &h, .iov_len = sizeof(h) },
+                { .iov_base = pcm_data, .iov_len = pcm_size },
+            };
+            struct msghdr m = { .msg_iov = iov, .msg_iovlen = 2 };
+            /* Non-blocking: the loop thread must never stall on a slow/dead consumer.
+             * One SEQPACKET datagram per period; drop on EAGAIN. */
+            sendmsg(a->audio_fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL);
+        }
     }
     pw_stream_queue_buffer(a->capture, b);
 }
@@ -232,6 +344,23 @@ static void apply_format(struct anland_audio *a, const struct audio_format *f)
         return;   /* build_pw() will pick up the new values when it (re)creates the stream */
 
     if (format_changed) {
+        if (!playback) {
+            /* Dynamically resize mic capture ring to eliminate static memory waste (e.g. mono speech) */
+            size_t new_size = (size_t)rate * (size_t)channels * sizeof(int16_t);
+            if (new_size < 32768) new_size = 32768;
+            if (new_size != a->ring_size) {
+                uint8_t *new_buf = realloc(a->ring, new_size);
+                if (new_buf) {
+                    a->ring = new_buf;
+                    a->ring_size = new_size;
+                    ring_reset(a);
+                }
+            }
+        } else if (a->shm_enabled && a->shm_ring) {
+            a->shm_ring->rate = rate;
+            a->shm_ring->channels = channels;
+        }
+
         /* Renegotiate the port format on the LIVE stream. update_params keeps the node
          * object alive (same id) and re-runs format negotiation, so the default sink/
          * source reference is never lost -- no churn, no plasma-pa "No object" spam. */
@@ -284,6 +413,11 @@ static void on_audio_readable(void *data, int fd, uint32_t mask)
                 memcpy(&f, a->rx + sizeof(struct audio_msg), sizeof(f));
                 apply_format(a, &f);
             }
+            continue;
+        }
+        if (h.type == AUDIO_MSG_SHM) {
+            /* Consumer requested zero-copy shared-memory transport */
+            setup_shm_audio_locked(a);
             continue;
         }
         if (h.type != AUDIO_MSG_PCM)

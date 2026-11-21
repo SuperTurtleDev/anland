@@ -11,7 +11,21 @@
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+static inline int anland_memfd_create(const char *name, unsigned int flags)
+{
+#if defined(__NR_memfd_create)
+    return (int)syscall(__NR_memfd_create, name, flags);
+#else
+    return -1;
+#endif
+}
 
 struct display_ctx {
     int      ctrl_fd;
@@ -137,7 +151,7 @@ void free_resources(struct display_ctx *ctx){//释放资源，保留服务信息
 }
 static int create_shm(display_ctx *ctx)
 {
-    ctx->shm_fd = memfd_create("buf_select", MFD_CLOEXEC);
+    ctx->shm_fd = anland_memfd_create("buf_select", MFD_CLOEXEC);
     if (ctx->shm_fd < 0)
         return -1;
     if (ftruncate(ctx->shm_fd, sizeof(uint32_t)) < 0) {

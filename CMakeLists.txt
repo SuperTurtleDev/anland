@@ -22,6 +22,11 @@ set_target_properties(socket_utils PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(socket_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
 if(ANDROID)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__")
+endif()
+
+
+if(ANDROID)
     add_library(display_daemon_lib STATIC libdisplay_daemon/display_daemon.c)
     target_link_libraries(display_daemon_lib socket_utils)
 
@@ -43,3 +48,6 @@ else()
     target_link_libraries(display_consumer socket_utils pthread)
 
 endif()
+
+add_executable(anland_audio_headless consumers/headless_audio/anland_audio_headless.c)
+target_link_libraries(anland_audio_headless socket_utils pthread)
