@@ -34,6 +34,11 @@
 #include <X11/extensions/XTest.h>
 
 extern int g_nPreferredOutputWidth;
+// The DRM backend nudges mangoapp from its vblank handler and the nested
+// backends from the present-wait thread. Anland has neither, so a legacy
+// mangoapp (Steam performance overlay, msg type 1) would never repaint and
+// its overlay window keeps showing whatever the swapchain was created with.
+extern void mangoapp_output_update( uint64_t vblanktime );
 extern int g_nPreferredOutputHeight;
 
 // ArmadaOS: display_sleep is implemented upstream only for the DRM backend,
@@ -631,8 +636,19 @@ namespace gamescope
                             fprintf(stderr, "Anland: first commit completed, commit=%llu, event=%d\n",
                                     (unsigned long long)event.commit_id, (int)event.type);
                         s_pending = 0;
-                        if (event.type == ANLAND_SCENE_EVENT_COMMIT_DROPPED)
+                        if (event.type == ANLAND_SCENE_EVENT_COMMIT_DROPPED) {
                             force_repaint();
+                        } else {
+                            // Presented: this is the anland vblank. Legacy
+                            // readers (msg type 1) only repaint on a visible
+                            // frametime, which no other anland path publishes.
+                            static bool s_bNudgeLogged = false;
+                            if (!s_bNudgeLogged) {
+                                s_bNudgeLogged = true;
+                                fprintf(stderr, "Anland: nudging mangoapp on presented commits\n");
+                            }
+                            mangoapp_output_update(get_time_in_nanos());
+                        }
                     }
                 }
                 if (event.type == ANLAND_SCENE_EVENT_BUFFER_RELEASED &&
